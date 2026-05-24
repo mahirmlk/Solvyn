@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: solvyn-api
+  namespace: solvyn
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: solvyn-api
+  template:
+    metadata:
+      labels:
+        app: solvyn-api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8000"
+    spec:
+      containers:
+        - name: api
+          image: solvyn/api:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: solvyn-config
+            - secretRef:
+                name: solvyn-secrets
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: solvyn-db
+  namespace: solvyn
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: solvyn-db
+  template:
+    metadata:
+      labels:
+        app: solvyn-db
+    spec:
+      containers:
+        - name: postgres
+          image: pgvector/pgvector:pg16
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: "solvyn"
+            - name: POSTGRES_DB
+              value: "solvyn"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: solvyn-secrets
+                  key: POSTGRES_PASSWORD
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+      volumes:
+        - name: pgdata
+          persistentVolumeClaim:
+            claimName: solvyn-db-pvc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: solvyn-redis
+  namespace: solvyn
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: solvyn-redis
+  template:
+    metadata:
+      labels:
+        app: solvyn-redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
