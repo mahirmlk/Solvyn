@@ -1,0 +1,72 @@
+groups:
+  - name: solvyn
+    rules:
+      - alert: SolvynHighErrorRate
+        expr: |
+          (rate(solvyn_http_requests_total{status=~"5.."}[5m]) / rate(solvyn_http_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Solvyn API error rate > 5%"
+          description: "Error rate is {{ $value | humanizePercentage }} over the last 5 minutes."
+
+      - alert: SolvynHighLLMFailures
+        expr: |
+          rate(solvyn_llm_calls_total{status="error"}[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LLM calls are failing"
+          description: "LLM provider errors detected in the last 2 minutes."
+
+      - alert: SolvynAgentExecutionFailure
+        expr: |
+          rate(solvyn_agent_executions_total{status="failed"}[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent execution failures"
+          description: "Agents are failing at rate {{ $value }} per second."
+
+      - alert: SolvynHighTokenUsage
+        expr: |
+          rate(solvyn_token_usage_total[5m]) > 100000
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "High token consumption"
+          description: "Token usage is {{ $value | humanize }} tokens per second."
+
+      - alert: SolvynNoActiveAgents
+        expr: |
+          solvyn_active_agents == 0
+        for: 10m
+        labels:
+          severity: info
+        annotations:
+          summary: "No active agents"
+          description: "No agents have been active for 10 minutes."
+
+      - alert: SolvynWorkflowFailures
+        expr: |
+          rate(solvyn_workflow_runs_total{status="failed"}[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Workflow execution failures"
+          description: "Workflows are failing. Investigate recent runs."
+
+      - alert: SolvynMemoryOperationsSlow
+        expr: |
+          histogram_quantile(0.95, rate(solvyn_memory_operation_duration_seconds_bucket[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Memory operations are slow (p95 > 1s)"
+          description: "P95 memory operation latency is {{ $value | humanizeDuration }}."
