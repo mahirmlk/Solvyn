@@ -1,0 +1,170 @@
+{
+  "title": "Solvyn Overview",
+  "uid": "solvyn-overview",
+  "tags": ["solvyn", "ai"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "panels": [
+    {
+      "title": "HTTP Requests",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "showPoints": "never" }
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(solvyn_http_requests_total[5m])",
+          "legendFormat": "{{method}} {{path}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 }
+    },
+    {
+      "title": "HTTP Error Rate",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": { "showPoints": "never" }
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(solvyn_http_requests_total{status=~\"5..\"}[5m]) / rate(solvyn_http_requests_total[5m])",
+          "legendFormat": "error rate"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 }
+    },
+    {
+      "title": "LLM Calls",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "custom": { "showPoints": "never" }
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(solvyn_llm_calls_total[5m])",
+          "legendFormat": "{{provider}} {{status}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 }
+    },
+    {
+      "title": "Active Agents",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "solvyn_active_agents"
+        }
+      ],
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 8 }
+    },
+    {
+      "title": "Agent Executions",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "custom": { "showPoints": "never" }
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(solvyn_agent_executions_total[5m])",
+          "legendFormat": "{{agent_type}} {{status}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 8, "x": 4, "y": 8 }
+    },
+    {
+      "title": "Workflow Runs",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "custom": { "showPoints": "never" }
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(solvyn_workflow_runs_total[5m])",
+          "legendFormat": "{{workflow}} {{status}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 8, "x": 12, "y": 8 }
+    },
+    {
+      "title": "Token Usage",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": { "showPoints": "never" }
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(solvyn_token_usage_total[5m])",
+          "legendFormat": "tokens/s"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 8, "x": 20, "y": 8 }
+    },
+    {
+      "title": "Memory Operations",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "custom": { "showPoints": "never" }
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(solvyn_memory_operations_total[5m])",
+          "legendFormat": "{{operation}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 }
+    },
+    {
+      "title": "Request Duration (p95)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "showPoints": "never" }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(solvyn_http_request_duration_seconds_bucket[5m]))",
+          "legendFormat": "p95"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 16 }
+    }
+  ]
+}
