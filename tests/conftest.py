@@ -1,0 +1,122 @@
+from collections.abc import AsyncGenerator, Generator
+from typing import Any
+from unittest.mock import AsyncMock, patch
+
+import pytest
+import pytest_asyncio
+from asgi_lifespan import LifespanManager
+from httpx import ASGITransport, AsyncClient
+
+from solvyn.agents.schema import AgentCapability, AgentMessage, AgentMetadata, Checkpoint
+from solvyn.config import Settings
+from solvyn.multi_tenant.middleware import tenant_context
+
+
+@pytest.fixture(autouse=True)
+def test_settings() -> Generator[Settings, None, None]:
+    with patch("solvyn.config.settings") as mock:
+        mock.database_url = "sqlite+aiosqlite:///:memory:"
+        mock.redis_url = "redis://localhost:6379/0"
+        mock.openrouter_api_key = "sk-test"
+        mock.groq_api_key = "gsk-test"
+        mock.deepseek_api_key = "sk-ds-test"
+        mock.llm_default_provider = "openrouter"
+        mock.llm_default_model = "openai/gpt-4o"
+        mock.default_tenant_id = "test-tenant"
+        mock.host = "0.0.0.0"
+        mock.port = 8000
+        mock.log_level = "DEBUG"
+        mock.json_logging = False
+        mock.api_key_secret = "change-me-to-a-random-secret"
+        yield mock
+
+
+@pytest.fixture
+def tenant_ctx() -> Generator[None, None, None]:
+    import uuid
+    tenant_context.set(uuid.uuid4(), "test-tenant")
+    yield
+    tenant_context.clear()
+
+
+@pytest.fixture
+def app() -> Any:
+    from solvyn.main import create_app
+    return create_app()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def mock_redis_connection() -> AsyncGenerator[None, None]:
+    from solvyn.message_bus.redis import message_bus
+    message_bus.redis = AsyncMock()
+    message_bus.pubsub = AsyncMock()
+    yield
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def mock_db_session() -> AsyncGenerator[None, None]:
+    from solvyn.db.session import async_session_factory
+    mock_session = AsyncMock()
+    mock_session.__aenter__.return_value = mock_session
+    mock_session.__aexit__.return_value = None
+    mock_session.execute.return_value = AsyncMock()
+    mock_session.execute.return_value.scalar_one_or_none.return_value = None
+    with patch.object(async_session_factory, "__call__", return_value=mock_session):
+        yield
+
+
+@pytest_asyncio.fixture
+async def client(app: Any) -> AsyncGenerator[AsyncClient, None]:
+    transport = ASGITransport(app=app)
+    async with LifespanManager(app):
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            yield ac
+
+
+@pytest.fixture
+def sample_agent_metadata() -> AgentMetadata:
+    return AgentMetadata(
+        agent_type="test-agent",
+        name="Test Agent",
+        description="A test agent",
+        capabilities=[AgentCapability.CODE_GENERATION, AgentCapability.CODE_REVIEW],
+        version="1.0.0",
+    )
+
+
+@pytest.fixture
+def sample_checkpoint() -> Checkpoint:
+    return Checkpoint(
+        id="cp-1",
+        session_id="session-1",
+        agent_type="test-agent",
+        state={"step": "done", "result": "ok"},
+        status="completed",
+    )
+
+
+@pytest.fixture
+def sample_message() -> AgentMessage:
+    return AgentMessage(
+        id="msg-1",
+        from_agent="agent-a",
+        to_agent="agent-b",
+        session_id="s1",
+        tenant_id="t1",
+        type="request",
+        content={"text": "Hello"},
+    )
+
+
+@pytest.fixture
+def mock_llm_provider() -> Generator[None, None, None]:
+    from solvyn.llm.router import llm_router
+    mock_provider = AsyncMock()
+    mock_provider.generate.return_value = {
+        "content": "Mock response",
+        "model": "test-model",
+        "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+    }
+    llm_router.providers["test"] = mock_provider
+    yield
+    llm_router.providers.pop("test", None)
