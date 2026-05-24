@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: solvyn-config
+  namespace: solvyn
+data:
+  DATABASE_URL: "postgresql+asyncpg://solvyn:$(POSTGRES_PASSWORD)@solvyn-db:5432/solvyn"
+  REDIS_URL: "redis://solvyn-redis:6379/0"
+  LLM_DEFAULT_PROVIDER: "openrouter"
+  LLM_DEFAULT_MODEL: "openai/gpt-4o"
+  LOG_LEVEL: "INFO"
+  HOST: "0.0.0.0"
+  PORT: "8000"
