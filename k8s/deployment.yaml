@@ -19,8 +19,8 @@ spec:
     spec:
       containers:
         - name: api
-          image: solvyn/api:latest
-          imagePullPolicy: Always
+          image: solvyn/api:stable
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
           envFrom:

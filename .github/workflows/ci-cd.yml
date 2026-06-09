@@ -56,6 +56,9 @@ jobs:
         env:
           DATABASE_URL: postgresql+asyncpg://solvyn:solvyn@localhost:5432/solvyn
           REDIS_URL: redis://localhost:6379/0
+          API_KEY_SECRET: test-secret-key-for-ci-only
+      - name: Check for dependency vulnerabilities
+        run: pip install pip-audit && pip-audit
 
   build:
     runs-on: ubuntu-latest
@@ -89,6 +92,11 @@ jobs:
     environment: staging
     steps:
       - uses: actions/checkout@v4
+      - name: Run database migrations
+        run: |
+          kubectl delete job solvyn-migrate -n solvyn --ignore-not-found
+          kubectl apply -f k8s/migration-job.yaml
+          kubectl wait --for=condition=complete job/solvyn-migrate -n solvyn --timeout=120s
       - name: Deploy to staging
         run: |
           kubectl set image deployment/solvyn-api api=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} -n solvyn
@@ -102,8 +110,14 @@ jobs:
     if: github.ref == 'refs/heads/main'
     environment: production
     steps:
+      - uses: actions/checkout@v4
       - name: Manual approval gate
         run: echo "Deploying to production..."
+      - name: Run database migrations
+        run: |
+          kubectl delete job solvyn-migrate -n solvyn-prod --ignore-not-found
+          kubectl apply -f k8s/migration-job.yaml -n solvyn-prod
+          kubectl wait --for=condition=complete job/solvyn-migrate -n solvyn-prod --timeout=120s
       - name: Deploy to production
         run: |
           kubectl set image deployment/solvyn-api api=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} -n solvyn-prod
