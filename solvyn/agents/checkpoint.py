@@ -52,11 +52,9 @@ class CheckpointManager:
 
     async def list_for_session(self, session_id: str) -> list[dict[str, Any]]:
         async with async_session_factory() as db:
-            query = select(MemoryModel)
+            query = select(MemoryModel).where(MemoryModel.key.like(f"{self.CHECKPOINT_PREFIX}%"))
             if session_id:
                 query = query.where(MemoryModel.session_id == uuid.UUID(session_id))
-            else:
-                query = query.where(MemoryModel.key.like(f"{self.CHECKPOINT_PREFIX}%"))
             result = await db.execute(query.order_by(MemoryModel.created_at.desc()))
             records = result.scalars().all()
             return [

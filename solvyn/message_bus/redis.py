@@ -25,8 +25,10 @@ class RedisMessageBus:
     async def disconnect(self) -> None:
         if self.redis:
             await self.redis.aclose()
+            self.redis = None
         if self.pubsub:
-            await self.pubsub.aclose()  # type: ignore[no-untyped-call]
+            await self.pubsub.aclose()
+            self.pubsub = None
         logger.info("Disconnected from Redis")
 
     async def _ensure_connected(self) -> None:
@@ -42,10 +44,10 @@ class RedisMessageBus:
             "timestamp": datetime.now(UTC).isoformat(),
             **message,
         }
-        await self.redis.publish(channel, json.dumps(payload))  # type: ignore[union-attr]
+        await self.redis.publish(channel, json.dumps(payload))
         # Redis XADD requires all values to be strings; serialize nested dicts/lists to JSON
         flat_payload = {k: v if isinstance(v, str) else json.dumps(v) for k, v in payload.items()}
-        await self.redis.xadd(f"stream:{channel}", flat_payload)  # type: ignore[union-attr,arg-type]
+        await self.redis.xadd(f"stream:{channel}", flat_payload)
         logger.debug(f"Published to {channel}: {msg_id}")
         return msg_id
 
@@ -74,7 +76,8 @@ class RedisMessageBus:
     async def add_to_dead_letter(self, channel: str, message: dict[str, Any], error: str) -> None:
         await self._ensure_connected()
         payload = {"original_channel": channel, "error": error, **message}
-        await self.redis.xadd("dead_letter", payload)  # type: ignore[union-attr,arg-type]
+        flat_payload = {k: v if isinstance(v, str) else json.dumps(v) for k, v in payload.items()}
+        await self.redis.xadd("dead_letter", flat_payload)
         logger.warning(f"Message sent to dead letter: {message.get('id', 'unknown')}")
 
 
