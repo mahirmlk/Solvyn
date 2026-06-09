@@ -48,7 +48,7 @@ class OpenRouterProvider(LLMProvider):
         cost = (prompt_tokens * prompt_cost + completion_tokens * completion_cost) / 1_000_000
 
         return LLMResponse(
-            content=data["choices"][0]["message"]["content"],
+            content=data.get("choices", [{}])[0].get("message", {}).get("content", ""),
             provider="openrouter",
             model=model,
             prompt_tokens=prompt_tokens,
