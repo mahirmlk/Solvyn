@@ -1,5 +1,6 @@
 import json
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import WebSocket
@@ -71,7 +72,7 @@ class WebSocketManager:
                 "agent_type": agent_type,
                 "status": status,
                 "error": error,
-                "timestamp": __import__("datetime").datetime.now().isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             },
             tenant_id=tenant_id,
             session_id=session_id,
@@ -93,7 +94,7 @@ class WebSocketManager:
                 "to_agent": to_agent,
                 "message_type": message_type,
                 "content_preview": str(content)[:200],
-                "timestamp": __import__("datetime").datetime.now().isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             },
             tenant_id=tenant_id,
             session_id=session_id,
@@ -113,7 +114,7 @@ class WebSocketManager:
                 "workflow_name": workflow_name,
                 "step": step,
                 "status": status,
-                "timestamp": __import__("datetime").datetime.now().isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             },
             tenant_id=tenant_id,
             session_id=session_id,

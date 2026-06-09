@@ -27,7 +27,7 @@ async def deep_health_check() -> dict[str, Any]:
         checks["database"] = {"status": "ok"}
     except Exception as e:
         logger.error(f"Database health check failed: {e}")
-        checks["database"] = {"status": "error", "detail": str(e)}
+        checks["database"] = {"status": "error", "detail": "Database connection failed"}
 
     # Redis check
     try:
@@ -38,7 +38,7 @@ async def deep_health_check() -> dict[str, Any]:
             checks["redis"] = {"status": "disconnected"}
     except Exception as e:
         logger.error(f"Redis health check failed: {e}")
-        checks["redis"] = {"status": "error", "detail": str(e)}
+        checks["redis"] = {"status": "error", "detail": "Redis connection failed"}
 
     all_ok = all(c.get("status") == "ok" for c in checks.values())
     return {"status": "ok" if all_ok else "degraded", "checks": checks}
