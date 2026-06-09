@@ -14,9 +14,16 @@ from solvyn.multi_tenant.auth import RateLimitMiddleware, auth_middleware
 from solvyn.multi_tenant.middleware import tenant_middleware
 from solvyn.observability.analytics_api import router as observability_router
 from solvyn.observability.metrics import MetricsMiddleware
+from solvyn.observability.opentelemetry import init_opentelemetry
 
 setup_logging(settings.log_level, settings.json_logging)
 logger = logging.getLogger(__name__)
+
+init_opentelemetry(
+    service_name="solvyn",
+    otlp_endpoint=settings.otlp_endpoint,
+    enabled=settings.otel_enabled,
+)
 
 
 @asynccontextmanager
@@ -29,8 +36,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Shutting down — draining connections...")
     await message_bus.disconnect()
     from solvyn.llm.router import llm_router
+
     await llm_router.close()
     from solvyn.db.session import engine
+
     await engine.dispose()
     logger.info("Connections drained. Solvyn stopped.")
 
@@ -47,14 +56,14 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=settings.allowed_origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+        allow_headers=["Content-Type", "X-API-Key", "X-Tenant-Slug", "Authorization"],
     )
 
-    app.middleware("http")(auth_middleware)
-    app.middleware("http")(RateLimitMiddleware())
-    app.middleware("http")(tenant_middleware)
     app.middleware("http")(MetricsMiddleware())
+    app.middleware("http")(tenant_middleware)
+    app.middleware("http")(RateLimitMiddleware())
+    app.middleware("http")(auth_middleware)
 
     app.include_router(health.router, prefix="/api/v1")
     app.include_router(sessions.router, prefix="/api/v1")
@@ -63,6 +72,17 @@ def create_app() -> FastAPI:
 
     metrics_app = make_asgi_app()
     app.mount("/metrics", metrics_app)
+
+    @app.middleware("http")
+    async def add_security_headers(request, call_next):  # type: ignore[no-untyped-def]
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        if request.url.scheme == "https":
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        return response
 
     return app
 
