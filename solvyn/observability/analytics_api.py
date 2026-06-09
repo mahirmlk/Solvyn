@@ -1,12 +1,17 @@
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Response, WebSocket, WebSocketDisconnect
 
 from solvyn.agents.cost_tracker import cost_tracker
+from solvyn.config import settings
+from solvyn.multi_tenant.auth import verify_api_key
 from solvyn.observability.audit import audit_logger
 from solvyn.observability.metrics import Metrics, MetricsMiddleware
 from solvyn.observability.tracing import tracing_manager
 from solvyn.observability.websocket import ws_manager
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/observability", tags=["observability"])
 
@@ -52,13 +57,23 @@ async def get_audit_logs(
 
 @router.get("/analytics/session/{session_id}")
 async def get_session_analytics(session_id: str) -> dict[str, Any]:
+    from solvyn.multi_tenant.middleware import tenant_context
+
+    current_tenant = str(tenant_context.tenant_id) if tenant_context.tenant_id else settings.default_tenant_id
     totals = await cost_tracker.get_session_totals(session_id)
     breakdown = await cost_tracker.get_agent_breakdown(session_id)
-    return {"session_id": session_id, "totals": totals, "agent_breakdown": breakdown}
+    return {"session_id": session_id, "totals": totals, "agent_breakdown": breakdown, "tenant_id": current_tenant}
 
 
 @router.get("/analytics/tenant/{tenant_id}")
 async def get_tenant_analytics(tenant_id: str) -> dict[str, Any]:
+    from solvyn.multi_tenant.middleware import tenant_context
+
+    current_tenant = str(tenant_context.tenant_id) if tenant_context.tenant_id else settings.default_tenant_id
+    if tenant_id != current_tenant:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=403, detail="Access denied: tenant mismatch")
     totals = await cost_tracker.get_tenant_totals(tenant_id)
     return {"tenant_id": tenant_id, "totals": totals}
 
@@ -78,9 +93,18 @@ async def get_health_analytics() -> dict[str, Any]:
 
 @router.websocket("/ws/{tenant_id}")
 async def websocket_endpoint(websocket: WebSocket, tenant_id: str, session_id: str | None = None) -> None:
+    api_key = websocket.query_params.get("api_key") or websocket.headers.get("X-API-Key")
+    if not api_key or not verify_api_key(api_key, settings.api_key_secret):
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
     await ws_manager.connections.connect(websocket, tenant_id, session_id)
     try:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.exception("WebSocket error")
+    finally:
         ws_manager.connections.disconnect(websocket, tenant_id, session_id)

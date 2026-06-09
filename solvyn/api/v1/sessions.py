@@ -1,4 +1,3 @@
-
 import uuid
 from typing import Any
 
@@ -17,14 +16,12 @@ _DEFAULT_UUID = uuid.UUID("00000000-0000-0000-0000-000000000000")
 
 @router.get("/")
 async def list_sessions(db: AsyncSession = Depends(get_session)) -> dict[str, Any]:
-    result = await db.execute(select(Session).limit(50))
+    current_tenant_id = tenant_context.tenant_id
+    if not current_tenant_id:
+        return {"sessions": []}
+    result = await db.execute(select(Session).where(Session.tenant_id == current_tenant_id).limit(50))
     sessions = result.scalars().all()
-    return {
-        "sessions": [
-            {"id": str(s.id), "title": s.title, "status": s.status, "created_at": s.created_at.isoformat()}
-            for s in sessions
-        ]
-    }
+    return {"sessions": [{"id": str(s.id), "title": s.title, "status": s.status, "created_at": s.created_at.isoformat()} for s in sessions]}
 
 
 @router.post("/")
