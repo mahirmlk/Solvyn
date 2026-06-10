@@ -5,10 +5,30 @@ from datetime import UTC, datetime
 from typing import Any
 
 _STANDARD_LOG_ATTRS = {
-    "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
-    "module", "lineno", "funcName", "created", "msecs", "relativeCreated",
-    "thread", "threadName", "process", "processName", "message", "exc_info",
-    "exc_text", "stack_info", "asctime", "taskName", "exc_info",
+    "name",
+    "msg",
+    "args",
+    "levelname",
+    "levelno",
+    "pathname",
+    "filename",
+    "module",
+    "lineno",
+    "funcName",
+    "created",
+    "msecs",
+    "relativeCreated",
+    "thread",
+    "threadName",
+    "process",
+    "processName",
+    "message",
+    "exc_info",
+    "exc_text",
+    "stack_info",
+    "asctime",
+    "taskName",
+    "exc_info",
 }
 
 
