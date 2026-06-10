@@ -38,10 +38,8 @@ class AgentMemory:
         ttl_seconds: int | None = None,
     ) -> None:
         prefixed = self._prefixed_key(key)
-        embedding_str: str | None = None
-        if embedding is not None:
-            embedding_str = json.dumps(embedding)
         async with async_session_factory() as session:
+            # Store embedding directly as Vector data (not JSON string)
             record = MemoryModel(
                 id=uuid.uuid4(),
                 tenant_id=_DEFAULT_UUID if self.tenant_id == "default" else uuid.UUID(self.tenant_id),
@@ -49,7 +47,7 @@ class AgentMemory:
                 agent_type=agent_type,
                 key=prefixed,
                 value=json.dumps(value) if not isinstance(value, str) else value,
-                embedding=embedding_str,
+                embedding=embedding,  # Direct assignment to Vector column
             )
             session.add(record)
             await session.commit()
@@ -80,9 +78,28 @@ class AgentMemory:
         limit: int = 5,
         query_embedding: list[float] | None = None,
     ) -> list[dict[str, Any]]:
+        """Search memory using vector similarity or keyword fallback.
+
+        Args:
+            agent_type: Filter by agent type.
+            query: Natural language query.
+            limit: Maximum results to return.
+            query_embedding: Pre-computed embedding vector. If *None*, the
+                embedding service generates one from *query*.
+        """
+        # Vector search is the primary method
         if query_embedding is not None:
             return await self._vector_search(agent_type, query_embedding, limit)
-        return await self._keyword_search(agent_type, query, limit)
+
+        # Generate embedding via the embedding service (API or hash fallback)
+        try:
+            from solvyn.llm.embeddings import embedding_service
+
+            response = await embedding_service.embed(query)
+            return await self._vector_search(agent_type, response.embedding, limit)
+        except Exception as e:
+            logger.warning("Embedding generation failed, falling back to keyword search: %s", e)
+            return await self._keyword_search(agent_type, query, limit)
 
     async def _vector_search(
         self,
@@ -90,23 +107,22 @@ class AgentMemory:
         query_embedding: list[float],
         limit: int,
     ) -> list[dict[str, Any]]:
-        embedding_str = json.dumps(query_embedding)
         try:
             async with async_session_factory() as session:
                 sql = text("""
                     SELECT id, agent_type, key, value, embedding, created_at,
-                           1 - (embedding::vector <=> :query_embedding::vector) AS similarity
+                           1 - (embedding <=> :query_embedding) AS similarity
                     FROM memory
                     WHERE agent_type = :agent_type
                       AND embedding IS NOT NULL
-                    ORDER BY embedding::vector <=> :query_embedding::vector
+                    ORDER BY embedding <=> :query_embedding
                     LIMIT :limit
                 """)
                 result = await session.execute(
                     sql,
                     {
                         "agent_type": agent_type,
-                        "query_embedding": embedding_str,
+                        "query_embedding": query_embedding,  # Direct Vector data
                         "limit": limit,
                     },
                 )
@@ -123,8 +139,9 @@ class AgentMemory:
                     for row in rows
                 ]
         except Exception as e:
-            logger.warning(f"Vector search failed, falling back to keyword search: {e}")
-            return await self._keyword_search(agent_type, "", limit)
+            logger.error(f"Vector search failed: {e}")
+            # No fallback - raise the exception so the caller knows
+            raise
 
     async def _keyword_search(self, agent_type: str, query: str, limit: int) -> list[dict[str, Any]]:
         async with async_session_factory() as session:
