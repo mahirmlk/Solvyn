@@ -23,14 +23,16 @@ class TaskGenerator:
             for epic in epics:
                 stories = epic.get("stories", [])
                 for story in stories:
-                    tasks.append({
-                        "title": story.get("title", epic.get("name", "Untitled")),
-                        "description": story.get("description", ""),
-                        "acceptance_criteria": story.get("acceptance_criteria", []),
-                        "epic": epic.get("name", ""),
-                        "priority": story.get("priority", "medium"),
-                        "estimated_hours": story.get("estimated_hours", 0),
-                    })
+                    tasks.append(
+                        {
+                            "title": story.get("title", epic.get("name", "Untitled")),
+                            "description": story.get("description", ""),
+                            "acceptance_criteria": story.get("acceptance_criteria", []),
+                            "epic": epic.get("name", ""),
+                            "priority": story.get("priority", "medium"),
+                            "estimated_hours": story.get("estimated_hours", 0),
+                        }
+                    )
         except (json.JSONDecodeError, TypeError, AttributeError):
             lines = raw.strip().split("\n")
             for line in lines:
