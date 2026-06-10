@@ -91,10 +91,7 @@ class CostTracker:
                 .where(TokenUsage.session_id == _to_uuid(session_id))
                 .group_by(TokenUsage.agent_type),
             )
-            return [
-                {"agent_type": r.agent_type, "tokens": r.tokens or 0, "cost": float(r.cost or 0.0), "calls": r.calls or 0}
-                for r in result.all()
-            ]
+            return [{"agent_type": r.agent_type, "tokens": r.tokens or 0, "cost": float(r.cost or 0.0), "calls": r.calls or 0} for r in result.all()]
 
 
 cost_tracker = CostTracker()
