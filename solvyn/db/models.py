@@ -1,9 +1,18 @@
 import uuid
 from datetime import datetime
+from enum import StrEnum
 
 from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from pgvector.sqlalchemy import Vector
+
+
+class TenantRole(StrEnum):
+    """Roles for multi-tenant access control."""
+    ADMIN = "admin"
+    USER = "user"
+    VIEWER = "viewer"
 
 
 class Base(DeclarativeBase):
@@ -17,6 +26,7 @@ class Tenant(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
     api_key_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(50), default=TenantRole.USER)
     is_active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -78,7 +88,7 @@ class Memory(Base):
     agent_type: Mapped[str] = mapped_column(String(100), nullable=False)
     key: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     value: Mapped[str] = mapped_column(Text, nullable=False)
-    embedding: Mapped[str | None] = mapped_column(Text, nullable=True)
+    embedding: Mapped[Vector | None] = mapped_column(Vector(1536), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
