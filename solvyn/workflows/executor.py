@@ -125,14 +125,14 @@ class WorkflowExecutor:
                 record = ExecutionGraphModel(
                     id=uuid.uuid4(),
                     session_id=uuid.UUID(graph.session_id),
-                    graph_data=json.dumps({
-                        "template": template_name,
-                        "inputs": {k: str(v)[:200] for k, v in inputs.items()},
-                        "nodes": [
-                            {"id": n.id, "agent_type": n.agent_type, "status": n.status, "error": n.error} for n in graph.nodes
-                        ],
-                        "edges": [{"source": e.source, "target": e.target} for e in graph.edges],
-                    }),
+                    graph_data=json.dumps(
+                        {
+                            "template": template_name,
+                            "inputs": {k: str(v)[:200] for k, v in inputs.items()},
+                            "nodes": [{"id": n.id, "agent_type": n.agent_type, "status": n.status, "error": n.error} for n in graph.nodes],
+                            "edges": [{"source": e.source, "target": e.target} for e in graph.edges],
+                        }
+                    ),
                     status=graph.status,
                 )
                 db.add(record)
