@@ -31,8 +31,7 @@ class BaseAgent(ABC):
 
     @property
     @abstractmethod
-    def metadata(self) -> AgentMetadata:
-        ...
+    def metadata(self) -> AgentMetadata: ...
 
     async def run(self, input_data: dict[str, Any]) -> dict[str, Any]:
         self.status = AgentStatus.RUNNING
@@ -57,8 +56,7 @@ class BaseAgent(ABC):
             raise
 
     @abstractmethod
-    async def execute(self, input_data: dict[str, Any]) -> dict[str, Any]:
-        ...
+    async def execute(self, input_data: dict[str, Any]) -> dict[str, Any]: ...
 
     async def llm_generate(
         self,
