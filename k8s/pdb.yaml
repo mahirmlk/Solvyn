@@ -1,0 +1,21 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: solvyn-api-pdb
+  namespace: solvyn
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: solvyn-api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: solvyn-db-pdb
+  namespace: solvyn
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: solvyn-db
