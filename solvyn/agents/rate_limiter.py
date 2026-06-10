@@ -63,10 +63,7 @@ class RateLimiter:
         return self.check_llm(tenant_id) and self.check_agent(agent_type)
 
     def get_state(self) -> dict[str, Any]:
-        return {
-            key: {"tokens": b.tokens, "rate": b.rate, "burst": b.burst}
-            for key, b in self._buckets.items()
-        }
+        return {key: {"tokens": b.tokens, "rate": b.rate, "burst": b.burst} for key, b in self._buckets.items()}
 
 
 rate_limiter = RateLimiter()
