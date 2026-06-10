@@ -28,15 +28,17 @@ class TracingManager:
         metadata: dict[str, Any] | None = None,
     ) -> str:
         trace_id = f"trace_{uuid.uuid4()}"
-        self._traces.append({
-            "id": trace_id,
-            "name": name,
-            "agent_type": agent_type,
-            "session_id": session_id,
-            "tenant_id": tenant_id,
-            "metadata": metadata or {},
-            "spans": [],
-        })
+        self._traces.append(
+            {
+                "id": trace_id,
+                "name": name,
+                "agent_type": agent_type,
+                "session_id": session_id,
+                "tenant_id": tenant_id,
+                "metadata": metadata or {},
+                "spans": [],
+            }
+        )
         return trace_id
 
     def add_span(
@@ -55,17 +57,19 @@ class TracingManager:
         trace = next((t for t in self._traces if t["id"] == trace_id), None)
         if trace is None:
             return
-        trace["spans"].append({
-            "name": name,
-            "type": span_type,
-            "input": input_data,
-            "output": output_data,
-            "duration_ms": duration_ms,
-            "token_count": token_count,
-            "model": model,
-            "provider": provider,
-            "error": error,
-        })
+        trace["spans"].append(
+            {
+                "name": name,
+                "type": span_type,
+                "input": input_data,
+                "output": output_data,
+                "duration_ms": duration_ms,
+                "token_count": token_count,
+                "model": model,
+                "provider": provider,
+                "error": error,
+            }
+        )
 
     def get_trace(self, trace_id: str) -> dict[str, Any] | None:
         return next((t for t in self._traces if t["id"] == trace_id), None)
