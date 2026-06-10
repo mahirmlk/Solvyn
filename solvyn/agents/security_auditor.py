@@ -33,12 +33,12 @@ class SecurityAuditorAgent(BaseAgent):
         prompt = f"""Perform a security audit on the following code:
 
 Code:
-```{input_data.get('language', 'python')}
+```{input_data.get("language", "python")}
 {code}
 ```
 
 Scan Type: {scan_type}
-Compliance Standards: {compliance or 'None specified'}
+Compliance Standards: {compliance or "None specified"}
 
 Check for:
 1. Hardcoded secrets / credentials
