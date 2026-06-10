@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: solvyn-db-backup
+  namespace: solvyn
+spec:
+  schedule: "0 2 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: backup
+              image: postgres:16-alpine
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+                  BACKUP_FILE="/backups/solvyn_${TIMESTAMP}.sql.gz"
+                  pg_dump "$DATABASE_URL" | gzip > "$BACKUP_FILE"
+                  echo "Backup complete: $BACKUP_FILE"
+                  find /backups -name "solvyn_*.sql.gz" -mtime +7 -delete
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: solvyn-secrets
+                      key: DATABASE_URL
+                      optional: true
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: solvyn-secrets
+                      key: POSTGRES_PASSWORD
+              volumeMounts:
+                - name: backup-storage
+                  mountPath: /backups
+          restartPolicy: OnFailure
+          volumes:
+            - name: backup-storage
+              persistentVolumeClaim:
+                claimName: solvyn-backup-pvc
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
