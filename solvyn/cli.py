@@ -23,6 +23,7 @@ AGENT_DESCRIPTIONS = {m.agent_type: m.description for m in agent_registry.list_a
 
 def _print_header() -> None:
     from solvyn import __version__
+
     subtitle = f"v{__version__} — AI Operating Center for Engineering Teams"
     panel = Panel(Text("Solvyn Agent CLI", style="bold cyan"), subtitle=subtitle, border_style="cyan")
     console.print(panel)
@@ -32,6 +33,7 @@ def _print_header() -> None:
 def _get_providers_info() -> list[tuple[str, str, str]]:
     def _model(provider: str, model: str) -> str:
         return model if getattr(settings, f"{provider}_api_key") else ""
+
     return [
         ("OpenRouter", "[OK]" if settings.openrouter_api_key else "[--]", _model("openrouter", settings.llm_default_model)),
         ("Groq", "[OK]" if settings.groq_api_key else "[--]", _model("groq", "llama-3.3-70b-versatile")),
@@ -295,6 +297,7 @@ def audit(
     limit: int = typer.Option(10, "--limit", "-l", help="Number of entries"),
 ) -> None:
     """Show audit log entries"""
+
     async def _show_audit() -> None:
         from solvyn.observability.audit import audit_logger
 
