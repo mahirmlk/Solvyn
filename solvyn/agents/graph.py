@@ -92,14 +92,16 @@ class AgentGraph:
 
     def _resolve_value(self, value: Any, node_id: str) -> Any:
         """Recursively resolve output references in a single value."""
+        suffix = ".output"
         # String reference: "agent_type.output"
-        if isinstance(value, str) and value.endswith(".output"):
-            source_type = value.replace(".output", "")
+        if isinstance(value, str) and value.endswith(suffix):
+            source_type = value[:-len(suffix)]
             for prev_id in reversed(self.get_prev_nodes(node_id)):
                 prev_node = self.nodes[prev_id]
                 if prev_node.agent_type == source_type and prev_node.status == "completed" and prev_node.output is not None:
                     return prev_node.output
-            return value
+            logger.warning("Could not resolve output reference '%s' for node %s", value, node_id)
+            return None
 
         # Dict reference: {"$node_output": "<node_id>"} or nested dicts
         if isinstance(value, dict):
@@ -190,6 +192,8 @@ class AgentGraph:
         levels = self._compute_levels()
         completed: set[str] = set()
         failed: set[str] = set()
+        skipped: set[str] = set()
+        has_real_failure = False
 
         for level in levels:
             # Determine which nodes in this level are ready to run
@@ -202,8 +206,8 @@ class AgentGraph:
                     node.status = "skipped"
                     node.error = "Upstream dependency failed"
                     node.completed_at = datetime.now(UTC).isoformat()
-                    failed.add(node_id)
-                elif all(p in completed or p in failed for p in prevs):
+                    skipped.add(node_id)
+                elif all(p in completed or p in failed or p in skipped for p in prevs):
                     runnable.append(node_id)
                 else:
                     # Should not happen in a correct topological sort
@@ -230,13 +234,14 @@ class AgentGraph:
                     completed.add(node_id)
                 else:
                     failed.add(node_id)
+                    has_real_failure = True
 
             # Propagate skipped status to downstream nodes of failed nodes
             for node_id in runnable:
                 if self.nodes[node_id].status == "failed":
-                    self._mark_downstream_skipped(node_id, failed)
+                    self._mark_downstream_skipped(node_id, skipped)
 
-        self.overall_status = "failed" if failed else "completed"
+        self.overall_status = "failed" if has_real_failure else "completed"
         logger.info("Graph %s finished: %s", self.graph_id, self.overall_status)
 
         return ExecutionGraph(
@@ -247,16 +252,16 @@ class AgentGraph:
             status=self.overall_status,
         )
 
-    def _mark_downstream_skipped(self, node_id: str, failed: set[str]) -> None:
+    def _mark_downstream_skipped(self, node_id: str, skipped: set[str]) -> None:
         """Recursively mark all downstream nodes as skipped when upstream fails."""
         for next_id in self.get_next_nodes(node_id):
-            if next_id not in failed:
+            if next_id not in skipped:
                 node = self.nodes[next_id]
                 node.status = "skipped"
                 node.error = "Upstream dependency failed"
                 node.completed_at = datetime.now(UTC).isoformat()
-                failed.add(next_id)
-                self._mark_downstream_skipped(next_id, failed)
+                skipped.add(next_id)
+                self._mark_downstream_skipped(next_id, skipped)
 
     # ------------------------------------------------------------------
     # Serialization
