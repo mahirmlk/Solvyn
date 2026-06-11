@@ -57,7 +57,9 @@ class CostTracker:
                     sqlfunc.sum(TokenUsage.completion_tokens).label("completion_tokens"),
                 ).where(TokenUsage.session_id == _to_uuid(session_id)),
             )
-            row = result.one()
+            row = result.one_or_none()
+            if row is None:
+                return {"total_tokens": 0, "total_cost": 0.0, "prompt_tokens": 0, "completion_tokens": 0}
             return {
                 "total_tokens": row.total_tokens or 0,
                 "total_cost": float(row.total_cost or 0.0),
@@ -73,7 +75,9 @@ class CostTracker:
                     sqlfunc.sum(TokenUsage.cost).label("total_cost"),
                 ).where(TokenUsage.tenant_id == _to_uuid(tenant_id)),
             )
-            row = result.one()
+            row = result.one_or_none()
+            if row is None:
+                return {"total_tokens": 0, "total_cost": 0.0}
             return {
                 "total_tokens": row.total_tokens or 0,
                 "total_cost": float(row.total_cost or 0.0),
