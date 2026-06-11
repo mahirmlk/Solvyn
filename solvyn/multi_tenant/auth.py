@@ -17,7 +17,7 @@ from solvyn.multi_tenant.rate_limiter import redis_rate_limiter
 logger = logging.getLogger(__name__)
 
 
-PUBLIC_PATHS = ("/api/v1/health", "/metrics", "/docs", "/openapi.json")
+PUBLIC_PATHS = ("/api/v1/health", "/metrics", "/docs", "/redoc", "/openapi.json")
 
 
 # ---------------------------------------------------------------------------
@@ -93,16 +93,14 @@ class RequireRole:
 async def auth_middleware(request: Request, call_next: Any) -> Any:
     """Authenticate requests using per-tenant or shared-secret API key validation.
 
+    Tenant context is already resolved by ``tenant_middleware`` which runs
+    before this middleware. This middleware only validates the API key.
+
     Flow:
     1. Skip authentication for public paths.
     2. Extract the ``X-API-Key`` header.
-    3. If ``X-Tenant-Slug`` is present, validate against the tenant's
-       ``api_key_hash`` in the database (per-tenant mode).
-    4. Otherwise, fall back to shared-secret validation against
-       ``settings.api_key_secret`` (backward-compatible mode).
-    5. Set tenant context with the authenticated tenant's role (per-tenant)
-       or default role (shared-secret mode).
-    6. Forward the request.
+    3. Validate the key (per-tenant or shared-secret mode).
+    4. Forward the request.
     """
     if request.url.path in PUBLIC_PATHS or request.url.path.startswith("/api/v1/health"):
         return await call_next(request)
@@ -111,18 +109,17 @@ async def auth_middleware(request: Request, call_next: Any) -> Any:
     if not api_key:
         return JSONResponse(status_code=401, content={"error": "Missing X-API-Key header"})
 
-    tenant_slug = request.headers.get("X-Tenant-Slug")
-
     # Per-tenant mode: validate against tenant's api_key_hash
-    if tenant_slug:
+    if tenant_context.tenant_id is not None:
         tenant = await _validate_tenant_api_key(api_key)
         if tenant is None:
             return JSONResponse(status_code=401, content={"error": "Invalid X-API-Key"})
-        tenant_context.set(tenant.id, tenant.slug, tenant.role or TenantRole.USER)
     else:
         # Shared-secret mode (backward compatible)
         from solvyn.config import settings
 
+        if not settings.api_key_secret:
+            return JSONResponse(status_code=500, content={"error": "Server not configured: API_KEY_SECRET is empty"})
         if not verify_api_key(api_key, settings.api_key_secret):
             return JSONResponse(status_code=401, content={"error": "Invalid X-API-Key"})
 
@@ -132,7 +129,7 @@ async def auth_middleware(request: Request, call_next: Any) -> Any:
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Request failed", extra={"error": str(e), "path": request.url.path})
+        logger.exception("Request failed: %s", e)
         return JSONResponse(status_code=500, content={"error": "Internal server error"})
 
 
