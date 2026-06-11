@@ -18,17 +18,19 @@ class RedisMessageBus:
         self.pubsub: aioredis.client.PubSub | None = None
 
     async def connect(self) -> None:
+        if self.redis is not None:
+            return
         self.redis = await aioredis.from_url(settings.redis_url, decode_responses=True)
         self.pubsub = self.redis.pubsub()
         logger.info("Connected to Redis")
 
     async def disconnect(self) -> None:
-        if self.redis:
-            await self.redis.aclose()
-            self.redis = None
         if self.pubsub:
             await self.pubsub.aclose()
             self.pubsub = None
+        if self.redis:
+            await self.redis.aclose()
+            self.redis = None
         logger.info("Disconnected from Redis")
 
     async def _ensure_connected(self) -> None:
