@@ -49,6 +49,11 @@ class ConnectionManager:
             connections.discard(ws)
             session_wild.discard(ws)
 
+        # Clean up empty connection sets
+        empty_keys = [k for k, v in self._connections.items() if not v]
+        for k in empty_keys:
+            del self._connections[k]
+
 
 class WebSocketManager:
     def __init__(self) -> None:
