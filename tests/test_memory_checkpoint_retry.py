@@ -28,7 +28,7 @@ async def test_retry_handler_retry_then_succeed() -> None:
         return "ok"
 
     handler = RetryHandler(max_retries=3, base_delay=0.01)
-    result = await handler.execute_with_retry(flaky)
+    result = await handler.execute_with_retry(flaky, retryable_exceptions=(ValueError,))
     assert result == "ok"
     assert call_count == 2
 
