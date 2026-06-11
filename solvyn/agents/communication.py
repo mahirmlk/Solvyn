@@ -12,12 +12,10 @@ logger = logging.getLogger(__name__)
 
 class AgentCommunication:
     def __init__(self) -> None:
-        self._handlers: dict[str, type[BaseAgent]] = {}
         self._a2a_handlers: dict[str, Any] = {}
         self._active_agents: dict[str, BaseAgent] = {}
 
     def register_handler(self, agent_type: str, agent_class: type[BaseAgent]) -> None:
-        self._handlers[agent_type] = agent_class
         self._a2a_handlers[agent_type] = self._create_a2a_handler(agent_type)
 
     def register_agent_instance(self, agent: BaseAgent) -> None:
@@ -153,12 +151,17 @@ class AgentCommunication:
             matched = False
             for agent in agents:
                 if agent.agent_id == to_agent or agent.metadata.agent_type == to_agent:
-                    agent.handle_message(msg)
-                    logger.debug("Routed message to %s", to_agent)
+                    result = agent.handle_message(msg)
+                    logger.debug("Routed message to %s (result=%s)", to_agent, type(result).__name__)
                     matched = True
             if not matched:
                 logger.warning("No handler for message: type=%s, to=%s", message_type, to_agent)
             return
+
+        # Broadcast: deliver to all agents in the session
+        agents = session_map.get(session_id or "", [])
+        for agent in agents:
+            agent.handle_message(msg)
 
     # ------------------------------------------------------------------
     # A2A handler factory
