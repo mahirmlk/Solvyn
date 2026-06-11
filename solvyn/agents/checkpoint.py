@@ -32,6 +32,7 @@ class CheckpointManager:
             record = MemoryModel(
                 id=uuid.uuid4(),
                 tenant_id=_to_uuid(tenant_id),
+                session_id=_to_uuid(session_id),
                 agent_type=agent_type,
                 key=checkpoint_id,
                 value=value,
@@ -54,7 +55,10 @@ class CheckpointManager:
         async with async_session_factory() as db:
             query = select(MemoryModel).where(MemoryModel.key.like(f"{self.CHECKPOINT_PREFIX}%"))
             if session_id:
-                query = query.where(MemoryModel.session_id == uuid.UUID(session_id))
+                try:
+                    query = query.where(MemoryModel.session_id == uuid.UUID(session_id))
+                except ValueError:
+                    return []
             result = await db.execute(query.order_by(MemoryModel.created_at.desc()))
             records = result.scalars().all()
             return [
