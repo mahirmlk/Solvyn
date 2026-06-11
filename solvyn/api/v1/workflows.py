@@ -18,6 +18,16 @@ async def list_workflows() -> dict[str, Any]:
     return {"workflows": [{"name": name, "description": tmpl.description, "steps": len(tmpl.steps)} for name, tmpl in WORKFLOW_TEMPLATES.items()]}
 
 
+@router.get("/agents")
+async def list_agents() -> dict[str, Any]:
+    agents_data = agent_registry.list_agents()
+    return {
+        "agents": [
+            {"type": at, "name": m.name, "description": m.description, "capabilities": [c.value for c in m.capabilities]} for at, m in agents_data.items()
+        ]
+    }
+
+
 @router.get("/{name}")
 async def get_workflow(name: str) -> dict[str, Any]:
     tmpl = WORKFLOW_TEMPLATES.get(name)
@@ -49,10 +59,10 @@ async def run_workflow(name: str, inputs: dict[str, Any] = Body(...)) -> dict[st
 
     session_id = str(uuid.uuid4())
     tenant_id = str(tenant_context.tenant_id) if tenant_context.tenant_id else settings.default_tenant_id
-    inputs.pop("tenant_id", None)
+    safe_inputs = {k: v for k, v in inputs.items() if k != "tenant_id"}
     result = await workflow_executor.run(
         template_name=name,
-        inputs=inputs,
+        inputs=safe_inputs,
         session_id=session_id,
         tenant_id=tenant_id,
     )
@@ -75,13 +85,3 @@ async def generate_tasks(request: GenerateTasksRequest) -> dict[str, Any]:
     result = await generator.generate_from_spec(request.specification)
     graph = generator.build_workflow_graph(result["tasks"])
     return {"tasks": result["tasks"], "graph": graph}
-
-
-@router.get("/agents")
-async def list_agents() -> dict[str, Any]:
-    agents_data = agent_registry.list_agents()
-    return {
-        "agents": [
-            {"type": at, "name": m.name, "description": m.description, "capabilities": [c.value for c in m.capabilities]} for at, m in agents_data.items()
-        ]
-    }
