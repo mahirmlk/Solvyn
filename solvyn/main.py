@@ -60,10 +60,12 @@ def create_app() -> FastAPI:
         allow_headers=["Content-Type", "X-API-Key", "X-Tenant-Slug", "Authorization"],
     )
 
+    # Middleware executes in reverse registration order for requests:
+    # tenant_middleware (first on request) → auth_middleware → RateLimitMiddleware → MetricsMiddleware
     app.middleware("http")(MetricsMiddleware())
-    app.middleware("http")(tenant_middleware)
     app.middleware("http")(RateLimitMiddleware())
     app.middleware("http")(auth_middleware)
+    app.middleware("http")(tenant_middleware)
 
     app.include_router(health.router, prefix="/api/v1")
     app.include_router(sessions.router, prefix="/api/v1")
@@ -80,6 +82,7 @@ def create_app() -> FastAPI:
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-XSS-Protection"] = "1; mode=block"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'"
         if request.url.scheme == "https":
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response
