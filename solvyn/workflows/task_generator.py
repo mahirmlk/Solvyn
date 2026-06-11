@@ -75,4 +75,8 @@ class TaskGenerator:
             node_id = f"task_{i}"
             nodes.append({"id": node_id, "agent_type": agent_type, "title": task.get("title", ""), "status": "pending"})
 
+            # Create sequential edges: task_i depends on task_{i-1}
+            if i > 0:
+                edges.append({"source": f"task_{i - 1}", "target": node_id})
+
         return {"nodes": nodes, "edges": edges, "task_count": len(tasks)}
