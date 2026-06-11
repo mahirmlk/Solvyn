@@ -1,3 +1,4 @@
+import re
 import time
 from collections.abc import Awaitable, Callable
 
@@ -13,14 +14,28 @@ workflow_runs_total = Counter("solvyn_workflow_runs_total", "Total workflow runs
 memory_operations_total = Counter("solvyn_memory_operations_total", "Total memory operations", ["operation", "agent_type"])
 token_usage_total = Counter("solvyn_token_usage_total", "Total tokens consumed", ["provider", "model"])
 
+_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
+
+
+def _normalize_endpoint(path: str) -> str:
+    """Normalize path by replacing UUID segments with {id} placeholder."""
+    return _UUID_RE.sub("{id}", path)
+
 
 class MetricsMiddleware:
     async def __call__(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         start = time.perf_counter()
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception:
+            duration = time.perf_counter() - start
+            endpoint = _normalize_endpoint(request.url.path)
+            http_requests_total.labels(method=request.method, endpoint=endpoint, status=500).inc()
+            http_request_duration_seconds.labels(method=request.method, endpoint=endpoint).observe(duration)
+            raise
         duration = time.perf_counter() - start
 
-        endpoint = request.url.path
+        endpoint = _normalize_endpoint(request.url.path)
         http_requests_total.labels(method=request.method, endpoint=endpoint, status=response.status_code).inc()
         http_request_duration_seconds.labels(method=request.method, endpoint=endpoint).observe(duration)
 
