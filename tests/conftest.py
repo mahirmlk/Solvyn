@@ -1,6 +1,6 @@
 from collections.abc import AsyncGenerator, Generator
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -28,6 +28,12 @@ def test_settings() -> Generator[Settings, None, None]:
         mock.log_level = "DEBUG"
         mock.json_logging = False
         mock.api_key_secret = "change-me-to-a-random-secret"
+        mock.rate_limit_per_ip = 100
+        mock.rate_limit_per_tenant = 500
+        mock.rate_limit_window = 60
+        mock.allowed_origins = ["http://localhost:3000"]
+        mock.otel_enabled = False
+        mock.otlp_endpoint = None
         yield mock
 
 
@@ -59,8 +65,10 @@ async def mock_db_session() -> AsyncGenerator[None, None]:
     mock_session = AsyncMock()
     mock_session.__aenter__.return_value = mock_session
     mock_session.__aexit__.return_value = None
-    mock_session.execute.return_value = AsyncMock()
-    mock_session.execute.return_value.scalar_one_or_none.return_value = None
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = None
+    mock_result.scalars.return_value.all.return_value = []
+    mock_session.execute.return_value = mock_result
     with patch.object(async_session_factory, "__call__", return_value=mock_session):
         yield
 
@@ -69,7 +77,11 @@ async def mock_db_session() -> AsyncGenerator[None, None]:
 async def client(app: Any) -> AsyncGenerator[AsyncClient, None]:
     transport = ASGITransport(app=app)
     async with LifespanManager(app):
-        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            headers={"X-API-Key": "change-me-to-a-random-secret"},
+        ) as ac:
             yield ac
 
 
