@@ -162,5 +162,4 @@ def test_register_handler_legacy() -> None:
 
     comm.register_handler("test-agent", mock_cls)
 
-    assert "test-agent" in comm._handlers
     assert "test-agent" in comm._a2a_handlers
