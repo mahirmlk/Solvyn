@@ -68,6 +68,9 @@ class PromptRegistry:
         for p in prompts:
             if p.version == target_version:
                 return p
+        if version:
+            available = [p.version for p in prompts]
+            raise KeyError(f"Prompt '{name}' version '{version}' not found. Available: {available}")
         return prompts[-1]
 
     def render(self, name: str, version: str | None = None, **kwargs: Any) -> str:
