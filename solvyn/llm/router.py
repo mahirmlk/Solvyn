@@ -111,8 +111,8 @@ class LLMResponseCache:
                         total_tokens=data.get("total_tokens", 0),
                         cost=data.get("cost", 0.0),
                     )
-        except Exception:
-            pass
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            logger.warning("LLM cache read failed (corrupted entry): %s", e)
         return None
 
     async def set(self, prompt: str, model: str, response: LLMResponse, system_prompt: str | None = None) -> None:
@@ -140,8 +140,8 @@ class LLMResponseCache:
                     "cost": response.cost,
                 }
                 await message_bus.redis.setex(f"llm_cache:{key}", self.default_ttl, json.dumps(data))
-        except Exception:
-            pass
+        except (json.JSONDecodeError, TypeError, OSError) as e:
+            logger.warning("LLM cache write failed: %s", e)
 
     def get_stats(self) -> dict[str, Any]:
         total = self._hits + self._misses
@@ -223,7 +223,7 @@ class LLMRouter:
             if use_cache:
                 await self.cache.set(prompt, effective_model, response, system_prompt)
             return response
-        except (ConnectionError, TimeoutError, httpx.TimeoutException) as e:
+        except (ConnectionError, TimeoutError, httpx.TimeoutException, httpx.ConnectError, httpx.HTTPStatusError) as e:
             logger.error(f"Provider {provider_name} failed: {e}")
             if not fallback:
                 raise
@@ -234,10 +234,9 @@ class LLMRouter:
                     logger.info(f"Falling back to {fallback_name}")
                     fb_llm = self.providers[fallback_name]
                     response = await fb_llm.generate(prompt=prompt, system_prompt=system_prompt, model=None, **kwargs)
-                    if use_cache:
-                        await self.cache.set(prompt, effective_model, response, system_prompt)
+                    # Don't cache fallback responses under the original model key
                     return response
-                except (ConnectionError, TimeoutError, httpx.TimeoutException) as fb_e:
+                except (ConnectionError, TimeoutError, httpx.TimeoutException, httpx.ConnectError, httpx.HTTPStatusError) as fb_e:
                     logger.error(f"Fallback {fallback_name} also failed: {fb_e}")
                     continue
 
