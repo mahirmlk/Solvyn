@@ -41,4 +41,9 @@ async def deep_health_check() -> dict[str, Any]:
         checks["redis"] = {"status": "error", "detail": "Redis connection failed"}
 
     all_ok = all(c.get("status") == "ok" for c in checks.values())
-    return {"status": "ok" if all_ok else "degraded", "checks": checks}
+    from fastapi.responses import JSONResponse
+    status_code = 200 if all_ok else 503
+    return JSONResponse(
+        status_code=status_code,
+        content={"status": "ok" if all_ok else "degraded", "checks": checks},
+    )
