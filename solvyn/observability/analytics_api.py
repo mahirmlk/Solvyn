@@ -38,9 +38,10 @@ async def list_traces(session_id: str | None = None, limit: int = 20) -> dict[st
 
 @router.get("/traces/{trace_id}")
 async def get_trace(trace_id: str) -> dict[str, Any]:
+    from fastapi import HTTPException
     trace = tracing_manager.get_trace(trace_id)
     if trace is None:
-        return {"error": "Trace not found"}
+        raise HTTPException(status_code=404, detail="Trace not found")
     return {"trace": trace}
 
 
@@ -94,9 +95,23 @@ async def get_health_analytics() -> dict[str, Any]:
 @router.websocket("/ws/{tenant_id}")
 async def websocket_endpoint(websocket: WebSocket, tenant_id: str, session_id: str | None = None) -> None:
     api_key = websocket.query_params.get("api_key") or websocket.headers.get("X-API-Key")
-    if not api_key or not verify_api_key(api_key, settings.api_key_secret):
+    if not api_key:
         await websocket.close(code=4001, reason="Unauthorized")
         return
+
+    # Validate API key and tenant ownership
+    from solvyn.multi_tenant.auth import _validate_tenant_api_key
+    if tenant_context.tenant_id is not None:
+        # Per-tenant mode: validate key matches the tenant in the URL
+        tenant = await _validate_tenant_api_key(api_key)
+        if tenant is None or str(tenant.id) != tenant_id:
+            await websocket.close(code=4001, reason="Unauthorized")
+            return
+    else:
+        # Shared-secret mode
+        if not verify_api_key(api_key, settings.api_key_secret):
+            await websocket.close(code=4001, reason="Unauthorized")
+            return
 
     await ws_manager.connections.connect(websocket, tenant_id, session_id)
     try:
