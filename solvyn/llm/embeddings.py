@@ -55,62 +55,71 @@ class OpenAIEmbeddingProvider:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self._client: httpx.AsyncClient | None = None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                base_url=self.base_url,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                timeout=30.0,
+            )
+        return self._client
+
+    async def close(self) -> None:
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
 
     async def embed(self, text: str) -> EmbeddingResponse:
         """Generate an embedding for the given text."""
         if not self.api_key:
             raise ValueError("No API key configured for embedding provider")
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{self.base_url}/embeddings",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "input": text,
-                    "model": self.model,
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
+        client = self._get_client()
+        response = await client.post(
+            "/embeddings",
+            json={
+                "input": text,
+                "model": self.model,
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
 
-            embedding_data = data["data"][0]
-            return EmbeddingResponse(
-                embedding=embedding_data["embedding"],
-                model=data.get("model", self.model),
-                prompt_tokens=data.get("usage", {}).get("prompt_tokens", 0),
-            )
+        embedding_data = data["data"][0]
+        return EmbeddingResponse(
+            embedding=embedding_data["embedding"],
+            model=data.get("model", self.model),
+            prompt_tokens=data.get("usage", {}).get("prompt_tokens", 0),
+        )
 
     async def embed_batch(self, texts: list[str]) -> list[EmbeddingResponse]:
         """Generate embeddings for multiple texts in a single API call."""
         if not self.api_key:
             raise ValueError("No API key configured for embedding provider")
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                f"{self.base_url}/embeddings",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "input": texts,
-                    "model": self.model,
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
+        client = self._get_client()
+        response = await client.post(
+            "/embeddings",
+            json={
+                "input": texts,
+                "model": self.model,
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
 
-            return [
-                EmbeddingResponse(
-                    embedding=item["embedding"],
-                    model=data.get("model", self.model),
-                    prompt_tokens=data.get("usage", {}).get("prompt_tokens", 0),
-                )
-                for item in data["data"]
-            ]
+        return [
+            EmbeddingResponse(
+                embedding=item["embedding"],
+                model=data.get("model", self.model),
+                prompt_tokens=data.get("usage", {}).get("prompt_tokens", 0),
+            )
+            for item in data["data"]
+        ]
 
 
 class HashEmbeddingProvider:
