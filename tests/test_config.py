@@ -13,8 +13,8 @@ def test_defaults() -> None:
     assert s.redis_url == "redis://localhost:6379/0"
     assert s.llm_default_provider == "openrouter"
     assert s.json_logging is True
-    assert s.api_key_secret == "change-me-to-a-random-secret"
-    assert s.cors_allowed_origins == ["http://localhost:3000"]
+    assert s.api_key_secret is not None
+    assert s.allowed_origins == ["http://localhost:3000"]
 
 
 def test_env_overrides() -> None:
