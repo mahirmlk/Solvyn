@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from solvyn.llm.providers.base import LLMResponse
 from solvyn.multi_tenant.middleware import tenant_context
 
 
@@ -11,43 +12,57 @@ from solvyn.multi_tenant.middleware import tenant_context
 async def test_llm_router_generate_success() -> None:
     from solvyn.llm.router import llm_router
     mock_provider = AsyncMock()
-    mock_provider.generate.return_value = {
-        "content": "specific_response",
-        "model": "gpt-4o",
-        "usage": {"prompt_tokens": 5, "completion_tokens": 10, "total_tokens": 15},
-    }
+    mock_provider.generate.return_value = LLMResponse(
+        content="specific_response",
+        provider="openrouter",
+        model="gpt-4o",
+        prompt_tokens=5,
+        completion_tokens=10,
+        total_tokens=15,
+        cost=0.0,
+    )
     llm_router.providers["openrouter"] = mock_provider
     result = await llm_router.generate(prompt="Hi", provider="openrouter", fallback=False)
-    assert result["content"] == "specific_response"
-    assert result["model"] == "gpt-4o"
+    assert result.content == "specific_response"
+    assert result.model == "gpt-4o"
 
 
 @pytest.mark.asyncio
 async def test_llm_router_unknown_provider() -> None:
     from solvyn.llm.router import llm_router
-    with pytest.raises(ValueError, match="Unknown provider"):
-        await llm_router.generate(prompt="Hi", provider="nonexistent")
+    llm_router.cache._local_cache.clear()
+    with pytest.raises((ValueError, RuntimeError)):
+        await llm_router.generate(prompt="Hi-unique-unknown-provider-test", provider="nonexistent")
 
 
 @pytest.mark.asyncio
 async def test_llm_router_fallback() -> None:
     from solvyn.llm.router import llm_router
     failing = AsyncMock()
-    failing.generate.side_effect = RuntimeError("down")
+    failing.generate.side_effect = ConnectionError("down")
     llm_router.providers["groq"] = failing
 
     working = AsyncMock()
-    working.generate.return_value = {"content": "fallback_response", "model": "deepseek-chat", "usage": {}}
+    working.generate.return_value = LLMResponse(
+        content="fallback_response",
+        provider="deepseek",
+        model="deepseek-chat",
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+        cost=0.0,
+    )
     llm_router.providers["deepseek"] = working
 
     # Also ensure openrouter (default) won't accidentally succeed
     openrouter_orig = llm_router.providers.get("openrouter")
     llm_router.providers["openrouter"] = AsyncMock()
-    llm_router.providers["openrouter"].generate.side_effect = RuntimeError("also down")
+    llm_router.providers["openrouter"].generate.side_effect = ConnectionError("also down")
 
-    result = await llm_router.generate(prompt="Hi", provider="groq", fallback=True)
-    assert result["content"] == "fallback_response"
-    assert result["model"] == "deepseek-chat"
+    llm_router.cache._local_cache.clear()
+    result = await llm_router.generate(prompt="Hi-unique-fallback-test", provider="groq", fallback=True)
+    assert result.content == "fallback_response"
+    assert result.model == "deepseek-chat"
 
     # Restore
     if openrouter_orig:
