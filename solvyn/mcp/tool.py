@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -62,7 +63,9 @@ class MCPTool:
             raise NotImplementedError(f"Tool '{self.schema.name}' has no handler registered")
 
         try:
-            result = await self.handler(validated, context or {})
+            result = self.handler(validated, context or {})
+            if asyncio.iscoroutine(result):
+                result = await asyncio.wait_for(result, timeout=self.schema.timeout_seconds)
             latency = (time.monotonic() - start) * 1000
             self._total_latency_ms += latency
             return {
@@ -78,22 +81,19 @@ class MCPTool:
             raise
 
     def _validate_parameters(self, parameters: dict[str, Any]) -> dict[str, Any]:
-        validated: dict[str, Any] = {}
+        validated: dict[str, Any] = dict(parameters)
         for param in self.schema.parameters:
-            if param.name in parameters:
-                validated[param.name] = parameters[param.name]
-            elif param.required:
-                if param.default is not None:
+            if param.name not in validated:
+                if param.required and param.default is not None:
                     validated[param.name] = param.default
-                else:
+                elif param.required:
                     from solvyn.tools.exceptions import ToolValidationError
-
                     raise ToolValidationError(
                         f"Missing required parameter '{param.name}' for tool '{self.schema.name}'",
                         tool_name=self.schema.name,
                     )
-            elif param.default is not None:
-                validated[param.name] = param.default
+                elif param.default is not None:
+                    validated[param.name] = param.default
         return validated
 
     def get_stats(self) -> dict[str, Any]:
