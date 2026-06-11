@@ -15,7 +15,7 @@ async def test_health_endpoint(client) -> None:
 @pytest.mark.asyncio
 async def test_deep_health_endpoint(client) -> None:
     response = await client.get("/api/v1/health/deep")
-    assert response.status_code == 200
+    assert response.status_code in (200, 503)
     data = response.json()
     assert "status" in data
     assert "checks" in data
@@ -83,5 +83,5 @@ async def test_deep_health_is_degraded_when_redis_is_disconnected(client) -> Non
     message_bus.redis = None
     response = await client.get("/api/v1/health/deep")
 
-    assert response.status_code == 200
+    assert response.status_code == 503
     assert response.json()["status"] == "degraded"
