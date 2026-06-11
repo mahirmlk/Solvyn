@@ -63,5 +63,8 @@ async def resolve_tenant(request: Request) -> Tenant | None:
 async def tenant_middleware(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
     tenant_context.clear()
     await resolve_tenant(request)
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    finally:
+        tenant_context.clear()
     return response
