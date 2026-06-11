@@ -57,6 +57,8 @@ class TracingManager:
         trace = next((t for t in self._traces if t["id"] == trace_id), None)
         if trace is None:
             return
+        if len(trace["spans"]) >= 1000:
+            return
         trace["spans"].append(
             {
                 "name": name,
@@ -75,7 +77,7 @@ class TracingManager:
         return next((t for t in self._traces if t["id"] == trace_id), None)
 
     def list_traces(self, limit: int = 20) -> list[dict[str, Any]]:
-        return self._traces[-limit:]
+        return list(self._traces)[-limit:]
 
     def get_session_traces(self, session_id: str) -> list[dict[str, Any]]:
         return [t for t in self._traces if t.get("session_id") == session_id]
