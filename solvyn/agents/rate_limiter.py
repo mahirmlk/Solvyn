@@ -60,7 +60,9 @@ class RateLimiter:
         return bucket.consume()
 
     def check(self, tenant_id: str, agent_type: str) -> bool:
-        return self.check_llm(tenant_id) and self.check_agent(agent_type)
+        llm_ok = self.check_llm(tenant_id)
+        agent_ok = self.check_agent(agent_type)
+        return llm_ok and agent_ok
 
     def get_state(self) -> dict[str, Any]:
         return {key: {"tokens": b.tokens, "rate": b.rate, "burst": b.burst} for key, b in self._buckets.items()}
