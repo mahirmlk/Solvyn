@@ -24,6 +24,8 @@ class RetryHandler:
         retryable_exceptions: tuple[type[Exception], ...] = (ConnectionError, TimeoutError),
         context: dict[str, Any] | None = None,
     ) -> Any:
+        if self.max_retries <= 0:
+            raise RuntimeError("max_retries must be > 0")
         last_exception: Exception | None = None
         ctx = context or {}
 
