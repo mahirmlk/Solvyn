@@ -47,8 +47,10 @@ class GroqProvider(LLMProvider):
         prompt_cost, completion_cost = self.get_cost_per_token(model)
         cost = (prompt_tokens * prompt_cost + completion_tokens * completion_cost) / 1_000_000
 
+        choices = data.get("choices", [])
+        content = choices[0].get("message", {}).get("content", "") if choices else ""
         return LLMResponse(
-            content=data.get("choices", [{}])[0].get("message", {}).get("content", ""),
+            content=content,
             provider="groq",
             model=model,
             prompt_tokens=prompt_tokens,
