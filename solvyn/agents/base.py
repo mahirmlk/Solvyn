@@ -77,12 +77,14 @@ class BaseAgent(ABC):
         summary: str,
         state_snapshot: dict[str, Any] | None = None,
     ) -> Checkpoint:
+        import copy
         self.status = AgentStatus.WAITING_APPROVAL
+        snapshot = copy.deepcopy(state_snapshot) if state_snapshot is not None else copy.deepcopy(self.state)
         checkpoint = Checkpoint(
             id=str(uuid.uuid4()),
             session_id=self.session_id or "",
             agent_type=self.metadata.agent_type,
-            state=state_snapshot or self.state,
+            state=snapshot,
         )
         self.state["checkpoint"] = {
             "id": checkpoint.id,
@@ -93,6 +95,8 @@ class BaseAgent(ABC):
         return checkpoint
 
     def resume_from_checkpoint(self, resolution: str, approved: bool) -> None:
+        if self.status != AgentStatus.WAITING_APPROVAL:
+            logger.warning("Agent %s resume_from_checkpoint called in invalid state: %s", self.agent_id, self.status)
         if approved:
             self.status = AgentStatus.RUNNING
             self.state.pop("checkpoint", None)
