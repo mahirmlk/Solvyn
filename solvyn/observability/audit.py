@@ -80,6 +80,8 @@ class AuditLogger:
             query = select(Memory).where(Memory.key.like(f"{self.AUDIT_PREFIX}%"))
             if agent_type:
                 query = query.where(Memory.agent_type == agent_type)
+            if session_id:
+                query = query.where(Memory.session_id == _to_uuid(session_id))
             query = query.order_by(Memory.created_at.desc()).limit(limit)
             result = await db.execute(query)
             records = result.scalars().all()
@@ -89,8 +91,6 @@ class AuditLogger:
                 try:
                     data = json.loads(r.value) if r.value else {}
                     if action and data.get("action") != action:
-                        continue
-                    if session_id and data.get("session_id") != session_id:
                         continue
                     data["id"] = r.key
                     data["created_at"] = r.created_at.isoformat() if r.created_at else None
