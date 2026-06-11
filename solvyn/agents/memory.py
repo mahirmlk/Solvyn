@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from typing import Any
 
@@ -13,6 +14,14 @@ from solvyn.db.session import async_session_factory
 logger = logging.getLogger(__name__)
 
 _DEFAULT_UUID = uuid.UUID("00000000-0000-0000-0000-000000000000")
+
+
+def _to_uuid(value: str | None) -> uuid.UUID | None:
+    if not value:
+        return None
+    if value == "default":
+        return _DEFAULT_UUID
+    return uuid.UUID(value)
 
 
 class AgentMemory:
@@ -42,8 +51,8 @@ class AgentMemory:
             # Store embedding directly as Vector data (not JSON string)
             record = MemoryModel(
                 id=uuid.uuid4(),
-                tenant_id=_DEFAULT_UUID if self.tenant_id == "default" else uuid.UUID(self.tenant_id),
-                session_id=uuid.UUID(self.session_id) if self.session_id else None,
+                tenant_id=_to_uuid(self.tenant_id),
+                session_id=_to_uuid(self.session_id),
                 agent_type=agent_type,
                 key=prefixed,
                 value=json.dumps(value) if not isinstance(value, str) else value,
@@ -153,7 +162,8 @@ class AgentMemory:
                 .limit(limit)
             )
             if query:
-                stmt = stmt.where(MemoryModel.value.ilike(f"%{query}%"))
+                escaped = re.sub(r"([%_])", r"\\\1", query)
+                stmt = stmt.where(MemoryModel.value.ilike(f"%{escaped}%"))
             result = await session.execute(stmt)
             records = result.scalars().all()
             return [
@@ -189,20 +199,26 @@ class AgentMemory:
         from datetime import UTC, datetime, timedelta
 
         cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
-        async with async_session_factory() as session:
-            result = await session.execute(
-                select(MemoryModel)
-                .where(MemoryModel.agent_type == agent_type)
-                .where(MemoryModel.key.like(f"{self.MEMORY_PREFIX}%"))
-                .where(MemoryModel.created_at < cutoff)
-                .limit(500),
-            )
-            records = result.scalars().all()
-            deleted = 0
-            for record in records:
-                await session.delete(record)
-                deleted += 1
-            if deleted > 0:
-                await session.commit()
-                logger.info(f"Compacted {deleted} expired memories for agent '{agent_type}'")
-            return deleted
+        total_deleted = 0
+        while True:
+            async with async_session_factory() as session:
+                result = await session.execute(
+                    select(MemoryModel)
+                    .where(MemoryModel.agent_type == agent_type)
+                    .where(MemoryModel.key.like(f"{self.MEMORY_PREFIX}%"))
+                    .where(MemoryModel.created_at < cutoff)
+                    .limit(500),
+                )
+                records = result.scalars().all()
+                if not records:
+                    break
+                deleted = 0
+                for record in records:
+                    await session.delete(record)
+                    deleted += 1
+                if deleted > 0:
+                    await session.commit()
+                    total_deleted += deleted
+        if total_deleted > 0:
+            logger.info("Compacted %d expired memories for agent '%s'", total_deleted, agent_type)
+        return total_deleted
