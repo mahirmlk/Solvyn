@@ -26,9 +26,13 @@ async def list_sessions(db: AsyncSession = Depends(get_session)) -> dict[str, An
 
 @router.post("/")
 async def create_session(db: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+    from fastapi import HTTPException
+
+    if not tenant_context.tenant_id:
+        raise HTTPException(status_code=400, detail="X-Tenant-Slug header required to create a session")
     session = Session(
         title="New Session",
-        tenant_id=tenant_context.tenant_id or _DEFAULT_UUID,
+        tenant_id=tenant_context.tenant_id,
     )
     db.add(session)
     await db.commit()
