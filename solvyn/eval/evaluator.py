@@ -76,7 +76,12 @@ class AgentEvaluator:
         start = time.monotonic()
         length = len(output)
         passed = min_length <= length <= max_length
-        score = 1.0 if passed else max(0.0, 1.0 - abs(length - (min_length + max_length) / 2) / ((max_length - min_length) / 2))
+        if passed:
+            score = 1.0
+        elif min_length == max_length:
+            score = 0.0
+        else:
+            score = max(0.0, 1.0 - abs(length - (min_length + max_length) / 2) / ((max_length - min_length) / 2))
         return EvalResult(
             agent_type=agent_type,
             test_name=test_name,
