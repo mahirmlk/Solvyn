@@ -48,20 +48,21 @@ export default function Dashboard() {
     <div className="route-page">
       <section className="dashboard-hero" aria-label="Solvyn system overview">
         <div className="hero-pearl">
-          <div>
+          <h1 className="hero-brand" aria-label="Solvyn">SOLVYN</h1>
+
+          <div className="hero-message">
             <p className="eyebrow">AI Engineering Command Center</p>
             <p className="hero-tagline">
               Autonomous agents coordinate planning, implementation, validation, and delivery from one operational surface.
             </p>
-          </div>
-
-          <div className="hero-actions">
-            <Link className="action-button" href="/workflows">
-              Execute
-            </Link>
-            <Link className="action-button secondary" href="/sessions">
-              History
-            </Link>
+            <div className="hero-actions">
+              <Link className="action-button" href="/workflows">
+                Execute
+              </Link>
+              <Link className="action-button secondary" href="/sessions">
+                History
+              </Link>
+            </div>
           </div>
         </div>
 
@@ -86,8 +87,6 @@ export default function Dashboard() {
             </div>
           </div>
         </div>
-
-        <h1 className="hero-wordmark">SOLVYN</h1>
       </section>
 
       <div className="dashboard-lower">
