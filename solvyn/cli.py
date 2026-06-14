@@ -1,7 +1,27 @@
+"""Solvyn command-line interface.
+
+The CLI is the operator- and developer-facing front door to Solvyn. It is
+intentionally thin: each command either prints a human-readable status
+report (rich tables) or shells out to the long-running API/worker
+processes. The Typer app is exported as ``app`` so it can be driven from
+``tests/test_cli.py`` via :class:`typer.testing.CliRunner`.
+
+Help text is rendered through :mod:`rich` (``rich_markup_mode="rich"``)
+so a user running ``solvyn --help`` sees a grouped command list, and each
+subcommand's ``--help`` shows a multi-line epilog with examples.
+"""
+
+from __future__ import annotations
+
 import asyncio
 import importlib.metadata
+import os
 import platform
+import subprocess
+import sys
 import uuid
+from datetime import UTC, datetime
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -14,11 +34,55 @@ from solvyn.config import settings
 from solvyn.workflows.task_generator import TaskGenerator
 from solvyn.workflows.templates import WORKFLOW_TEMPLATES
 
-app = typer.Typer(name="solvyn", help="Solvyn — AI Operating Center for Engineering Teams")
+# rich_markup_mode="rich" enables [bold]/[cyan]/etc. inside docstrings and
+# epilogs. The Typer callback below then renders a custom command list when
+# the user runs `solvyn --help`.
+app = typer.Typer(
+    name="solvyn",
+    help=(
+        "Solvyn — AI Operating Center for Engineering Teams.\n\n"
+        "Use [bold]solvyn COMMAND --help[/] for detailed help on a single command."
+    ),
+    rich_markup_mode="rich",
+    add_completion=False,
+    no_args_is_help=True,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
 console = Console()
 
 AGENT_TYPES = sorted(agent_registry.list_agents().keys())
 AGENT_DESCRIPTIONS = {m.agent_type: m.description for m in agent_registry.list_agents().values()}
+
+
+# ---------------------------------------------------------------------------
+# Command catalogue (used by `solvyn --help` to render a grouped command list)
+# ---------------------------------------------------------------------------
+
+# Each entry is (command, short description, category). Kept in sync with
+# the @app.command() decorators below; the table is what the user sees in
+# the top-level --help output.
+COMMAND_CATALOGUE: list[tuple[str, str, str]] = [
+    ("status", "Show Solvyn system status", "status"),
+    ("version", "Show Solvyn version and runtime info", "status"),
+    ("providers", "Show configured LLM providers", "status"),
+    ("agents", "List available agent types", "agents"),
+    ("chat", "Start an interactive chat session with an agent", "agents"),
+    ("run", "Run a single non-interactive task with an agent", "agents"),
+    ("workflows", "List available workflow templates", "workflows"),
+    ("pipeline", "Execute a workflow pipeline", "workflows"),
+    ("generate-tasks", "Generate tasks from a product specification", "workflows"),
+    ("traces", "Show recent execution traces", "observability"),
+    ("audit", "Show audit log entries", "observability"),
+    ("list-sessions", "List recent sessions (requires API server)", "observability"),
+]
+
+# Category → color, used for visual grouping in the help panel.
+CATEGORY_STYLES: dict[str, str] = {
+    "status": "cyan",
+    "agents": "green",
+    "workflows": "magenta",
+    "observability": "yellow",
+}
 
 
 def _print_header() -> None:
@@ -41,9 +105,62 @@ def _get_providers_info() -> list[tuple[str, str, str]]:
     ]
 
 
-@app.command()
+# ---------------------------------------------------------------------------
+# Top-level --help rendering
+# ---------------------------------------------------------------------------
+
+
+def _render_command_panel() -> None:
+    """Render a colour-grouped command list to the console.
+
+    Called by the Typer callback so that `solvyn --help` (with no other
+    arguments) shows a richly formatted catalogue rather than Typer's
+    default flat list.
+    """
+    table = Table(title="Commands", show_header=True, header_style="bold")
+    table.add_column("Command", style="bold white", no_wrap=True)
+    table.add_column("Category", style="cyan")
+    table.add_column("Description", style="white")
+
+    # Group by category in the catalogue's declared order so the panel is
+    # stable run-to-run.
+    for command, description, category in COMMAND_CATALOGUE:
+        cat_text = Text(category, style=CATEGORY_STYLES.get(category, "white"))
+        table.add_row(command, cat_text, description)
+
+    console.print(table)
+    console.print(
+        "\n[dim]Run[/] [bold]solvyn COMMAND --help[/] [dim]for usage examples and options.[/]"
+    )
+
+
+@app.callback(invoke_without_command=True)
+def _main_callback(ctx: typer.Context) -> None:
+    """Solvyn command-line entry point.
+
+    With no subcommand, Typer's ``no_args_is_help=True`` flag shows the
+    standard help screen. We also enrich that screen with a Rich-rendered
+    command panel so the user gets a colour-grouped catalogue.
+    """
+    if ctx.invoked_subcommand is None:
+        _render_command_panel()
+        raise typer.Exit()
+
+
+# ---------------------------------------------------------------------------
+# status / agents
+# ---------------------------------------------------------------------------
+
+
+@app.command(
+    epilog=(
+        "Examples:\n"
+        "  [bold]solvyn status[/]                    Show the full status table.\n"
+        "  [dim]solvyn status | grep Database[/]    Filter the table from a shell.[/]"
+    )
+)
 def status() -> None:
-    """Show Solvyn system status"""
+    """Show Solvyn system status (API, DB, Redis, LLM providers)."""
     table = Table(title="Solvyn Status")
     table.add_column("Component", style="cyan")
     table.add_column("Status", style="green")
@@ -65,9 +182,15 @@ def status() -> None:
     console.print(table)
 
 
-@app.command()
+@app.command(
+    epilog=(
+        "Examples:\n"
+        "  [bold]solvyn agents[/]                 List every agent the runtime knows about.\n"
+        "  [bold]solvyn agents | grep code[/]     Filter the list to coding-focused agents.[/]"
+    )
+)
 def agents() -> None:
-    """List available agent types"""
+    """List available agent types and their capabilities."""
     agents_list = agent_registry.list_agents()
     table = Table(title=f"Solvyn Agents ({len(agents_list)})")
     table.add_column("#", style="dim")
@@ -82,9 +205,21 @@ def agents() -> None:
     console.print(table)
 
 
-@app.command()
+# ---------------------------------------------------------------------------
+# chat / run
+# ---------------------------------------------------------------------------
+
+
+@app.command(
+    epilog=(
+        "Examples:\n"
+        "  [bold]solvyn chat[/]                          Start a chat with the default agent.\n"
+        "  [bold]solvyn chat code-reviewer[/]            Chat with the code-reviewer agent.\n"
+        "  [dim]Type 'exit' or 'quit' to end the session.[/]"
+    )
+)
 def chat(agent: str = typer.Argument("product-manager", help="Agent type to chat with")) -> None:
-    """Start an interactive chat session with a Solvyn agent"""
+    """Start an interactive chat session with a Solvyn agent."""
     if agent not in AGENT_TYPES:
         console.print(f"[red]Unknown agent: {agent}[/]")
         console.print(f"Available agents: {', '.join(AGENT_TYPES)}")
@@ -121,13 +256,19 @@ def chat(agent: str = typer.Argument("product-manager", help="Agent type to chat
     asyncio.run(_chat_loop())
 
 
-@app.command()
+@app.command(
+    epilog=(
+        "Examples:\n"
+        "  [bold]solvyn run --task 'Summarise the PR'[/]\n"
+        "  [bold]solvyn run --agent code-reviewer --task 'Review diff' --output review.md[/]"
+    )
+)
 def run(
     task: str = typer.Option("", help="Task description"),
     agent: str = typer.Option("product-manager", help="Primary agent for this task"),
     output: str = typer.Option("", help="Output file for results"),
 ) -> None:
-    """Run a single task with a Solvyn agent (non-interactive)"""
+    """Run a single task with a Solvyn agent (non-interactive)."""
     session_id = str(uuid.uuid4())
     tenant_id = settings.default_tenant_id
 
@@ -161,9 +302,20 @@ def run(
     asyncio.run(_run_task())
 
 
-@app.command()
+# ---------------------------------------------------------------------------
+# workflows / pipeline / generate-tasks
+# ---------------------------------------------------------------------------
+
+
+@app.command(
+    epilog=(
+        "Examples:\n"
+        "  [bold]solvyn workflows[/]                  Show the catalogue of workflow templates.\n"
+        "  [dim]See also:[/] [bold]solvyn pipeline <name>[/] [dim]to execute a workflow.[/]"
+    )
+)
 def workflows() -> None:
-    """List available workflow templates"""
+    """List available workflow templates."""
     table = Table(title="Solvyn Workflows")
     table.add_column("Name", style="cyan")
     table.add_column("Description", style="white")
@@ -176,12 +328,18 @@ def workflows() -> None:
     console.print(table)
 
 
-@app.command()
+@app.command(
+    epilog=(
+        "Examples:\n"
+        "  [bold]solvyn pipeline feature --input 'Add SSO via SAML'[/]\n"
+        "  [bold]solvyn pipeline bugfix --input 'Login fails on Safari 17'[/]"
+    )
+)
 def pipeline(
     workflow: str = typer.Argument("feature", help="Workflow template name"),
     input_text: str = typer.Option("", "--input", "-i", help="Input text for the workflow"),
 ) -> None:
-    """Run a workflow pipeline (feature/bugfix/release)"""
+    """Run a workflow pipeline (feature/bugfix/release)."""
     if workflow not in WORKFLOW_TEMPLATES:
         console.print(f"[red]Unknown workflow: {workflow}[/]")
         console.print(f"Available: {', '.join(WORKFLOW_TEMPLATES.keys())}")
@@ -230,11 +388,18 @@ def pipeline(
     asyncio.run(_run_pipeline())
 
 
-@app.command()
+@app.command(
+    name="generate-tasks",
+    epilog=(
+        "Examples:\n"
+        "  [bold]solvyn generate-tasks --spec 'Add a Slack bot that summarises PRs'[/]\n"
+        "  [bold]solvyn generate-tasks --spec \"$(cat spec.md)\"[/]"
+    ),
+)
 def generate_tasks(
     spec: str = typer.Option("", "--spec", "-s", help="Product specification text"),
 ) -> None:
-    """Generate tasks from a product specification"""
+    """Generate tasks from a product specification."""
     if not spec:
         console.print("[yellow]No specification provided. Use --spec to provide one.[/]")
         return
@@ -267,9 +432,20 @@ def generate_tasks(
     asyncio.run(_generate())
 
 
-@app.command()
+# ---------------------------------------------------------------------------
+# observability
+# ---------------------------------------------------------------------------
+
+
+@app.command(
+    epilog=(
+        "Examples:\n"
+        "  [bold]solvyn traces --limit 50[/]          Show the 50 most recent traces.\n"
+        "  [bold]solvyn traces --limit 5 | head[/]    Pipe the trace list through other tools.[/]"
+    )
+)
 def traces(limit: int = typer.Option(10, "--limit", "-l", help="Number of traces to show")) -> None:
-    """Show recent execution traces"""
+    """Show recent execution traces."""
     from solvyn.observability.tracing import tracing_manager
 
     traces_list = tracing_manager.list_traces(limit)
@@ -290,13 +466,19 @@ def traces(limit: int = typer.Option(10, "--limit", "-l", help="Number of traces
     console.print(table)
 
 
-@app.command()
+@app.command(
+    epilog=(
+        "Examples:\n"
+        "  [bold]solvyn audit --limit 100[/]\n"
+        "  [bold]solvyn audit --action login --agent code-reviewer[/]"
+    )
+)
 def audit(
     action: str = typer.Option("", "--action", "-a", help="Filter by action type"),
     agent: str = typer.Option("", "--agent", help="Filter by agent type"),
     limit: int = typer.Option(10, "--limit", "-l", help="Number of entries"),
 ) -> None:
-    """Show audit log entries"""
+    """Show audit log entries."""
 
     async def _show_audit() -> None:
         from solvyn.observability.audit import audit_logger
@@ -322,17 +504,30 @@ def audit(
     asyncio.run(_show_audit())
 
 
-@app.command(name="list-sessions")
+@app.command(
+    name="list-sessions",
+    epilog=(
+        "Examples:\n"
+        "  [bold]solvyn list-sessions[/]\n"
+        "  [dim]For live data, query the API:[/] [bold]curl -H 'X-API-Key: ...' /api/v1/sessions/[/]"
+    ),
+)
 def list_sessions() -> None:
-    """List recent sessions (requires API server)"""
+    """List recent sessions (requires API server)."""
     console.print("[yellow]Session listing requires database connection.[/]")
     console.print("[dim]Start the API server: solvyn-serve[/]")
     console.print("[dim]Then check: GET /api/v1/sessions[/]")
 
 
-@app.command()
+@app.command(
+    epilog=(
+        "Examples:\n"
+        "  [bold]solvyn providers[/]                  Show which providers are configured.\n"
+        "  [bold]solvyn providers | grep -v OK[/]     Show only providers missing a key.[/]"
+    )
+)
 def providers() -> None:
-    """Show configured LLM providers and their status"""
+    """Show configured LLM providers and their status."""
     table = Table(title="LLM Providers")
     table.add_column("Provider", style="cyan")
     table.add_column("Status", style="green")
@@ -346,32 +541,108 @@ def providers() -> None:
     console.print(table)
 
 
-@app.command()
+# ---------------------------------------------------------------------------
+# version
+# ---------------------------------------------------------------------------
+
+
+def _git_sha() -> str:
+    """Return the short git SHA of the current checkout, or 'unknown'.
+
+    Uses ``git rev-parse --short HEAD`` from the project root. The call is
+    best-effort: in a tarball install there is no .git directory, and we
+    surface the failure as 'unknown' rather than crashing the version
+    command.
+    """
+    try:
+        result = subprocess.run(  # noqa: S603 — input is fully controlled
+            ["git", "rev-parse", "--short", "HEAD"],  # noqa: S607
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    return "unknown"
+
+
+def _build_date() -> str:
+    """Return the build timestamp, sourced from SOURCE_DATE_EPOCH when set.
+
+    Reproducible builds set ``SOURCE_DATE_EPOCH`` (a Unix timestamp) so
+    that the same source tree always produces the same build metadata.
+    When the variable is not set we fall back to ``now()`` in UTC.
+    """
+    epoch = os.environ.get("SOURCE_DATE_EPOCH")
+    if epoch and epoch.isdigit():
+        return datetime.fromtimestamp(int(epoch), tz=UTC).isoformat()
+    return datetime.now(tz=UTC).isoformat()
+
+
+def _solvyn_install_path() -> str:
+    """Return the on-disk install path of the Solvyn package."""
+    try:
+        return str(Path(__file__).resolve().parent)
+    except Exception:
+        return "unknown"
+
+
+def _package_version(dist_name: str) -> str | None:
+    """Return the installed version of ``dist_name``, or None on failure."""
+    try:
+        return importlib.metadata.version(dist_name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    except Exception:
+        return None
+
+
+@app.command(
+    epilog=(
+        "Examples:\n"
+        "  [bold]solvyn version[/]                   Print runtime and dependency info.\n"
+        "  [bold]solvyn version | head[/]            Just the header (great for bug reports).[/]"
+    )
+)
 def version() -> None:
-    """Show Solvyn version and system info"""
+    """Show Solvyn version, build metadata, and core dependency versions."""
     from solvyn import __version__
 
     info = Table.grid(padding=(0, 2))
     info.add_column(style="cyan")
     info.add_column(style="white")
     info.add_row("Solvyn", f"v{__version__}")
+    info.add_row("Git SHA", _git_sha())
+    info.add_row("Build date", _build_date())
     info.add_row("Python", platform.python_version())
+    info.add_row("Python path", sys.executable)
+    info.add_row("Solvyn install path", _solvyn_install_path())
     info.add_row("Platform", platform.platform())
     info.add_row("Host", f"{settings.host}:{settings.port}")
     console.print(info)
     console.print()
 
-    try:
-        deps = ["fastapi", "uvicorn", "pydantic", "sqlalchemy", "alembic", "redis", "typer", "httpx"]
-        dep_table = Table(title="Core Dependencies")
-        dep_table.add_column("Package", style="cyan")
-        dep_table.add_column("Version")
-        for dep in deps:
-            ver = importlib.metadata.version(dep)
-            dep_table.add_row(dep, ver)
-        console.print(dep_table)
-    except importlib.metadata.PackageNotFoundError:
-        pass
+    deps = [
+        "fastapi",
+        "uvicorn",
+        "pydantic",
+        "sqlalchemy",
+        "alembic",
+        "redis",
+        "typer",
+        "httpx",
+        "rich",
+    ]
+    dep_table = Table(title="Core Dependencies")
+    dep_table.add_column("Package", style="cyan")
+    dep_table.add_column("Version")
+    for dep in deps:
+        ver = _package_version(dep)
+        dep_table.add_row(dep, ver or "—")
+    console.print(dep_table)
 
 
 if __name__ == "__main__":
