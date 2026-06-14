@@ -12,6 +12,7 @@ from solvyn.llm.providers.base import LLMProvider, LLMResponse
 from solvyn.llm.providers.deepseek import DeepSeekProvider
 from solvyn.llm.providers.groq import GroqProvider
 from solvyn.llm.providers.openrouter import OpenRouterProvider
+from solvyn.observability.langfuse import trace_llm_call
 
 logger = logging.getLogger(__name__)
 
@@ -203,44 +204,101 @@ class LLMRouter:
         model: str | None = None,
         fallback: bool = True,
         use_cache: bool = True,
+        tenant_id: str | None = None,
+        session_id: str | None = None,
+        agent_type: str | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
         effective_model = model or settings.llm_default_model
+        effective_provider = provider or settings.llm_default_provider
+        resolved_tenant = self._resolve_tenant_id(tenant_id)
+        resolved_session = self._resolve_session_id(session_id)
+        trace_name = agent_type or "llm_call"
+
         if use_cache:
             cached = await self.cache.get(prompt, effective_model, system_prompt)
             if cached is not None:
                 logger.debug(f"Cache hit for model={effective_model}")
                 return cached
 
-        provider_name = provider or settings.llm_default_provider
-        llm = self.providers.get(provider_name)
-
+        llm = self.providers.get(effective_provider)
         if llm is None:
-            raise ValueError(f"Unknown provider: {provider_name}. Available: {list(self.providers.keys())}")
+            raise ValueError(f"Unknown provider: {effective_provider}. Available: {list(self.providers.keys())}")
 
-        try:
-            response = await llm.generate(prompt=prompt, system_prompt=system_prompt, model=model, **kwargs)
+        with trace_llm_call(
+            name=trace_name,
+            model=effective_model,
+            provider=effective_provider,
+            input_data={"prompt": prompt, "system_prompt": system_prompt},
+            tenant_id=resolved_tenant,
+            session_id=resolved_session,
+        ) as trace:
+            try:
+                response = await llm.generate(
+                    prompt=prompt, system_prompt=system_prompt, model=model, **kwargs
+                )
+            except (ConnectionError, TimeoutError, httpx.TimeoutException, httpx.ConnectError, httpx.HTTPStatusError) as e:
+                logger.error(f"Provider {effective_provider} failed: {e}")
+                if not fallback:
+                    raise
+
+                fallback_order = [
+                    p for p in ["openrouter", "groq", "deepseek"] if p != effective_provider and p in self.providers
+                ]
+                for fallback_name in fallback_order:
+                    fb_llm = self.providers[fallback_name]
+                    with trace_llm_call(
+                        name=f"{trace_name}_fallback_{fallback_name}",
+                        model=effective_model,
+                        provider=fallback_name,
+                        input_data={"prompt": prompt, "system_prompt": system_prompt, "fallback_for": effective_provider},
+                        tenant_id=resolved_tenant,
+                        session_id=resolved_session,
+                    ) as fb_trace:
+                        try:
+                            response = await fb_llm.generate(
+                                prompt=prompt, system_prompt=system_prompt, model=None, **kwargs
+                            )
+                        except (
+                            ConnectionError,
+                            TimeoutError,
+                            httpx.TimeoutException,
+                            httpx.ConnectError,
+                            httpx.HTTPStatusError,
+                        ) as fb_e:
+                            logger.error(f"Fallback {fallback_name} also failed: {fb_e}")
+                            continue
+                        _populate_trace_record(fb_trace, response)
+                        if use_cache:
+                            await self.cache.set(prompt, effective_model, response, system_prompt)
+                        return response
+
+                raise RuntimeError("All LLM providers failed")
+
+            _populate_trace_record(trace, response)
             if use_cache:
                 await self.cache.set(prompt, effective_model, response, system_prompt)
             return response
-        except (ConnectionError, TimeoutError, httpx.TimeoutException, httpx.ConnectError, httpx.HTTPStatusError) as e:
-            logger.error(f"Provider {provider_name} failed: {e}")
-            if not fallback:
-                raise
 
-            fallback_order = [p for p in ["openrouter", "groq", "deepseek"] if p != provider_name and p in self.providers]
-            for fallback_name in fallback_order:
-                try:
-                    logger.info(f"Falling back to {fallback_name}")
-                    fb_llm = self.providers[fallback_name]
-                    response = await fb_llm.generate(prompt=prompt, system_prompt=system_prompt, model=None, **kwargs)
-                    # Don't cache fallback responses under the original model key
-                    return response
-                except (ConnectionError, TimeoutError, httpx.TimeoutException, httpx.ConnectError, httpx.HTTPStatusError) as fb_e:
-                    logger.error(f"Fallback {fallback_name} also failed: {fb_e}")
-                    continue
+    @staticmethod
+    def _resolve_tenant_id(override: str | None) -> str:
+        if override:
+            return override
+        try:
+            from solvyn.multi_tenant.middleware import tenant_context
 
-            raise RuntimeError("All LLM providers failed")
+            slug = tenant_context.tenant_slug
+            if slug:
+                return slug
+        except Exception:  # noqa: BLE001 — never break on context access
+            pass
+        return settings.default_tenant_id
+
+    @staticmethod
+    def _resolve_session_id(override: str | None) -> str | None:
+        if override:
+            return override
+        return None
 
     def select_model(self, strategy: str = "default", **kwargs: Any) -> tuple[str, str]:
         if strategy == "cheapest":
@@ -277,3 +335,22 @@ class LLMRouter:
 
 
 llm_router = LLMRouter()
+
+
+def _populate_trace_record(record: dict[str, Any], response: LLMResponse) -> None:
+    """Populate a ``trace_llm_call`` record from an LLM response.
+
+    Best-effort: the LLM call itself must not be affected by errors here.
+    """
+    try:
+        record["output"] = response.content
+        record["prompt_tokens"] = response.prompt_tokens
+        record["completion_tokens"] = response.completion_tokens
+        record["total_tokens"] = response.total_tokens
+        record["cost"] = response.cost
+        if not record.get("model") and response.model:
+            record["model"] = response.model
+        if not record.get("provider") and response.provider:
+            record["provider"] = response.provider
+    except Exception as exc:  # noqa: BLE001 — never break on record population
+        logger.debug("Failed to populate trace record: %s", exc)
