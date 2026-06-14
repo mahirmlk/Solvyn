@@ -29,7 +29,7 @@
 | 3 | Workflow Automation (templates, executor, task gen) | ✅ Complete |
 | 4 | Observability & Analytics (metrics, traces, audit, WS) | ✅ Complete |
 | 5 | Frontend & Deployment (Next.js, k8s, CI/CD, hardening) | ✅ Complete |
-| 6 | Production Hardening & Polish | 🔜 Not started |
+| 6 | Production Hardening & Polish | ✅ Complete |
 
 ---
 
@@ -125,24 +125,24 @@
 
 **Goal:** Enterprise readiness, testing, and quality of life.
 
-- [ ] Prometheus alerting rules (high error rate, LLM failures)
-- [ ] Grafana dashboard JSON (importable)
-- [ ] LangFuse/Phoenix tracing integration for LLM observability
-- [ ] End-to-end tests (playwright/pytest) for critical workflows
-- [ ] Comprehensive test suite (unit + integration for all agents)
-- [ ] Pre-commit hooks (ruff, mypy, pytest)
-- [ ] Makefile (dev, lint, typecheck, test, docker, deploy)
-- [ ] API key management via Web UI (admin panel)
-- [ ] Tenant admin panel (CRUD tenants, usage quotas)
-- [ ] Automated DB backup scripts (pg_dump to S3)
-- [ ] Multi-region failover plan documentation
-- [ ] Rate limit by tenant (not just IP)
-- [ ] Structured logging (JSON format for log aggregation)
-- [ ] OpenAPI docs with proper tags, examples, auth annotations
-- [ ] Health check deep probes (DB, Redis, LLM connectivity)
-- [ ] Graceful shutdown with connection draining
-- [ ] CLI help polish (descriptions, examples, rich formatting)
-- [ ] Version command output (git sha, deps versions)
+- [x] Prometheus alerting rules (high error rate, LLM failures)
+- [x] Grafana dashboard JSON (importable)
+- [x] LangFuse/Phoenix tracing integration for LLM observability
+- [x] End-to-end tests (playwright/pytest) for critical workflows
+- [x] Comprehensive test suite (unit + integration for all agents)
+- [x] Pre-commit hooks (ruff, mypy, pytest)
+- [x] Makefile (dev, lint, typecheck, test, docker, deploy)
+- [x] API key management via Web UI (admin panel)
+- [x] Tenant admin panel (CRUD tenants, usage quotas)
+- [x] Automated DB backup scripts (pg_dump to S3)
+- [x] Multi-region failover plan documentation
+- [x] Rate limit by tenant (not just IP)
+- [x] Structured logging (JSON format for log aggregation)
+- [x] OpenAPI docs with proper tags, examples, auth annotations
+- [x] Health check deep probes (DB, Redis, LLM connectivity)
+- [x] Graceful shutdown with connection draining
+- [x] CLI help polish (descriptions, examples, rich formatting)
+- [x] Version command output (git sha, deps versions)
 
 ---
 
