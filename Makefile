@@ -1,4 +1,4 @@
-.PHONY: dev install lint typecheck test test-cov docker-build docker-up docker-down clean pre-commit deploy
+.PHONY: dev install lint typecheck test test-unit test-e2e test-cov docker-build docker-up docker-down clean pre-commit deploy
 
 # ─── Development ────────────────────────────────────────────
 dev:
@@ -25,6 +25,12 @@ typecheck:
 
 test:
 	pytest tests/ -v
+
+test-unit:
+	pytest tests/ -v -m unit
+
+test-e2e:
+	pytest tests/ -v -m e2e
 
 test-cov:
 	pytest tests/ -v --cov=solvyn --cov-report=term --cov-report=html

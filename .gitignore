@@ -11,3 +11,6 @@ build/
 .ruff_cache/
 .mypy_cache/
 *.log
+*.backup
+frontend/.next/
+frontend/node_modules/
