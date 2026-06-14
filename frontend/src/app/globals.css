@@ -1243,3 +1243,215 @@ input {
     align-items: flex-start;
   }
 }
+
+/* Admin panel --------------------------------------------------------- */
+.admin-tenants-workbench .workflow-index {
+  background: var(--color-pearl-soft);
+}
+
+.admin-form {
+  display: flex;
+  flex-direction: column;
+}
+
+.admin-form .editorial-input {
+  resize: none;
+  border: 1px solid var(--line-light);
+  background: var(--color-pearl);
+  color: var(--color-ink);
+  min-height: 42px;
+  padding: 10px 12px;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+
+.admin-form .editorial-input:focus-visible {
+  border-color: var(--color-violet);
+  box-shadow: 0 0 0 2px rgba(119, 84, 153, 0.15);
+}
+
+.admin-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 0;
+  border-top: 1px solid var(--line-light);
+  border-bottom: 1px solid var(--line-light);
+}
+
+.admin-toggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--color-violet);
+}
+
+.admin-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.admin-tenant-table,
+.admin-key-table {
+  margin-top: 22px;
+  border: 1px solid var(--line-dark);
+}
+
+.admin-tenant-head,
+.admin-tenant-row,
+.admin-key-head,
+.admin-key-row {
+  display: grid;
+  align-items: center;
+  gap: 18px;
+  padding: 14px clamp(17px, 3vw, 28px);
+}
+
+.admin-tenant-head,
+.admin-key-head {
+  color: var(--color-light-muted);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--line-dark);
+}
+
+.admin-tenant-head {
+  grid-template-columns: minmax(180px, 1.6fr) 110px minmax(160px, 1.4fr) 60px minmax(220px, 1.4fr);
+}
+
+.admin-tenant-row {
+  min-height: 84px;
+  border-bottom: 1px solid var(--line-dark);
+}
+
+.admin-tenant-row:last-child {
+  border-bottom: 0;
+}
+
+.admin-tenant-row {
+  grid-template-columns: minmax(180px, 1.6fr) 110px minmax(160px, 1.4fr) 60px minmax(220px, 1.4fr);
+}
+
+.admin-tenant-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.admin-tenant-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.admin-tenant-usage .readout-value {
+  font-size: 14px;
+}
+
+.admin-tenant-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.admin-tenant-actions .action-button {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 9px;
+  letter-spacing: 0.16em;
+}
+
+.admin-key-head,
+.admin-key-row {
+  grid-template-columns: minmax(140px, 0.9fr) minmax(220px, 1.4fr) minmax(170px, 1fr) minmax(170px, 1fr) 110px 110px;
+}
+
+.admin-key-row {
+  min-height: 64px;
+  border-bottom: 1px solid var(--line-dark);
+}
+
+.admin-key-row:last-child {
+  border-bottom: 0;
+}
+
+.admin-key-prefix {
+  color: var(--color-violet-light);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  word-break: break-all;
+}
+
+.admin-key-banner {
+  margin-top: 22px;
+  padding: 18px 16px;
+  border: 1px solid rgba(119, 84, 153, 0.4);
+  background: var(--color-violet-wash);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.admin-key-mono {
+  padding: 12px 14px;
+  background: var(--color-pearl);
+  border: 1px solid var(--line-light);
+  color: var(--color-violet);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.admin-key-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.admin-key-actions .action-button {
+  min-height: 32px;
+  padding: 0 14px;
+  font-size: 9px;
+  letter-spacing: 0.16em;
+}
+
+.admin-error {
+  margin-top: 18px;
+  padding: 12px 14px;
+  border: 1px solid rgba(178, 103, 105, 0.5);
+  background: rgba(178, 103, 105, 0.08);
+  color: var(--color-error);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+
+.admin-tenant-picker {
+  margin-top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+@media (max-width: 1020px) {
+  .admin-tenant-head,
+  .admin-tenant-row,
+  .admin-key-head,
+  .admin-key-row {
+    grid-template-columns: 1fr 1fr;
+  }
+  .admin-tenant-head,
+  .admin-key-head {
+    display: none;
+  }
+  .admin-tenant-row,
+  .admin-key-row {
+    padding: 18px 16px;
+  }
+  .admin-tenant-actions {
+    grid-column: 1 / 3;
+  }
+}

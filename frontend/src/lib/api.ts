@@ -106,6 +106,50 @@ export interface SessionAnalytics {
   agent_breakdown: { agent_type: string; tokens: number; cost: number; calls: number }[];
 }
 
+// Admin panel types -----------------------------------------------------
+
+export interface AdminTenant {
+  id: string;
+  name: string;
+  slug: string;
+  role: string;
+  is_active: boolean;
+  monthly_token_quota: number | null;
+  monthly_cost_quota: number | null;
+  created_at: string;
+  updated_at: string;
+  total_tokens: number;
+  total_cost: number;
+  sessions_count: number;
+  api_keys_count: number;
+  initial_api_key?: AdminApiKeyCreated;
+}
+
+export interface AdminTenantUsage {
+  tenant_id: string;
+  total_tokens: number;
+  total_cost: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  sessions_count: number;
+}
+
+export interface AdminApiKey {
+  id: string;
+  tenant_id: string;
+  name: string;
+  key_prefix: string;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  is_active: boolean;
+  masked: string;
+}
+
+export interface AdminApiKeyCreated extends AdminApiKey {
+  plaintext_key: string;
+}
+
 export const api = {
   health: () => request<HealthStatus>("/health"),
 
@@ -137,4 +181,27 @@ export const api = {
   },
 
   getSessionAnalytics: (sessionId: string) => request<SessionAnalytics>(`/observability/analytics/session/${sessionId}`),
+
+  // -------------------------------------------------------------------
+  // Admin — tenant & API key management
+  // -------------------------------------------------------------------
+
+  listAdminTenants: () => request<{ tenants: AdminTenant[]; count: number }>("/admin/tenants"),
+
+  getAdminTenantUsage: (tenantId: string) => request<AdminTenantUsage>(`/admin/tenants/${tenantId}/usage`),
+
+  createAdminTenant: (input: { name: string; slug: string; role?: string; is_active?: boolean; monthly_token_quota?: number; monthly_cost_quota?: number }) =>
+    request<AdminTenant>("/admin/tenants", { method: "POST", body: JSON.stringify(input) }),
+
+  updateAdminTenant: (tenantId: string, input: { name?: string; role?: string; is_active?: boolean; monthly_token_quota?: number; monthly_cost_quota?: number }) =>
+    request<AdminTenant>(`/admin/tenants/${tenantId}`, { method: "PATCH", body: JSON.stringify(input) }),
+
+  deleteAdminTenant: (tenantId: string) => request<{ deleted: boolean; tenant_id: string; is_active: boolean }>(`/admin/tenants/${tenantId}`, { method: "DELETE" }),
+
+  listAdminApiKeys: (tenantId: string) => request<{ api_keys: AdminApiKey[]; count: number }>(`/admin/tenants/${tenantId}/api-keys`),
+
+  createAdminApiKey: (tenantId: string, name: string) =>
+    request<AdminApiKeyCreated>(`/admin/tenants/${tenantId}/api-keys`, { method: "POST", body: JSON.stringify({ name }) }),
+
+  revokeAdminApiKey: (keyId: string) => request<{ revoked: boolean; key_id: string; tenant_id: string; revoked_at: string | null }>(`/admin/api-keys/${keyId}`, { method: "DELETE" }),
 };

@@ -8,6 +8,7 @@ const NAV_ITEMS = [
   { label: "Workflows", href: "/workflows" },
   { label: "Sessions", href: "/sessions" },
   { label: "Analytics", href: "/analytics" },
+  { label: "Admin", href: "/admin/tenants" },
 ];
 
 export function Sidebar() {
