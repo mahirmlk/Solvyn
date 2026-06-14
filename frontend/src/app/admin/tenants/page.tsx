@@ -6,6 +6,15 @@ import { api, AdminTenant } from "@/lib/api";
 
 type FormMode = "create" | "edit";
 
+type TenantPayload = {
+  name: string;
+  slug: string;
+  role?: string;
+  is_active?: boolean;
+  monthly_token_quota?: number;
+  monthly_cost_quota?: number;
+};
+
 const EMPTY_FORM = {
   name: "",
   slug: "",
@@ -89,7 +98,7 @@ export default function AdminTenantsPage() {
     setError(null);
     setCreatedKey(null);
 
-    const payload: Record<string, unknown> = {
+    const payload: TenantPayload = {
       name: form.name.trim(),
       slug: form.slug.trim().toLowerCase(),
       role: form.role,
