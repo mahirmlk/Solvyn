@@ -107,9 +107,17 @@ TOXIC_PATTERNS: list[tuple[re.Pattern[str], str, Severity]] = [
 # Lower-severity bias patterns (often unintentional in LLM output)
 BIAS_PATTERNS: list[tuple[re.Pattern[str], str, Severity]] = [
     # Gender stereotyping
-    (re.compile(r"\b(?:women|girls?)\s+(?:should|must|need to|ought to)\s+(?:only|just|merely)\s+(?:cook|clean|stay|serve)\b", re.I), "gender_stereotype", Severity.MEDIUM),
+    (
+        re.compile(r"\b(?:women|girls?)\s+(?:should|must|need to|ought to)\s+(?:only|just|merely)\s+(?:cook|clean|stay|serve)\b", re.I),
+        "gender_stereotype",
+        Severity.MEDIUM,
+    ),
     # Racial stereotyping
-    (re.compile(r"\b(?:all|most|typical)\s+(?:black|white|asian|hispanic|latino)\s+(?:people|men|women)\s+(?:are|do|have)\b", re.I), "racial_stereotype", Severity.MEDIUM),
+    (
+        re.compile(r"\b(?:all|most|typical)\s+(?:black|white|asian|hispanic|latino)\s+(?:people|men|women)\s+(?:are|do|have)\b", re.I),
+        "racial_stereotype",
+        Severity.MEDIUM,
+    ),
     # Age discrimination
     (re.compile(r"\b(?:too\s+old|too\s+young|age\s+doesn'?t\s+matter)\b", re.I), "age_bias", Severity.LOW),
 ]
