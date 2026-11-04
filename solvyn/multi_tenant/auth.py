@@ -61,43 +61,40 @@ async def _validate_tenant_api_key(api_key: str, expected_tenant_id: uuid.UUID |
 
     if expected_tenant_id is not None:
         async with async_session_factory() as session:
-            result = await session.execute(select(Tenant).where(Tenant.id == expected_tenant_id, Tenant.is_active == True))  # noqa: E712
-            tenant = result.scalar_one_or_none()
+            tenant_result = await session.execute(select(Tenant).where(Tenant.id == expected_tenant_id, Tenant.is_active == True))  # noqa: E712
+            tenant = tenant_result.scalar_one_or_none()
             if tenant is None:
                 return None
             stored_hash = (tenant.api_key_hash or "").lower()
             if stored_hash and hmac.compare_digest(key_hash, stored_hash):
                 return tenant
             # Fall through to per-key table (tenant may have rotated keys)
-            result = await session.execute(
+            api_key_result = await session.execute(
                 select(ApiKey)
                 .where(ApiKey.tenant_id == expected_tenant_id)
                 .where(ApiKey.key_hash == key_hash)
                 .where(ApiKey.revoked_at.is_(None))
             )
-            api_key_row = result.scalar_one_or_none()
-            if api_key_row is not None:
-                return tenant
-        return None
+            return tenant if api_key_result.scalar_one_or_none() is not None else None
 
     # No slug supplied: resolve the tenant by key hash using the unique index.
     async with async_session_factory() as session:
-        result = await session.execute(
+        tenant_result = await session.execute(
             select(Tenant).where(Tenant.api_key_hash == key_hash, Tenant.is_active == True)  # noqa: E712
         )
-        tenant = result.scalar_one_or_none()
+        tenant = tenant_result.scalar_one_or_none()
         if tenant is not None:
             return tenant
-        result = await session.execute(
+        api_key_result = await session.execute(
             select(ApiKey).where(ApiKey.key_hash == key_hash, ApiKey.revoked_at.is_(None))
         )
-        api_key_row = result.scalar_one_or_none()
+        api_key_row = api_key_result.scalar_one_or_none()
         if api_key_row is None:
             return None
-        result = await session.execute(
+        bound_result = await session.execute(
             select(Tenant).where(Tenant.id == api_key_row.tenant_id, Tenant.is_active == True)  # noqa: E712
         )
-        return result.scalar_one_or_none()
+        return bound_result.scalar_one_or_none()
 
 
 # ---------------------------------------------------------------------------

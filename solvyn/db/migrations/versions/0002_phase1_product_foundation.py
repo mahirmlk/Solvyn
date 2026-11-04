@@ -16,6 +16,7 @@ project_knowledge, approvals) are created in dependency order.
 """
 
 from collections.abc import Sequence
+from datetime import datetime
 
 import sqlalchemy as sa
 from alembic import op
@@ -27,7 +28,7 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
-def _ts(col: str, server_default=True) -> sa.Column:
+def _ts(col: str, server_default: bool = True) -> sa.Column[datetime]:
     return sa.Column(col, sa.DateTime(timezone=True), server_default=sa.func.now() if server_default else None)
 
 

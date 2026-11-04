@@ -195,17 +195,17 @@ async def update_teammate(teammate_id: uuid.UUID, payload: TeammateUpdate, db: A
         if value is not None:
             setattr(teammate, field_name, value)
     if payload.permissions is not None:
-        existing = (await db.execute(select(TeammatePermission).where(TeammatePermission.teammate_id == teammate_id))).scalars().all()
-        for row in existing:
-            await db.delete(row)
+        existing_permissions = (await db.execute(select(TeammatePermission).where(TeammatePermission.teammate_id == teammate_id))).scalars().all()
+        for permission_row in existing_permissions:
+            await db.delete(permission_row)
         for perm in payload.permissions:
             if perm not in _VALID_PERMISSIONS:
                 raise HTTPException(status_code=400, detail=f"Unknown permission: {perm}")
             db.add(TeammatePermission(teammate_id=teammate.id, permission=perm, granted=True))
     if payload.project_ids is not None:
-        existing = (await db.execute(select(TeammateProjectAssignment).where(TeammateProjectAssignment.teammate_id == teammate_id))).scalars().all()
-        for row in existing:
-            await db.delete(row)
+        existing_assignments = (await db.execute(select(TeammateProjectAssignment).where(TeammateProjectAssignment.teammate_id == teammate_id))).scalars().all()
+        for assignment_row in existing_assignments:
+            await db.delete(assignment_row)
         for project_id_str in payload.project_ids:
             project = await db.get(Project, uuid.UUID(project_id_str))
             if project is None or project.tenant_id != tenant_id:

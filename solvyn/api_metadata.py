@@ -9,6 +9,8 @@ from the routers importing from ``solvyn.main``.
 
 from __future__ import annotations
 
+from typing import Any
+
 # ---------------------------------------------------------------------------
 # Tag catalogue
 # ---------------------------------------------------------------------------
@@ -51,7 +53,7 @@ TAGS_METADATA: list[dict[str, str]] = [
 
 # Standard JSON examples for the error responses we surface across the API.
 # Centralised so individual routers can reuse them without duplication.
-COMMON_RESPONSES: dict[int | str, dict] = {
+COMMON_RESPONSES: dict[int | str, dict[str, Any]] = {
     401: {
         "description": "Authentication failed — missing or invalid `X-API-Key`.",
         "content": {

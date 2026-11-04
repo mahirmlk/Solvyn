@@ -32,7 +32,10 @@ class PromptTemplate:
         return self._compiled.render(**kwargs)
 
     def get_variable_names(self) -> set[str]:
-        return self._compiled.module.__dict__.keys() if hasattr(self._compiled, "module") else set()
+        module = getattr(self._compiled, "module", None)
+        if module is None:
+            return set()
+        return {str(k) for k in dict(module.__dict__).keys()}
 
     def to_dict(self) -> dict[str, Any]:
         return {

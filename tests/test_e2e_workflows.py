@@ -70,11 +70,33 @@ def _patch_llm_router() -> Any:
         llm_router.generate = original  # type: ignore[method-assign]
 
 
+def _clear_ratelimit_keys() -> None:
+    """Best-effort cleanup of stale Redis sliding-window keys.
+
+    CI runs with a real Redis service; stale ``ratelimit:*`` entries from
+    earlier tests in the same run would leak into the rate-limit tests and
+    make them flaky.  Only the ``ratelimit:`` namespace is touched.
+    """
+    try:
+        import redis as _redis
+
+        from solvyn.config import settings
+
+        client = _redis.Redis.from_url(settings.redis_url, decode_responses=True)
+        keys = list(client.scan_iter("ratelimit:*"))
+        if keys:
+            client.delete(*keys)
+        client.close()
+    except Exception:
+        pass
+
+
 @pytest.fixture
 def low_rate_limit() -> Any:
-    """Configure the in-process rate limiter to allow only 5 requests."""
+    """Configure the rate limiter to allow only 5 requests (hermetic)."""
     from solvyn.multi_tenant.rate_limiter import redis_rate_limiter
 
+    _clear_ratelimit_keys()
     redis_rate_limiter.configure(ip_limit=5, tenant_limit=5, window_seconds=60)
     redis_rate_limiter._fallback_buckets.clear()
     try:
@@ -82,6 +104,7 @@ def low_rate_limit() -> Any:
     finally:
         redis_rate_limiter.configure(ip_limit=100, tenant_limit=500, window_seconds=60)
         redis_rate_limiter._fallback_buckets.clear()
+        _clear_ratelimit_keys()
 
 
 @pytest_asyncio.fixture

@@ -29,13 +29,9 @@ def verify_password(password: str, password_hash: str) -> bool:
     if not password or not password_hash:
         return False
     try:
-        return _password_hash.verify(password, password_hash)
+        return bool(_password_hash.verify(password, password_hash))
     except Exception:
         return False
-
-
-def needs_rehash(password_hash: str) -> bool:
-    return _password_hash.check_needs_rehash(password_hash)
 
 
 def hash_token(token: str) -> str:

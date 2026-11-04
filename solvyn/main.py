@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -92,7 +93,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    def _custom_openapi() -> dict:
+    def _custom_openapi() -> dict[str, Any]:
         """Generate a custom OpenAPI schema with security schemes pre-wired.
 
         FastAPI's auto-generated schema is fine for most projects, but Solvyn

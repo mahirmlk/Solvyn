@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     langfuse_host: str = "https://cloud.langfuse.com"
 
     @model_validator(mode="after")
-    def _require_secrets_in_prod(self):
+    def _require_secrets_in_prod(self) -> "Settings":
         """Fail fast in production when auth secrets are missing (P0-002).
 
         Imports of this module happen during pytest collection before any

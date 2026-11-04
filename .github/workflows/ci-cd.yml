@@ -25,7 +25,10 @@ jobs:
       - name: Ruff lint
         run: ruff check solvyn/
       - name: MyPy type check
-        run: mypy solvyn/ --ignore-missing-imports --follow-imports=skip
+        # pyproject's [tool.mypy] already sets strict mode; --follow-imports=skip
+        # made pydantic resolve as Any and produced phantom untyped-decorator
+        # errors. Keep the gate honest — the codebase passes strict mypy.
+        run: mypy solvyn/ --ignore-missing-imports
 
   test:
     runs-on: ubuntu-latest
