@@ -3,13 +3,14 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import uuid
 from typing import Any
 
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
-from solvyn.db.models import Tenant, TenantRole
+from solvyn.db.models import ApiKey, Tenant
 from solvyn.db.session import async_session_factory
 from solvyn.multi_tenant.middleware import tenant_context
 from solvyn.multi_tenant.rate_limiter import redis_rate_limiter
@@ -17,7 +18,17 @@ from solvyn.multi_tenant.rate_limiter import redis_rate_limiter
 logger = logging.getLogger(__name__)
 
 
-PUBLIC_PATHS = ("/api/v1/health", "/metrics", "/docs", "/redoc", "/openapi.json")
+PUBLIC_PATHS = (
+    "/api/v1/health",
+    "/metrics",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+    "/api/v1/auth/register",
+    "/api/v1/auth/login",
+    "/api/v1/auth/refresh",
+    "/api/v1/auth/logout",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -38,26 +49,55 @@ def verify_api_key(api_key: str, expected_hash_or_key: str) -> bool:
     return hmac.compare_digest(key_hash, expected_hash)
 
 
-async def _validate_tenant_api_key(api_key: str) -> Tenant | None:
-    """Validate API key against tenant-specific api_key_hash in the database.
+async def _validate_tenant_api_key(api_key: str, expected_tenant_id: uuid.UUID | None = None) -> Tenant | None:
+    """Validate an API key with an indexed lookup (never a full-table scan).
 
-    Returns the authenticated Tenant if valid, or None if no matching
-    active tenant is found.
+    P0-003 fix: when ``expected_tenant_id`` is supplied (resolved from the
+    X-Tenant-Slug header), the key must belong to *that* tenant. A valid key
+    from a different tenant is rejected so one tenant cannot impersonate
+    another by sending a foreign slug.
     """
     key_hash = hashlib.sha256(api_key.encode()).hexdigest()
 
+    if expected_tenant_id is not None:
+        async with async_session_factory() as session:
+            result = await session.execute(select(Tenant).where(Tenant.id == expected_tenant_id, Tenant.is_active == True))  # noqa: E712
+            tenant = result.scalar_one_or_none()
+            if tenant is None:
+                return None
+            stored_hash = (tenant.api_key_hash or "").lower()
+            if stored_hash and hmac.compare_digest(key_hash, stored_hash):
+                return tenant
+            # Fall through to per-key table (tenant may have rotated keys)
+            result = await session.execute(
+                select(ApiKey)
+                .where(ApiKey.tenant_id == expected_tenant_id)
+                .where(ApiKey.key_hash == key_hash)
+                .where(ApiKey.revoked_at.is_(None))
+            )
+            api_key_row = result.scalar_one_or_none()
+            if api_key_row is not None:
+                return tenant
+        return None
+
+    # No slug supplied: resolve the tenant by key hash using the unique index.
     async with async_session_factory() as session:
         result = await session.execute(
-            select(Tenant).where(Tenant.is_active == True)  # noqa: E712
+            select(Tenant).where(Tenant.api_key_hash == key_hash, Tenant.is_active == True)  # noqa: E712
         )
-        tenants = result.scalars().all()
-
-        for tenant in tenants:
-            stored_hash = (tenant.api_key_hash or "").lower()
-            if hmac.compare_digest(key_hash, stored_hash):
-                return tenant
-
-    return None
+        tenant = result.scalar_one_or_none()
+        if tenant is not None:
+            return tenant
+        result = await session.execute(
+            select(ApiKey).where(ApiKey.key_hash == key_hash, ApiKey.revoked_at.is_(None))
+        )
+        api_key_row = result.scalar_one_or_none()
+        if api_key_row is None:
+            return None
+        result = await session.execute(
+            select(Tenant).where(Tenant.id == api_key_row.tenant_id, Tenant.is_active == True)  # noqa: E712
+        )
+        return result.scalar_one_or_none()
 
 
 # ---------------------------------------------------------------------------
@@ -70,15 +110,19 @@ class RequireRole:
     Usage in route definitions::
 
         @app.post("/admin/thing", dependencies=[Depends(RequireRole(TenantRole.ADMIN))])
+
+    The check requires an *authenticated* tenant (proved by credential), not
+    merely a tenant slug named in a header (P0-003).
     """
 
     def __init__(self, *allowed_roles: str) -> None:
         self.allowed_roles = allowed_roles
 
     async def __call__(self, request: Request) -> None:
+        if not tenant_context.is_authenticated:
+            raise HTTPException(status_code=401, detail="Authentication required")
         if tenant_context.tenant_id is None:
-            raise HTTPException(status_code=403, detail="No tenant context")
-
+            raise HTTPException(status_code=401, detail="No tenant context")
         if tenant_context.tenant_role not in self.allowed_roles:
             raise HTTPException(
                 status_code=403,
@@ -105,17 +149,51 @@ async def auth_middleware(request: Request, call_next: Any) -> Any:
     if request.url.path in PUBLIC_PATHS or request.url.path.startswith("/api/v1/health"):
         return await call_next(request)
 
+    # JWT bearer (user identity) takes precedence when present.
+    authorization = request.headers.get("Authorization")
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(None, 1)[1].strip()
+        from solvyn.identity.security import decode_access_token
+
+        try:
+            payload = decode_access_token(token)
+            subject = payload.get("sub")
+            user_uuid = uuid.UUID(str(subject))
+            from solvyn.db.models import User
+
+            async with async_session_factory() as db_session:
+                user = await db_session.get(User, user_uuid)
+            if user is None or not user.is_active:
+                return JSONResponse(status_code=401, content={"error": "Invalid or expired token"})
+            tenant_context.set_authenticated(tenant_context.tenant_id, user_id=user_uuid)
+            # Bind user; tenant comes from slug header or membership (resolved below).
+            if tenant_context.tenant_id is None:
+                tenant_context.set_authenticated(user_uuid, user_id=user_uuid)
+            else:
+                tenant_context.set_authenticated(tenant_context.tenant_id, user_id=user_uuid)
+        except Exception:
+            return JSONResponse(status_code=401, content={"error": "Invalid or expired token"})
+        try:
+            return await call_next(request)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("Request failed: %s", e)
+            return JSONResponse(status_code=500, content={"error": "Internal server error"})
+
     api_key = request.headers.get("X-API-Key")
     if not api_key:
         return JSONResponse(status_code=401, content={"error": "Missing X-API-Key header"})
 
-    # Per-tenant mode: validate against tenant's api_key_hash
+    # Per-tenant mode: the key must belong to the tenant named in X-Tenant-Slug.
+    # The slug is an untrusted hint; the credential is the source of truth.
     if tenant_context.tenant_id is not None:
-        tenant = await _validate_tenant_api_key(api_key)
+        tenant = await _validate_tenant_api_key(api_key, expected_tenant_id=tenant_context.tenant_id)
         if tenant is None:
-            return JSONResponse(status_code=401, content={"error": "Invalid X-API-Key"})
+            return JSONResponse(status_code=401, content={"error": "Invalid X-API-Key for the requested tenant"})
+        tenant_context.set_authenticated(tenant.id)
     else:
-        # Shared-secret mode (backward compatible)
+        # Shared-secret mode (backward compatible single-tenant deployments).
         from solvyn.config import settings
 
         if not settings.api_key_secret:

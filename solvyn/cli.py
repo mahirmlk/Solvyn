@@ -40,7 +40,7 @@ from solvyn.workflows.templates import WORKFLOW_TEMPLATES
 app = typer.Typer(
     name="solvyn",
     help=(
-        "Solvyn — AI Operating Center for Engineering Teams.\n\n"
+        "Solvyn — your self-hosted AI engineering team.\n\n"
         "Use [bold]solvyn COMMAND --help[/] for detailed help on a single command."
     ),
     rich_markup_mode="rich",
@@ -88,7 +88,7 @@ CATEGORY_STYLES: dict[str, str] = {
 def _print_header() -> None:
     from solvyn import __version__
 
-    subtitle = f"v{__version__} — AI Operating Center for Engineering Teams"
+    subtitle = f"v{__version__} — your self-hosted AI engineering team"
     panel = Panel(Text("Solvyn Agent CLI", style="bold cyan"), subtitle=subtitle, border_style="cyan")
     console.print(panel)
     console.print()

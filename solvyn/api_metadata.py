@@ -102,10 +102,12 @@ COMMON_RESPONSES: dict[int | str, dict] = {
 API_DESCRIPTION = """
 # Solvyn API
 
-**Solvyn** is the AI Operating Center for engineering teams — a multi-tenant
-control plane that orchestrates specialised LLM agents, executes declarative
-workflows, and ships an opinionated observability layer (metrics, traces,
-audit logs, real-time cost analytics).
+**Solvyn** is your self-hosted AI engineering team — a multi-tenant
+platform that gives developers persistent AI teammates (Tech Lead, Software
+Engineer, QA Engineer, Security Engineer) to understand, build, improve,
+test, and maintain real software projects. The AI Operating Center lives on
+as the internal ops/monitoring layer (metrics, traces, audit logs, cost
+analytics).
 
 ## Authentication
 
