@@ -1,8 +1,7 @@
 """Persistent AI teammate profiles and assigned-project runtime endpoint.
 
-The current teammate run path only invokes an LLM-backed registered agent.
-Teammate permissions are loaded as runtime context, but tool dispatch is not
-available through this endpoint until permission-enforced dispatch is wired.
+Direct teammate runs remain tool-less. Delegated task handoffs may receive
+permission-checked workspace tools when the task has a managed workspace.
 """
 
 from __future__ import annotations
