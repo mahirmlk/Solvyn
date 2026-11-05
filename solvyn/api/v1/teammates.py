@@ -27,6 +27,7 @@ from solvyn.db.models import (
     PermissionLevel,
     Project,
     ProjectKnowledge,
+    TeammateMemory,
     TeammatePermission,
     TeammateProfile,
     TeammateProjectAssignment,
@@ -119,6 +120,34 @@ class TeammateUpdate(BaseModel):
 class TeammateRun(BaseModel):
     project_id: uuid.UUID
     input_data: dict[str, object] = Field(default_factory=dict)
+
+
+class TeammateMemoryIn(BaseModel):
+    project_id: uuid.UUID
+    key: str = Field(..., min_length=1, max_length=255)
+    value: str = Field(..., min_length=1, max_length=10_000)
+
+
+async def _assigned_project(
+    db: AsyncSession,
+    teammate: TeammateProfile,
+    project_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> Project:
+    result = await db.execute(
+        select(Project)
+        .join(TeammateProjectAssignment, TeammateProjectAssignment.project_id == Project.id)
+        .where(
+            TeammateProjectAssignment.teammate_id == teammate.id,
+            Project.id == project_id,
+            Project.tenant_id == tenant_id,
+            Project.organization_id == teammate.organization_id,
+        )
+    )
+    project = result.scalar_one_or_none()
+    if project is None:
+        raise HTTPException(status_code=404, detail="Assigned project not found")
+    return project
 
 
 @router.get("/organizations/{org_id}/teammates", summary="List teammates in an organization")
@@ -288,6 +317,108 @@ async def execute_teammate(
     return {"teammate_id": str(teammate_id), "project_id": str(payload.project_id), "output": output}
 
 
+@router.get("/teammates/{teammate_id}/memory", summary="List persistent teammate memory")
+async def list_teammate_memory(
+    teammate_id: uuid.UUID,
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    tenant_id = require_tenant()
+    teammate = await _load_teammate(db, teammate_id, tenant_id)
+    await require_org_membership(db, teammate.organization_id, roles=MEMBER_OR_ABOVE)
+    await _assigned_project(db, teammate, project_id, tenant_id)
+    result = await db.execute(
+        select(TeammateMemory)
+        .where(
+            TeammateMemory.tenant_id == tenant_id,
+            TeammateMemory.teammate_id == teammate_id,
+            TeammateMemory.project_id == project_id,
+        )
+        .order_by(TeammateMemory.key)
+    )
+    entries = [
+        {"key": row.key, "value": row.value, "updated_at": row.updated_at.isoformat() if row.updated_at else ""}
+        for row in result.scalars().all()
+    ]
+    return {"teammate_id": str(teammate_id), "project_id": str(project_id), "memory": entries, "count": len(entries)}
+
+
+@router.put("/teammates/{teammate_id}/memory", summary="Store persistent teammate memory")
+async def upsert_teammate_memory(
+    teammate_id: uuid.UUID,
+    payload: TeammateMemoryIn,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    tenant_id = require_tenant()
+    teammate = await _load_teammate(db, teammate_id, tenant_id)
+    await require_org_membership(db, teammate.organization_id, roles=OWNER_ADMIN)
+    await _assigned_project(db, teammate, payload.project_id, tenant_id)
+    secret_match = _looks_like_secret(f"{payload.key}\n{payload.value}")
+    if secret_match is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Refusing to store possible secret material ({secret_match}). Teammate memory must not contain credentials.",
+        )
+    existing = (
+        await db.execute(
+            select(TeammateMemory).where(
+                TeammateMemory.tenant_id == tenant_id,
+                TeammateMemory.teammate_id == teammate_id,
+                TeammateMemory.project_id == payload.project_id,
+                TeammateMemory.key == payload.key,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is None:
+        existing = TeammateMemory(
+            tenant_id=tenant_id,
+            teammate_id=teammate_id,
+            project_id=payload.project_id,
+            key=payload.key,
+            value=payload.value,
+        )
+        db.add(existing)
+    else:
+        existing.value = payload.value
+        db.add(existing)
+    await db.commit()
+    await db.refresh(existing)
+    return {
+        "teammate_id": str(teammate_id),
+        "project_id": str(payload.project_id),
+        "key": existing.key,
+        "updated_at": existing.updated_at.isoformat() if existing.updated_at else "",
+    }
+
+
+@router.delete("/teammates/{teammate_id}/memory/{key}", summary="Delete persistent teammate memory")
+async def delete_teammate_memory(
+    teammate_id: uuid.UUID,
+    key: str,
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    tenant_id = require_tenant()
+    teammate = await _load_teammate(db, teammate_id, tenant_id)
+    await require_org_membership(db, teammate.organization_id, roles=OWNER_ADMIN)
+    await _assigned_project(db, teammate, project_id, tenant_id)
+    record = (
+        await db.execute(
+            select(TeammateMemory).where(
+                TeammateMemory.tenant_id == tenant_id,
+                TeammateMemory.teammate_id == teammate_id,
+                TeammateMemory.project_id == project_id,
+                TeammateMemory.key == key,
+            )
+        )
+    ).scalar_one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Teammate memory not found")
+    await db.delete(record)
+    await db.commit()
+    return {"ok": True, "teammate_id": str(teammate_id), "project_id": str(project_id), "key": key}
+
+
 # ---------------------------------------------------------------------------
 # Project knowledge (validated, scoped — never stores secrets)
 # ---------------------------------------------------------------------------
@@ -300,20 +431,19 @@ class KnowledgeIn(BaseModel):
 
 
 _SECRET_PATTERNS = (
-    re.compile(r"AKIA[0-9A-Z]{16}"),
-    re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
-    re.compile(r"ghp_[A-Za-z0-9]{20,}"),
-    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
-    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
-    re.compile(r"(?:password|api_key|secret|client_secret)\s*[:=]\s*\S+", re.I),
+    ("AWS access key pattern", re.compile(r"AKIA[0-9A-Z]{16}")),
+    ("private key pattern", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")),
+    ("GitHub token pattern", re.compile(r"ghp_[A-Za-z0-9]{20,}")),
+    ("Slack token pattern", re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}")),
+    ("credential assignment pattern", re.compile(r"(?:password|api_key|secret|client_secret)\s*[:=]\s*\S+", re.I)),
+    ("API token pattern", re.compile(r"sk-[A-Za-z0-9_-]{20,}")),
 )
 
 
 def _looks_like_secret(value: str) -> str | None:
-    for pattern in _SECRET_PATTERNS:
-        match = pattern.search(value)
-        if match is not None:
-            return match.group(0)
+    for label, pattern in _SECRET_PATTERNS:
+        if pattern.search(value) is not None:
+            return label
     return None
 
 
@@ -343,11 +473,11 @@ async def upsert_knowledge(project_id: uuid.UUID, payload: KnowledgeIn, db: Asyn
     if project is None or project.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Project not found")
     await require_org_membership(db, project.organization_id, roles=OWNER_ADMIN)
-    hit = _looks_like_secret(payload.value)
+    hit = _looks_like_secret(f"{payload.key}\n{payload.value}")
     if hit:
         raise HTTPException(
             status_code=400,
-            detail=f"Refusing to store possible secret material (matched '{hit}'). Knowledge records must never contain credentials.",
+            detail=f"Refusing to store possible secret material ({hit}). Knowledge records must never contain credentials.",
         )
     existing = (
         await db.execute(

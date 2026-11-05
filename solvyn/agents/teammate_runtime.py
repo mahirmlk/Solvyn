@@ -13,6 +13,7 @@ from solvyn.agents.registry import agent_registry
 from solvyn.db.models import (
     Project,
     ProjectKnowledge,
+    TeammateMemory,
     TeammatePermission,
     TeammateProfile,
     TeammateProjectAssignment,
@@ -27,6 +28,7 @@ ROLE_AGENT_TYPES = {
 }
 _MAX_CONTEXT_CHARS = 24_000
 _MAX_KNOWLEDGE_ROWS = 100
+_MAX_MEMORY_ROWS = 50
 _DEFAULT_MAX_TOKENS = 4_096
 _HARD_MAX_TOKENS = 16_000
 _DEFAULT_MAX_RUN_SECONDS = 300
@@ -56,6 +58,7 @@ def build_teammate_system_context(
     project: Project,
     knowledge: list[ProjectKnowledge],
     permissions: list[str],
+    memory: list[TeammateMemory] | None = None,
 ) -> str:
     """Format bounded, assigned-project context for the agent's model call."""
     sections = [
@@ -72,6 +75,9 @@ def build_teammate_system_context(
         sections.extend(
             f"- [{row.category}] {row.key}: {row.value[:2_000]}" for row in knowledge
         )
+    if memory:
+        sections.append("Persistent teammate memory for this project:")
+        sections.extend(f"- {row.key}: {row.value[:2_000]}" for row in memory)
     sections.append(
         "Granted tool permissions (informational; tools remain unavailable unless the runtime enforces them): "
         + (", ".join(sorted(permissions)) if permissions else "none")
@@ -125,8 +131,19 @@ async def run_teammate(
         )
     )
     permissions = [row.permission for row in permission_result.scalars().all()]
+    memory_result = await db.execute(
+        select(TeammateMemory)
+        .where(
+            TeammateMemory.tenant_id == tenant_id,
+            TeammateMemory.teammate_id == teammate.id,
+            TeammateMemory.project_id == project_id,
+        )
+        .order_by(TeammateMemory.updated_at.desc(), TeammateMemory.key)
+        .limit(_MAX_MEMORY_ROWS)
+    )
+    memory = list(memory_result.scalars().all())
 
-    context = build_teammate_system_context(teammate, project, knowledge, permissions)
+    context = build_teammate_system_context(teammate, project, knowledge, permissions, memory)
     agent = agent_registry.create(
         teammate.agent_type,
         agent_id=str(teammate.id),
