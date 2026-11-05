@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -139,10 +141,17 @@ class AgentGraph:
         session_id: str,
         tenant_id: str,
         configs: dict[str, dict[str, Any]],
+        on_checkpoint: Callable[[ExecutionGraph], Awaitable[None]] | None = None,
     ) -> None:
         """Execute a single node, updating its status and output."""
         node = self.nodes[node_id]
         agent_type = node.agent_type
+
+        node.status = "running"
+        node.started_at = datetime.now(UTC).isoformat()
+        logger.info("Running node %s (%s)", node_id, agent_type)
+        if on_checkpoint is not None:
+            await on_checkpoint(self._execution_snapshot())
 
         try:
             agent = agent_registry.create(
@@ -151,23 +160,28 @@ class AgentGraph:
                 tenant_id=tenant_id,
                 config=configs.get(agent_type),
             )
-
-            node.status = "running"
-            node.started_at = datetime.now(UTC).isoformat()
-            logger.info("Running node %s (%s)", node_id, agent_type)
-
             resolved_input = self._resolve_node_inputs(node_id)
             output = await agent.run(resolved_input)
             node.output = output
             node.status = "completed"
             node.completed_at = datetime.now(UTC).isoformat()
             logger.info("Completed node %s (%s)", node_id, agent_type)
-
         except Exception as e:
             logger.exception("Node %s (%s) failed: %s", node_id, agent_type, e)
             node.status = "failed"
             node.error = str(e)
             node.completed_at = datetime.now(UTC).isoformat()
+        if on_checkpoint is not None:
+            await on_checkpoint(self._execution_snapshot())
+
+    def _execution_snapshot(self) -> ExecutionGraph:
+        return ExecutionGraph(
+            id=self.graph_id,
+            session_id=self.session_id,
+            nodes=copy.deepcopy(list(self.nodes.values())),
+            edges=copy.deepcopy(self.edges),
+            status=self.overall_status,
+        )
 
     # ------------------------------------------------------------------
     # Parallel graph execution
@@ -178,6 +192,9 @@ class AgentGraph:
         session_id: str,
         tenant_id: str,
         agent_configs: dict[str, dict[str, Any]] | None = None,
+        on_checkpoint: Callable[[ExecutionGraph], Awaitable[None]] | None = None,
+        graph_id: str | None = None,
+        execution_status: str = "running",
     ) -> ExecutionGraph:
         """Execute the graph with parallel execution for independent nodes.
 
@@ -186,19 +203,24 @@ class AgentGraph:
         nodes are marked ``skipped``.
         """
         self.session_id = session_id
-        self.graph_id = str(uuid.uuid4())
+        self.graph_id = graph_id or str(uuid.uuid4())
+        self.overall_status = execution_status
         configs = agent_configs or {}
 
         levels = self._compute_levels()
-        completed: set[str] = set()
+        completed: set[str] = {node_id for node_id, node in self.nodes.items() if node.status == "completed"}
         failed: set[str] = set()
         skipped: set[str] = set()
         has_real_failure = False
+        if on_checkpoint is not None:
+            await on_checkpoint(self._execution_snapshot())
 
         for level in levels:
             # Determine which nodes in this level are ready to run
             runnable: list[str] = []
             for node_id in level:
+                if node_id in completed or node_id in failed or node_id in skipped:
+                    continue
                 prevs = self.get_prev_nodes(node_id)
                 if any(p in failed for p in prevs):
                     # Upstream failed – skip this node
@@ -214,16 +236,18 @@ class AgentGraph:
                     runnable.append(node_id)
 
             if not runnable:
+                if on_checkpoint is not None:
+                    await on_checkpoint(self._execution_snapshot())
                 continue
 
             if len(runnable) == 1:
                 # Single node – run directly without gather overhead
-                await self._run_node(runnable[0], session_id, tenant_id, configs)
+                await self._run_node(runnable[0], session_id, tenant_id, configs, on_checkpoint)
             else:
                 # Multiple independent nodes – run in parallel
                 logger.info("Running level with %d parallel nodes: %s", len(runnable), runnable)
                 await asyncio.gather(
-                    *[self._run_node(nid, session_id, tenant_id, configs) for nid in runnable],
+                    *[self._run_node(nid, session_id, tenant_id, configs, on_checkpoint) for nid in runnable],
                     return_exceptions=False,
                 )
 
@@ -236,6 +260,9 @@ class AgentGraph:
                     failed.add(node_id)
                     has_real_failure = True
 
+            if on_checkpoint is not None:
+                await on_checkpoint(self._execution_snapshot())
+
             # Propagate skipped status to downstream nodes of failed nodes
             for node_id in runnable:
                 if self.nodes[node_id].status == "failed":
@@ -243,14 +270,10 @@ class AgentGraph:
 
         self.overall_status = "failed" if has_real_failure else "completed"
         logger.info("Graph %s finished: %s", self.graph_id, self.overall_status)
-
-        return ExecutionGraph(
-            id=self.graph_id,
-            session_id=session_id,
-            nodes=list(self.nodes.values()),
-            edges=self.edges,
-            status=self.overall_status,
-        )
+        result = self._execution_snapshot()
+        if on_checkpoint is not None:
+            await on_checkpoint(result)
+        return result
 
     def _mark_downstream_skipped(self, node_id: str, skipped: set[str]) -> None:
         """Recursively mark all downstream nodes as skipped when upstream fails."""
