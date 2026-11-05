@@ -116,6 +116,42 @@ async def test_branches_accepts_github_array_response() -> None:
 
 
 @pytest.mark.asyncio
+async def test_branch_commit_resolves_to_an_immutable_commit_sha() -> None:
+    expected_sha = "a" * 40
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/repos/octo/example/branches/main"
+        return httpx.Response(200, json={"commit": {"sha": expected_sha}})
+
+    http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    async with GitHubClient(http) as github:
+        sha = await github.branch_commit("octo/example", "main")
+    await http.aclose()
+
+    assert sha == expected_sha
+
+
+@pytest.mark.asyncio
+async def test_text_file_allows_bounded_full_text_without_truncation() -> None:
+    content = "x" * 80_000
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/repos/octo/example/contents/large.txt"
+        assert request.url.params["ref"] == "a" * 40
+        encoded = base64.b64encode(content.encode()).decode()
+        return httpx.Response(200, json={"encoding": "base64", "content": encoded})
+
+    http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    async with GitHubClient(http) as github:
+        fetched = await github.text_file("octo/example", "large.txt", "a" * 40, max_bytes=100_000)
+        too_small = await github.text_file("octo/example", "large.txt", "a" * 40, max_bytes=64_000)
+    await http.aclose()
+
+    assert fetched == content
+    assert too_small is None
+
+
+@pytest.mark.asyncio
 async def test_pull_requests_lists_bounded_live_metadata() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/repos/octo/example/pulls"

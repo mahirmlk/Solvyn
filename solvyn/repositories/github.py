@@ -56,6 +56,7 @@ _EXTENSIONS = {
 }
 _MAX_TREE_ENTRIES = 20_000
 _MAX_TEXT_FILE_BYTES = 64_000
+_MAX_WORKSPACE_FILE_BYTES = 1_000_000
 _MAX_DIFF_BYTES = 1_000_000
 _MAX_COMMIT_FILES = 50
 _MAX_COMMIT_BYTES = 500_000
@@ -409,13 +410,37 @@ class GitHubClient(RepositoryProvider):
             path = item["path"]
             if path.startswith("/") or ".." in path.split("/"):
                 continue
-            paths.append({"path": path, "type": item.get("type", ""), "size": item.get("size")})
+            paths.append(
+                {"path": path, "type": item.get("type", ""), "mode": item.get("mode"), "size": item.get("size")}
+            )
         return str(data.get("sha") or ""), paths
 
-    async def text_file(self, full_name: str, path: str, branch: str) -> str | None:
+    async def branch_commit(self, full_name: str, branch: str) -> str:
+        owner, repo = validate_full_name(full_name)
+        if not branch or len(branch) > 255 or "\x00" in branch:
+            raise GitHubRepositoryError(422, "Repository branch is invalid")
+        data = await self._get_json(
+            f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/branches/{quote(branch, safe='')}"
+        )
+        commit = data.get("commit")
+        sha = commit.get("sha") if isinstance(commit, dict) else None
+        if not isinstance(sha, str) or not re.fullmatch(r"[a-fA-F0-9]{40,64}", sha):
+            raise GitHubRepositoryError(502, "GitHub returned an invalid branch revision")
+        return sha.lower()
+
+    async def text_file(
+        self,
+        full_name: str,
+        path: str,
+        branch: str,
+        *,
+        max_bytes: int = _MAX_TEXT_FILE_BYTES,
+    ) -> str | None:
         owner, repo = validate_full_name(full_name)
         if path.startswith("/") or ".." in path.split("/"):
             return None
+        if not 1 <= max_bytes <= _MAX_WORKSPACE_FILE_BYTES:
+            raise ValueError("max_bytes is outside the supported text file range")
         encoded_path = quote(path, safe="/")
         data = await self._get_json(
             f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/contents/{encoded_path}",
@@ -424,11 +449,13 @@ class GitHubClient(RepositoryProvider):
         if data.get("encoding") != "base64" or not isinstance(data.get("content"), str):
             return None
         encoded = data["content"].replace("\n", "")
-        if len(encoded) > ((_MAX_TEXT_FILE_BYTES + 2) // 3) * 4 + 8:
+        if len(encoded) > ((max_bytes + 2) // 3) * 4 + 8:
             return None
         try:
             raw = base64.b64decode(encoded, validate=True)
-            return raw.decode("utf-8")[:_MAX_TEXT_FILE_BYTES]
+            if len(raw) > max_bytes:
+                return None
+            return raw.decode("utf-8")
         except (ValueError, UnicodeDecodeError):
             return None
 
