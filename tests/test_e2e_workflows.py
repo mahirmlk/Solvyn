@@ -353,8 +353,9 @@ async def test_acceptance_criteria_require_an_owner_admin_decision(client: Async
 
     updated_history = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
     task = next(item for item in updated_history.json()["tasks"] if item["task_id"] == task_id)
-    assert task["acceptance_criteria"][0]["status"] == "accepted"
-    assert task["acceptance_criteria"][0]["reviewer_organization_id"] == str(organization_id)
+    reviewed_criterion = next(item for item in task["acceptance_criteria"] if item["id"] == criterion_id)
+    assert reviewed_criterion["status"] == "accepted"
+    assert reviewed_criterion["reviewer_organization_id"] == str(organization_id)
 
 
 @pytest.mark.asyncio
