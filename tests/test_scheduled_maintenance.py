@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.api.v1.maintenance import MaintenanceScheduleCreate, create_maintenance_schedule
 from solvyn.db.models import MaintenanceSchedule, ProactiveEvent
+from solvyn.multi_tenant.middleware import tenant_context
 from solvyn.workflows.scheduler import _queue_due_maintenance_events
 
 
@@ -60,20 +61,23 @@ async def test_maintenance_schedule_create_requires_admin_and_project_scope() ->
             item.id = uuid.uuid4()
 
     stub_db = StubDB()
+    user_id_token = tenant_context._user_id.set(user_id)
     with (
         patch("solvyn.api.v1.maintenance.require_org_membership", new_callable=AsyncMock) as membership,
-        patch("solvyn.api.v1.maintenance.tenant_context.user_id", user_id),
     ):
-        result = await create_maintenance_schedule(
-            organization_id,
-            MaintenanceScheduleCreate(
-                project_id=project_id,
-                maintenance_type="documentation_review",
-                title=" Docs review ",
-                interval_days=7,
-            ),
-            db=cast(AsyncSession, stub_db),
-        )
+        try:
+            result = await create_maintenance_schedule(
+                organization_id,
+                MaintenanceScheduleCreate(
+                    project_id=project_id,
+                    maintenance_type="documentation_review",
+                    title=" Docs review ",
+                    interval_days=7,
+                ),
+                db=cast(AsyncSession, stub_db),
+            )
+        finally:
+            tenant_context._user_id.reset(user_id_token)
 
     membership.assert_awaited_once_with(cast(AsyncSession, stub_db), organization_id, roles=("owner", "admin"))
     assert stub_db.added is not None
