@@ -107,10 +107,10 @@ async def test_runner_applies_container_policy_and_returns_workspace_changes(tmp
     assert "--cpus" in create and "1.0" in create
     assert "--pids-limit" in create and "128" in create
     assert "--tmpfs" in create and "/workspace:rw,nosuid,nodev,size=67108864,nr_inodes=10000" in create
-    assert calls[3][1:] == ["exec", "--user", "0", "a" * 64, "chmod", "-R", "a+rwX", "/workspace"]
-    assert calls[4][1:] == ["exec", "a" * 64, "python", "-c", "print('safe')"]
-    assert calls[-1][1:3] == ["rm", "--force"]
-    assert calls[-1][3].startswith("solvyn-sandbox-")
+    assert calls[3] == ["exec", "--user", "0", "a" * 64, "chmod", "-R", "a+rwX", "/workspace"]
+    assert calls[4] == ["exec", "a" * 64, "python", "-c", "print('safe')"]
+    assert calls[-1][:2] == ["rm", "--force"]
+    assert calls[-1][2].startswith("solvyn-sandbox-")
 
 
 @pytest.mark.asyncio
@@ -130,7 +130,7 @@ async def test_runner_times_out_and_still_cleans_up(tmp_path: Path) -> None:
     assert result.timed_out is True
     assert result.exit_code is None
     assert any(call[1] == "kill" for call in calls)
-    assert calls[-1][1:3] == ["rm", "--force"]
+    assert calls[-1][:2] == ["rm", "--force"]
 
 
 @pytest.mark.asyncio
@@ -159,7 +159,7 @@ async def test_runner_attempts_cleanup_when_container_creation_times_out(tmp_pat
         await runner.run(workspace, ["true"])
 
     calls = [json.loads(line) for line in calls_file.read_text().splitlines()]
-    assert calls[-1][1:3] == ["rm", "--force"]
+    assert calls[-1][:2] == ["rm", "--force"]
 
 
 def test_workspace_archive_rejects_path_traversal(tmp_path: Path) -> None:
