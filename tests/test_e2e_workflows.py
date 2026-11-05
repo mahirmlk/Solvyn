@@ -200,6 +200,23 @@ async def test_schedule_rejects_a_naive_or_past_timestamp(client: AsyncClient) -
 
 
 @pytest.mark.asyncio
+async def test_repository_workspace_requires_a_delegated_task_handoff(client: AsyncClient) -> None:
+    workflow = await client.post("/api/v1/workflows/feature/run", json={"requirement": "Check repository workspace scoping"})
+    assert workflow.status_code == 200
+    execution_id = workflow.json()["execution_id"]
+    tasks = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
+    task_id = tasks.json()["tasks"][0]["task_id"]
+
+    response = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/workspace",
+        json={"repository_id": str(uuid.uuid4()), "repository_paths": ["README.md"]},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Repository workspaces require an assigned project handoff"
+
+
+@pytest.mark.asyncio
 async def test_task_verification_is_sandboxed_and_durable(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,

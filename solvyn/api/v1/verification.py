@@ -14,23 +14,40 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.api.v1._rbac import OWNER_ADMIN
+from solvyn.api.v1.repositories import _load_authorized_repository
 from solvyn.config import settings
-from solvyn.db.models import Organization, OrganizationMembership, Task, TaskAcceptanceCriterion, TaskWorkspace, User, VerificationRun
+from solvyn.db.models import (
+    Organization,
+    OrganizationMembership,
+    Repository,
+    Task,
+    TaskAcceptanceCriterion,
+    TaskHandoff,
+    TaskWorkspace,
+    User,
+    VerificationRun,
+)
 from solvyn.db.session import get_session
 from solvyn.multi_tenant.middleware import SHARED_SECRET_PRINCIPAL_ID, tenant_context
+from solvyn.repositories.github import GitHubRepositoryError
+from solvyn.repositories.providers import get_repository_provider
 from solvyn.sandbox.remote import RemoteSandboxResult, RemoteSandboxRunner
 from solvyn.sandbox.runtime import DockerSandboxRunner, SandboxResult, SandboxRuntimeError
-from solvyn.sandbox.workspaces import WorkspaceError, WorkspaceManager
+from solvyn.sandbox.workspaces import WorkspaceError, WorkspaceManager, safe_relative_path
 from solvyn.workflows.executor import workflow_executor
 
 router = APIRouter(prefix="/workflows/executions/{execution_id}/tasks/{task_id}", tags=["verification"])
 _MAX_INITIAL_FILES_BYTES = 16 * 1024 * 1024
+_MAX_REPOSITORY_PATHS = 50
+_MAX_REPOSITORY_FILE_BYTES = 1_000_000
 _MAX_STORED_OUTPUT_CHARS = 256 * 1024
 VerificationKind = Literal["test", "build", "lint", "typecheck", "security"]
 
 
 class TaskWorkspaceCreate(BaseModel):
     files: dict[str, str] = Field(default_factory=dict)
+    repository_id: uuid.UUID | None = None
+    repository_paths: list[str] | None = Field(default=None, max_length=_MAX_REPOSITORY_PATHS)
 
 
 class VerificationRequest(BaseModel):
@@ -246,7 +263,7 @@ async def create_task_workspace(
     task_id: uuid.UUID,
     payload: TaskWorkspaceCreate,
     db: AsyncSession = Depends(get_session),
-) -> dict[str, str]:
+) -> dict[str, Any]:
     task = await _owned_task(execution_id, task_id, db)
     existing = (
         await db.execute(select(TaskWorkspace).where(TaskWorkspace.tenant_id == task.tenant_id, TaskWorkspace.task_id == task.id))
@@ -254,16 +271,105 @@ async def create_task_workspace(
     if existing is not None:
         raise HTTPException(status_code=409, detail="Task already has a managed workspace")
 
-    total_bytes = sum(len(contents.encode("utf-8")) for contents in payload.files.values())
+    if (payload.repository_id is None) != (payload.repository_paths is None):
+        raise HTTPException(status_code=422, detail="repository_id and repository_paths must be supplied together")
+    if payload.repository_id is not None and payload.files:
+        raise HTTPException(status_code=422, detail="Provide either initial files or a repository source, not both")
+
+    initial_files = dict(payload.files)
+    source_commit_sha: str | None = None
+    source_paths: list[str] | None = None
+    repository: Repository | None = None
+    if payload.repository_id is not None:
+        if not payload.repository_paths:
+            raise HTTPException(status_code=422, detail="Select at least one repository path")
+        handoff = (
+            await db.execute(
+                select(TaskHandoff).where(
+                    TaskHandoff.tenant_id == task.tenant_id,
+                    TaskHandoff.child_task_id == task.id,
+                )
+            )
+        ).scalar_one_or_none()
+        if handoff is None:
+            raise HTTPException(status_code=403, detail="Repository workspaces require an assigned project handoff")
+        if handoff.status not in {"pending", "running", "failed", "completed"}:
+            raise HTTPException(status_code=409, detail="Task handoff is not approved for workspace access")
+        repository, project = await _load_authorized_repository(payload.repository_id, db)
+        if project.id != handoff.project_id:
+            raise HTTPException(status_code=403, detail="Repository is outside the task's assigned project")
+        if repository.provider != "github":
+            raise HTTPException(status_code=422, detail="Only GitHub repository workspaces are supported")
+        source_paths = []
+        for path in payload.repository_paths:
+            try:
+                normalized = safe_relative_path(path).as_posix()
+            except WorkspaceError as exc:
+                raise HTTPException(status_code=422, detail="Repository path is invalid") from exc
+            if (
+                normalized != path
+                or len(normalized) > 512
+                or any(part.casefold() == ".git" for part in normalized.split("/"))
+                or normalized.casefold() in {selected.casefold() for selected in source_paths}
+            ):
+                raise HTTPException(status_code=422, detail="Repository paths must be normalized and unique")
+            source_paths.append(normalized)
+
+        try:
+            async with get_repository_provider("github") as github:
+                metadata = await github.repository_metadata(repository.full_name)
+                if metadata["private"]:
+                    raise HTTPException(status_code=422, detail="Only public GitHub repository workspaces are supported")
+                source_commit_sha = await github.branch_commit(repository.full_name, str(metadata["default_branch"]))
+                _, tree = await github.repository_tree(repository.full_name, source_commit_sha)
+                tree_entries = {entry["path"]: entry for entry in tree}
+                selected_entries = []
+                for path in source_paths:
+                    entry = tree_entries.get(path)
+                    if entry is None or entry.get("type") != "blob" or entry.get("mode") not in {"100644", "100755"}:
+                        raise HTTPException(status_code=422, detail=f"Repository path is not a regular file: {path}")
+                    size = entry.get("size")
+                    if isinstance(size, int) and size > _MAX_REPOSITORY_FILE_BYTES:
+                        raise HTTPException(status_code=413, detail=f"Repository file exceeds 1 MB: {path}")
+                    selected_entries.append((path, entry))
+                known_size = sum(
+                    entry["size"] for _, entry in selected_entries if isinstance(entry.get("size"), int)
+                )
+                if known_size > _MAX_INITIAL_FILES_BYTES:
+                    raise HTTPException(status_code=413, detail="Selected repository files exceed 16 MiB")
+                for path, _entry in selected_entries:
+                    content = await github.text_file(
+                        repository.full_name,
+                        path,
+                        source_commit_sha,
+                        max_bytes=_MAX_REPOSITORY_FILE_BYTES,
+                    )
+                    if content is None:
+                        raise HTTPException(status_code=422, detail=f"Repository file is missing, binary, or over 1 MB: {path}")
+                    initial_files[path] = content
+        except GitHubRepositoryError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+    try:
+        total_bytes = sum(len(contents.encode("utf-8")) for contents in initial_files.values())
+    except UnicodeEncodeError as exc:
+        raise HTTPException(status_code=422, detail="Workspace files must contain valid UTF-8 text") from exc
     if total_bytes > _MAX_INITIAL_FILES_BYTES:
         raise HTTPException(status_code=413, detail="Initial workspace files exceed 16 MiB")
 
     manager = _workspace_manager()
     workspace = manager.create()
     try:
-        for relative_path, contents in payload.files.items():
+        for relative_path, contents in initial_files.items():
             manager.write_file(workspace, relative_path, contents.encode("utf-8"))
-        record = TaskWorkspace(id=workspace.id, tenant_id=task.tenant_id, task_id=task.id)
+        record = TaskWorkspace(
+            id=workspace.id,
+            tenant_id=task.tenant_id,
+            task_id=task.id,
+            repository_id=repository.id if repository else None,
+            source_commit_sha=source_commit_sha,
+            source_paths=json.dumps(source_paths) if source_paths else None,
+        )
         db.add(record)
         await db.commit()
     except WorkspaceError as exc:
@@ -274,7 +380,14 @@ async def create_task_workspace(
         manager.delete(workspace.id)
         await db.rollback()
         raise
-    return {"workspace_id": str(workspace.id), "task_id": str(task.id), "status": "ready"}
+    return {
+        "workspace_id": str(workspace.id),
+        "task_id": str(task.id),
+        "status": "ready",
+        "repository_id": str(repository.id) if repository else None,
+        "source_commit_sha": source_commit_sha,
+        "source_paths": source_paths,
+    }
 
 
 @router.post("/verification-runs", summary="Run and persist a sandbox verification check")

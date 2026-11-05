@@ -621,6 +621,17 @@ Inspect the default branch. Returns repository metadata, revision SHA, file coun
 
 `POST /api/v1/teammates/{teammate_id}/run` accepts `project_id`, `input_data`, an optional `repository_id`, and up to four optional `repository_paths`. If a repository ID is supplied, it must identify an active GitHub repository connected to the same assigned project. Solvyn fetches a bounded public inspection summary and the explicitly selected text files (up to 1,500 characters each) and adds them to the user-level prompt as untrusted repository data; a fixed system instruction says not to follow instructions found there. Paths must be relative and cannot contain traversal segments. If omitted, no repository fetch occurs. This path provides context for investigation; it does not enable repository edits, sandbox execution, or automatic verification.
 
+### Seed a delegated task workspace from repository files
+
+`POST /api/v1/workflows/executions/{execution_id}/tasks/{task_id}/workspace` continues to accept caller-supplied `files`. Alternatively, send `repository_id` and one to 50 `repository_paths`; the two modes cannot be combined. Repository seeding requires a signed-in organization member, a delegated child task with a matching `TaskHandoff`, and a public active GitHub repository in that handoff's project. The API resolves the repository's default branch once and reads selected regular files at that commit SHA. Symlinks, submodules, `.git` paths, binary or oversized files, and invalid relative paths are rejected. Files are limited to 1 MB each and 16 MiB total. The response and `TaskWorkspace` record include the repository ID, source commit SHA, and selected paths. This is a selected-file snapshot, not a Git clone or worktree.
+
+```json
+{
+  "repository_id": "<connected-repository-uuid>",
+  "repository_paths": ["README.md", "src/app.py"]
+}
+```
+
 ### `GET /api/v1/repositories/{repository_id}/files/search?query=...`
 
 Search file paths case-insensitively. This endpoint searches paths only; it does not search file contents.

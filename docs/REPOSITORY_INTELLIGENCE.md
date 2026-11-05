@@ -24,6 +24,10 @@ Repository discovery beyond a caller-supplied GitHub name, content search, and b
 
 This supports repository-aware investigation with caller-selected source snippets only. It does not provide a clone/worktree, code edits, sandbox dispatch, private repository access, or automatic verification.
 
+## Task workspace source
+
+`POST /api/v1/workflows/executions/{execution_id}/tasks/{task_id}/workspace` can also accept `repository_id` with `repository_paths` (1–50 relative paths). This mode requires a signed-in organization member and a child task with a `TaskHandoff`; the repository must be active and belong to that handoff's project. Solvyn checks the repository is public, resolves its default branch once, verifies each selected path is a regular Git blob (excluding symlinks and submodules), and fetches each file at that immutable commit SHA. Files are capped at 1 MB each and 16 MiB total. Caller-supplied `files` and repository source are mutually exclusive. The workspace row stores the repository ID, commit SHA, and selected paths. This creates a reproducible selected-file snapshot, not a full clone or Git worktree, and does not grant the teammate filesystem tools or permission to execute commands.
+
 ## Proactive engineering
 
 GitHub `workflow_run` failures and Dependabot, code scanning, and secret scanning alert activity are signature-verified and deduplicated per connected project. Owner/admin-configured recurring code quality, dependency review, and documentation review schedules also add due items to the same inbox. Events are bounded, stored without the raw payload or secret values, and shown to organization members for human triage. These triggers do not automatically start an agent workflow; automatic remediation requires a later explicit policy and execution budget.
