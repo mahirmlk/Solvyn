@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import stat
@@ -111,6 +112,20 @@ class WorkspaceManager:
         """Reject links and return the regular-file bytes staged for execution."""
         self._check_tree(workspace)
         return self._tree_size(workspace)
+
+    def fingerprint(self, workspace: ManagedWorkspace) -> str:
+        """Return a stable SHA-256 digest of relative paths and file contents."""
+        self._check_tree(workspace)
+        digest = hashlib.sha256()
+        for path in sorted(item for item in workspace.path.rglob("*") if item.is_file()):
+            relative_path = path.relative_to(workspace.path).as_posix().encode("utf-8")
+            digest.update(len(relative_path).to_bytes(8, "big"))
+            digest.update(relative_path)
+            digest.update(path.stat().st_size.to_bytes(8, "big"))
+            with path.open("rb") as content:
+                for chunk in iter(lambda: content.read(64 * 1024), b""):
+                    digest.update(chunk)
+        return digest.hexdigest()
 
     def _resolve_path(self, workspace: ManagedWorkspace, relative_path: str) -> Path:
         current = self.get(workspace.id)

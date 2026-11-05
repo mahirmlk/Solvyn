@@ -234,6 +234,22 @@ async def test_task_verification_is_sandboxed_and_durable(
     assert verification.json()["status"] == "passed"
     assert verification.json()["command"] == ["pytest", "-q"]
     assert verification.json()["stdout"] == "1 passed"
+    assert len(verification.json()["source_digest"]) == 64
+    assert verification.json()["regression_status"] == "baseline"
+
+    async def failed_run(self: DockerSandboxRunner, managed_workspace: Any, command: list[str]) -> SandboxResult:
+        return SandboxResult(uuid.uuid4(), tuple(command), 1, False, "1 failed", "", False, 0.05)
+
+    monkeypatch.setattr(DockerSandboxRunner, "run", failed_run)
+    regression = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs",
+        json={"kind": "test"},
+    )
+    assert regression.status_code == 200
+    assert regression.json()["status"] == "failed"
+    assert regression.json()["regression_status"] == "regressed"
+    assert regression.json()["compared_to_run_id"] == verification.json()["id"]
+    assert regression.json()["source_changed"] is False
 
     history = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
     first_task = next(task for task in history.json()["tasks"] if task["task_id"] == task_id)

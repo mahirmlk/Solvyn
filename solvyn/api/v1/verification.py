@@ -107,9 +107,69 @@ def _verification_dict(run: VerificationRun) -> dict[str, Any]:
         "error": run.error,
         "duration_seconds": float(run.duration_seconds) if run.duration_seconds is not None else None,
         "runner_version": run.runner_version,
+        "source_digest": run.source_digest,
         "started_at": run.started_at.isoformat() if run.started_at else None,
         "completed_at": run.completed_at.isoformat() if run.completed_at else None,
     }
+
+
+def _verification_history(runs: list[VerificationRun]) -> list[dict[str, Any]]:
+    terminal_statuses = {"passed", "failed", "timed_out"}
+    evidence: list[dict[str, Any]] = []
+    for run in runs:
+        item = _verification_dict(run)
+        item.update({"regression_status": None, "compared_to_run_id": None, "source_changed": None})
+        if run.status not in terminal_statuses:
+            evidence.append(item)
+            continue
+
+        same_check = [
+            candidate
+            for candidate in runs
+            if candidate.workspace_id == run.workspace_id and candidate.kind == run.kind and candidate.command == run.command
+        ]
+        overlapping = [
+            candidate
+            for candidate in same_check
+            if candidate.id != run.id
+            and (candidate.completed_at is None or run.started_at <= candidate.completed_at)
+            and (run.completed_at is None or candidate.started_at <= run.completed_at)
+        ]
+        earlier = [candidate for candidate in same_check if candidate.started_at < run.started_at]
+        previous = max(earlier, key=lambda candidate: (candidate.started_at, candidate.id), default=None)
+        comparison = max(overlapping, key=lambda candidate: (candidate.started_at, candidate.id), default=previous)
+        if comparison is not None:
+            item["compared_to_run_id"] = str(comparison.id)
+            if comparison.source_digest is not None and run.source_digest is not None:
+                item["source_changed"] = comparison.source_digest != run.source_digest
+
+        if overlapping or (previous is not None and previous.status not in terminal_statuses):
+            item["regression_status"] = "inconclusive"
+        elif previous is None:
+            item["regression_status"] = "baseline"
+        elif previous.status == "passed" and run.status in {"failed", "timed_out"}:
+            item["regression_status"] = "regressed"
+        elif previous.status in {"failed", "timed_out"} and run.status == "passed":
+            item["regression_status"] = "recovered"
+        else:
+            item["regression_status"] = "unchanged"
+        evidence.append(item)
+    return evidence
+
+
+async def _verification_history_for_task(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    task_id: uuid.UUID,
+) -> list[dict[str, Any]]:
+    runs = (
+        await db.execute(
+            select(VerificationRun)
+            .where(VerificationRun.tenant_id == tenant_id, VerificationRun.task_id == task_id)
+            .order_by(VerificationRun.started_at, VerificationRun.id)
+        )
+    ).scalars().all()
+    return _verification_history(list(runs))
 
 
 def _criterion_dict(criterion: TaskAcceptanceCriterion) -> dict[str, Any]:
@@ -158,10 +218,12 @@ async def _finish_run(db: AsyncSession, run: VerificationRun, values: dict[str, 
     )
     if completed.scalar_one_or_none() is None:
         await db.refresh(run)
-        return _verification_dict(run)
+        evidence = await _verification_history_for_task(db, run.tenant_id, run.task_id)
+        return next(item for item in evidence if item["id"] == str(run.id))
     await db.commit()
     await db.refresh(run)
-    return _verification_dict(run)
+    evidence = await _verification_history_for_task(db, run.tenant_id, run.task_id)
+    return next(item for item in evidence if item["id"] == str(run.id))
 
 
 @router.post("/workspace", status_code=201, summary="Create a managed task workspace")
@@ -222,6 +284,7 @@ async def run_task_verification(
 
     try:
         workspace = _workspace_manager().get(workspace_record.id)
+        source_digest = _workspace_manager().fingerprint(workspace)
     except WorkspaceError as exc:
         raise HTTPException(status_code=409, detail="Task workspace is missing or invalid") from exc
 
@@ -234,6 +297,7 @@ async def run_task_verification(
         command=json.dumps(command),
         status="running",
         runner_version="docker-sandbox/1",
+        source_digest=source_digest,
     )
     db.add(run)
     await db.commit()
@@ -275,14 +339,10 @@ async def list_task_verification_runs(
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     task = await _owned_task(execution_id, task_id, db)
-    runs = (
-        await db.execute(
-            select(VerificationRun)
-            .where(VerificationRun.tenant_id == task.tenant_id, VerificationRun.task_id == task.id)
-            .order_by(VerificationRun.started_at, VerificationRun.id)
-        )
-    ).scalars().all()
-    return {"task_id": str(task.id), "verification_runs": [_verification_dict(run) for run in runs]}
+    return {
+        "task_id": str(task.id),
+        "verification_runs": await _verification_history_for_task(db, task.tenant_id, task.id),
+    }
 
 
 @router.post("/acceptance-criteria", status_code=201, summary="Add human-reviewable acceptance criteria")
