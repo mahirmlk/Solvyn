@@ -62,6 +62,39 @@
   gap: 16px;
 }
 
+.projectChoices {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--line-light);
+}
+
+.projectChoice {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--color-muted);
+  font-size: 12px;
+}
+
+.projectChoice input {
+  accent-color: var(--color-ink);
+}
+
+.teammateFoot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-light);
+  color: var(--color-muted);
+  font-size: 10px;
+}
+
 .formFooter {
   margin-top: 4px;
 }

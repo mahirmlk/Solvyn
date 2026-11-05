@@ -8,6 +8,7 @@ import { api, CurrentUser } from "@/lib/api";
 const NAV_ITEMS = [
   { label: "Overview", href: "/" },
   { label: "Projects", href: "/projects" },
+  { label: "Teammates", href: "/teammates" },
   { label: "Workflows", href: "/workflows" },
   { label: "Sessions", href: "/sessions" },
   { label: "Analytics", href: "/analytics" },
