@@ -1,0 +1,145 @@
+.loginPanel,
+.createPanel {
+  width: min(100% - 40px, 760px);
+  margin: 0 auto 28px;
+  padding: clamp(20px, 4vw, 34px);
+  border: 1px solid var(--line-light);
+}
+
+.loginPanel {
+  max-width: 480px;
+}
+
+.form {
+  display: grid;
+  gap: 14px;
+}
+
+.error {
+  margin: 0;
+  color: var(--color-error);
+  font-size: 12px;
+}
+
+.notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  width: min(100% - 40px, 960px);
+  margin: 0 auto 24px;
+  padding: 16px 20px;
+  border: 1px solid rgba(178, 103, 105, 0.35);
+  color: var(--color-error);
+  background: var(--color-pearl-soft);
+}
+
+.notice p {
+  margin: 0;
+}
+
+.sectionTitle {
+  margin: 5px 0 0;
+  font-family: var(--font-display);
+  font-size: clamp(16px, 2vw, 21px);
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+
+.formGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.formFooter,
+.groupHead,
+.cardTop,
+.cardFoot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.formFooter {
+  margin-top: 4px;
+}
+
+.groups {
+  display: grid;
+  gap: 32px;
+  width: min(100% - 40px, 1120px);
+  margin: 0 auto 48px;
+}
+
+.group {
+  display: grid;
+  gap: 16px;
+}
+
+.projectGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 270px), 1fr));
+  gap: 14px;
+}
+
+.projectCard {
+  display: flex;
+  min-height: 192px;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px;
+  border: 1px solid var(--line-light);
+}
+
+.projectCard h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 16px;
+  letter-spacing: 0.04em;
+}
+
+.projectCard p {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.cardTop {
+  align-items: flex-start;
+}
+
+.slug {
+  overflow: hidden;
+  color: var(--color-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+}
+
+.cardFoot {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-light);
+  color: var(--color-muted);
+  font-size: 9px;
+}
+
+.empty {
+  padding: 20px;
+  border: 1px dashed var(--line-light);
+  text-align: left;
+}
+
+@media (max-width: 620px) {
+  .formGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .formFooter,
+  .notice {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}

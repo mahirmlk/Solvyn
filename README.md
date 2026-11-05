@@ -203,6 +203,8 @@ API docs at [http://localhost:8000/docs](http://localhost:8000/docs) · Health c
 
 ### 5. Run the Dashboard (optional)
 
+The Next.js server proxies API requests and keeps access and refresh tokens in `HttpOnly` cookies. Set `SOLVYN_API_URL` in the frontend server environment to the API base URL (default `http://localhost:8000/api/v1`). When a user belongs to more than one tenant, set `SOLVYN_TENANT_SLUG` to select the tenant; otherwise, the API uses the user's first organization membership. Do not put API credentials in `NEXT_PUBLIC_*` variables.
+
 ```bash
 make dev-frontend       # Next.js dev server on http://localhost:3000
 ```

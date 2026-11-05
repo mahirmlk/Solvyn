@@ -1,16 +1,29 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
-const API_KEY = process.env.NEXT_PUBLIC_API_KEY || "";
+const API_BASE = "/api/backend";
+let requestQueue: Promise<void> = Promise.resolve();
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const execute = () => performRequest<T>(path, options);
+  if (typeof navigator !== "undefined" && "locks" in navigator) {
+    return navigator.locks.request("solvyn-api-request", execute);
+  }
+  const queued = requestQueue.then(execute);
+  requestQueue = queued.then(() => undefined, () => undefined);
+  return queued;
+}
+
+async function performRequest<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
+    ...options,
     headers: {
       "Content-Type": "application/json",
-      ...(API_KEY ? { "X-API-Key": API_KEY } : {}),
       ...options?.headers,
     },
-    ...options,
+    cache: "no-store",
   });
-  if (!res.ok) throw new Error(`API ${res.status}: ${res.statusText}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => null) as { detail?: string; error?: string } | null;
+    throw new Error(body?.detail || body?.error || `API ${res.status}: ${res.statusText}`);
+  }
   return res.json();
 }
 
@@ -106,6 +119,36 @@ export interface SessionAnalytics {
   agent_breakdown: { agent_type: string; tokens: number; cost: number; calls: number }[];
 }
 
+export interface CurrentUser {
+  id: string;
+  email: string;
+  display_name: string;
+  is_active: boolean;
+  is_superuser: boolean;
+  created_at: string;
+}
+
+export interface OrganizationInfo {
+  id: string;
+  name: string;
+  slug: string;
+  tenant_id: string;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface ProjectInfo {
+  id: string;
+  organization_id: string;
+  workspace_id: string | null;
+  name: string;
+  slug: string;
+  description: string;
+  instructions: string;
+  is_active: boolean;
+  created_at: string;
+}
+
 // Admin panel types -----------------------------------------------------
 
 export interface AdminTenant {
@@ -152,6 +195,21 @@ export interface AdminApiKeyCreated extends AdminApiKey {
 
 export const api = {
   health: () => request<HealthStatus>("/health"),
+
+  login: (email: string, password: string) =>
+    request<{ authenticated: boolean; expires_in_minutes: number }>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
+
+  logout: () => request<{ ok: boolean }>("/auth/logout", { method: "POST", body: JSON.stringify({}) }),
+
+  me: () => request<CurrentUser>("/auth/me"),
+
+  listOrganizations: () => request<{ organizations: OrganizationInfo[]; count: number }>("/organizations"),
+
+  listProjects: (organizationId: string) =>
+    request<{ projects: ProjectInfo[]; count: number }>(`/organizations/${organizationId}/projects`),
+
+  createProject: (input: { organization_id: string; name: string; slug: string; description: string }) =>
+    request<ProjectInfo>("/projects", { method: "POST", body: JSON.stringify(input) }),
 
   listAgents: () => request<{ agents: AgentInfo[] }>("/workflows/agents"),
 
