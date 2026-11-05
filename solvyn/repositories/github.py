@@ -218,6 +218,21 @@ class GitHubClient(RepositoryProvider):
         branch_sha = object_created.get("sha") if isinstance(object_created, dict) else source_sha
         return {"name": branch, "sha": str(branch_sha)}
 
+    async def create_branch_at_commit(self, full_name: str, branch: str, commit_sha: str) -> dict[str, str]:
+        """Create a Solvyn branch from an exact, validated commit revision."""
+        owner, repo = validate_full_name(full_name)
+        _validate_solvyn_branch(branch)
+        if not re.fullmatch(r"[a-fA-F0-9]{40,64}", commit_sha):
+            raise GitHubRepositoryError(422, "Source commit revision is invalid")
+        created = await self._write_json(
+            "POST",
+            f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/git/refs",
+            body={"ref": f"refs/heads/{branch}", "sha": commit_sha.lower()},
+        )
+        object_created = created.get("object")
+        branch_sha = object_created.get("sha") if isinstance(object_created, dict) else commit_sha.lower()
+        return {"name": branch, "sha": str(branch_sha)}
+
     @staticmethod
     def _validate_commit_files(files: list[dict[str, str]]) -> None:
         if not 1 <= len(files) <= _MAX_COMMIT_FILES:

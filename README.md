@@ -51,7 +51,7 @@
 | **Cost analytics** | Per-session and per-tenant token/cost tracking with provider-specific pricing tables |
 | **Multi-tenant isolation** | ContextVar-based tenant scoping through the full request lifecycle; API key authentication with constant-time HMAC comparison |
 | **Repository intelligence (early)** | Connect public GitHub repositories to projects, inspect bounded trees and manifests, search paths, and optionally pass a summary plus caller-selected files to a teammate as untrusted context |
-| **Sandbox runtime (early)** | Delegated teammates can list/read with `READ_ONLY`, write with `MODIFY_FILES`, and run fixed verification profiles with `EXECUTE_COMMANDS`; users can also submit bounded argv overrides. Shell access, Git diffs, and PR delivery are not connected yet |
+| **Sandbox runtime (early)** | Delegated teammates can list/read with `READ_ONLY`, write with `MODIFY_FILES`, and run fixed verification profiles with `EXECUTE_COMMANDS`. Repository-backed workspaces can produce a bounded diff and an owner/admin-approved draft PR; full clones, deletions, and arbitrary teammate shell access are not supported |
 | **Self-hosting foundation** | Development Compose plus a production-oriented Compose stack with migrations, health checks, persistent data, and a separate scheduler worker. See the current [shipment readiness assessment](./docs/SHIPMENT_READINESS.md) for remaining product limitations. |
 
 ---
@@ -396,6 +396,8 @@ Base URL: `http://localhost:8000/api/v1`
 | `GET` | `/workflows/executions/{execution_id}` | Required | Read a tenant-scoped durable execution snapshot |
 | `GET` | `/workflows/executions/{execution_id}/tasks` | Required | Inspect durable workflow tasks, attempts, and dependency edges |
 | `POST` | `/workflows/executions/{execution_id}/tasks/{task_id}/workspace` | Required | Create a tenant-scoped managed workspace with UTF-8 files |
+| `GET` | `/workflows/executions/{execution_id}/tasks/{task_id}/delivery-preview` | Owner/admin | Compare a repository-backed workspace with its pinned source revision and return a bounded diff plus approval digest |
+| `POST` | `/workflows/executions/{execution_id}/tasks/{task_id}/deliver` | Owner/admin | Confirm the current preview digest, create a Solvyn branch from the pinned commit, commit text changes, and open a draft PR |
 | `POST` | `/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs` | Required | Run an argv command in the isolated sandbox and persist bounded evidence |
 | `GET` | `/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs` | Required | Read verification history for a task |
 | `GET` | `/workflows/executions/{execution_id}/tasks/{task_id}/tool-invocations` | Required | Read content-free teammate file-tool audit records for a task |
@@ -412,6 +414,8 @@ Base URL: `http://localhost:8000/api/v1`
 Workflow snapshots are saved as nodes start and finish. Scheduled executions and their inputs are stored in PostgreSQL, and the API worker polls due schedules every five seconds; a schedule remains pending through API restarts and can be cancelled before it starts. Workers renew a 60-second lease while executing; a resume request is rejected while that lease is active and can reclaim an expired or failed run. Completed nodes are retained, while unfinished nodes run again at least once, so an external side effect may repeat if a worker stopped after performing it but before saving its result. Cancellation is tenant-scoped: active workers stop after observing the cancellation request, while scheduled, abandoned, or failed runs are cancelled immediately.
 
 Each workflow node also has a durable task record. The task endpoint exposes its assigned agent, dependency task IDs, execution status, attempt count, timestamps, inputs, outputs, and errors. Recovery attempts are currently uncapped; `max_attempts` is null until a retry budget is configured.
+
+Repository-backed task workspaces are selected-file snapshots from public GitHub repositories, not full clones. Delivery is limited to 50 UTF-8 text files and 500 KB of changed content. The preview digest binds delivery to the exact current workspace contents and current GitHub base branch; if files change afterward, the delivery request fails and requires a fresh preview. Delivery creates a draft pull request and never merges it. Deletions, changed executable files, edits to unselected existing repository paths, and private repository workspace creation are unsupported. If GitHub times out while opening a PR after a commit, the API reports the PR outcome as unknown and tells the caller to check the branch before retrying.
 
 Task handoffs require a caller-provided `idempotency_key`; repeating the same request reuses its durable child task instead of creating duplicate work. Each handoff records the source and target teammate, project, reason, input, output, and status. Delegation is limited to three levels and only runs teammates assigned to the requested project in the caller's tenant. Set `requires_approval` to `true` to persist a human approval checkpoint before the teammate runs. Organization owners or admins can approve or reject it through the approval inbox; an approved handoff is resumed through its task handoff resume route.
 
