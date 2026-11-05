@@ -61,13 +61,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.critical("SECURITY: %s", exc)
         raise
     await message_bus.connect()
-    scheduler_task = asyncio.create_task(run_scheduled_workflows(), name="workflow-scheduler")
+    scheduler_task: asyncio.Task[None] | None = None
+    if settings.enable_workflow_scheduler:
+        scheduler_task = asyncio.create_task(run_scheduled_workflows(), name="workflow-scheduler")
     logger.info("Solvyn started")
     yield
     # Shutdown
     logger.info("Shutting down — draining connections...")
-    scheduler_task.cancel()
-    await asyncio.gather(scheduler_task, return_exceptions=True)
+    if scheduler_task is not None:
+        scheduler_task.cancel()
+        await asyncio.gather(scheduler_task, return_exceptions=True)
     await message_bus.disconnect()
     from solvyn.llm.router import llm_router
 

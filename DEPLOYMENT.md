@@ -1,6 +1,6 @@
 # Solvyn Deployment Guide
 
-> Deploying Solvyn — from local development to production Kubernetes
+> Development uses `docker-compose.yml`; self-hosted deployments should start with `docker-compose.prod.yml`. Kubernetes manifests remain optional and require environment-specific review.
 
 ---
 
@@ -144,20 +144,39 @@ docker compose down
 docker compose down -v
 ```
 
-### Production Dockerfile
+### Self-hosted deployment with Docker Compose
 
-**Source**: `Dockerfile` (API)
+The production-oriented stack builds the API and frontend images, runs Alembic migrations once before the API and worker start, and keeps PostgreSQL and Redis off public interfaces. PostgreSQL is optionally reachable on a loopback-only host port for operator backups; Redis remains only on the private Compose network. It uses persistent named volumes, container health checks, restart policies, and CPU/memory limits. The API and frontend ports also bind to loopback so a host TLS reverse proxy can publish them.
 
-```dockerfile
-FROM python:3.12-slim
-WORKDIR /app
-COPY pyproject.toml .
-RUN pip install --no-cache-dir -e ".[dev]"
-COPY . .
-CMD ["uvicorn", "solvyn.main:app", "--host", "0.0.0.0", "--port", "8000"]
-```
+1. Install Docker Engine with the Compose v2 plugin and PostgreSQL client tools (`pg_dump`, `psql`, and `gzip`) on the backup operator's host.
+2. Prepare a secrets file and replace every placeholder. Use separate random values for API and JWT signing, a valid Fernet key for integration encryption, and URL-encode special characters in the database URL password. Keep JSON-valued settings such as `ALLOWED_ORIGINS` quoted as in the example; quote `DATABASE_URL` if its encoded value contains shell-sensitive characters:
 
-**Frontend Dockerfile**: `frontend/Dockerfile` — multi-stage build with `next build` → optimized production image.
+   ```bash
+   cp .env.production.example .env.production
+   chmod 600 .env.production
+   # Generate secrets, then edit .env.production:
+   openssl rand -hex 32
+   python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
+   ```
+
+3. Set `ALLOWED_ORIGINS` to the public HTTPS origin and set the database connection string to host `db`, the configured database name, and the URL-encoded password. Set at least one LLM provider key if workflows need model access. Do not commit `.env.production`.
+4. Start the stack:
+
+   ```bash
+   docker compose --env-file .env.production -f docker-compose.prod.yml up --build -d
+   docker compose --env-file .env.production -f docker-compose.prod.yml ps
+   docker compose --env-file .env.production -f docker-compose.prod.yml logs -f api worker migrate
+   ```
+
+5. Terminate TLS at a reverse proxy and proxy the public hostname to `127.0.0.1:3000`. Keep the API port private to the host/proxy. Do not expose PostgreSQL or Redis publicly.
+
+The workflow scheduler runs in exactly one `worker` service; the API disables its in-process scheduler. Do not scale the worker through this Compose file. The app containers run as non-root. The stack does not create an off-host backup, TLS proxy, firewall, secret manager, or disaster-recovery policy; operators must configure and periodically exercise those controls.
+
+For status and explicitly outstanding product blockers, see [Shipment readiness](./docs/SHIPMENT_READINESS.md).
+
+### Container images
+
+`Dockerfile` builds the API and migration/worker image. `frontend/Dockerfile` builds the Next.js frontend in multiple stages. Both runtime images use non-root users and include health checks.
 
 ### Building for Production
 
@@ -287,6 +306,7 @@ annotations:
 | `PORT` | `8000` | No | Server port |
 | `LOG_LEVEL` | `INFO` | No | Logging level (DEBUG, INFO, WARNING, ERROR) |
 | `JSON_LOGGING` | `true` | No | Enable structured JSON log output |
+| `ENABLE_WORKFLOW_SCHEDULER` | `true` | No | Run the scheduler in the API process; production Compose disables it in the API and runs it in the worker service |
 | `API_KEY_SECRET` | `change-me-to-a-random-secret` | Yes | Master API key for auth |
 | `ALLOWED_ORIGINS` | `["http://localhost:3000"]` | No | CORS allowed origins (JSON list) |
 
@@ -689,26 +709,30 @@ kubectl create secret tls solvyn-tls \
 ### PostgreSQL Backup
 
 ```bash
-# Backup the database
-kubectl exec -n solvyn deployment/solvyn-db -- \
-  pg_dump -U solvyn -d solvyn -Fc > solvyn_backup_$(date +%Y%m%d).dump
-
-# Or via port-forward
-kubectl port-forward -n solvyn svc/solvyn-db 5432:5432 &
-pg_dump -h localhost -U solvyn -d solvyn -Fc > solvyn_backup.dump
+# Use the deployment DATABASE_URL, but route its host through the loopback-only
+# PostgreSQL port published by Compose for host-side backup access.
+set -a && source .env.production && set +a
+umask 077
+backup_database_url="${DATABASE_URL//@db:5432/@127.0.0.1:${POSTGRES_PORT:-5432}}"
+DATABASE_URL="$backup_database_url" bash scripts/backup-db.sh ./backups
 ```
+
+The backup is a compressed plain-SQL dump. Files are created with owner-only permissions and atomically renamed after `pg_dump` succeeds. S3 upload is disabled unless `S3_BUCKET` is explicitly set; configure and test AWS credentials before enabling it. Copy backups off the application host and define retention/encryption according to your policy.
 
 ### Restore
 
 ```bash
-# Restore from backup
-kubectl exec -i -n solvyn deployment/solvyn-db -- \
-  pg_restore -U solvyn -d solvyn --clean < solvyn_backup.dump
+set -a && source .env.production && set +a
+restore_database_url="${DATABASE_URL//@db:5432/@127.0.0.1:${POSTGRES_PORT:-5432}}"
+DATABASE_URL="$restore_database_url" bash scripts/restore-db.sh ./backups/solvyn_YYYYMMDDTHHMMSSZ.sql.gz \
+  --confirm-database solvyn
 ```
 
-### Automated Backup (CronJob)
+Restore requires both an exact database-name confirmation argument and interactive confirmation. It never drops the database, but SQL may replace existing objects. Restore into a maintenance window or a fresh isolated database, validate the application against it, and preserve the existing database until validation succeeds.
 
-> **⚠️ HUMAN INPUT NEEDED**: No automated backup CronJob is included. Recommended approach:
+### Automated backup scheduling
+
+No backup scheduler is included. Run the backup from a host scheduler or managed backup service, copy it off-host, alert on failures, and test restores regularly. Do not use the example Kubernetes CronJob below as a complete production backup policy without adding retention, off-site storage, encryption, and monitoring.
 
 ```yaml
 apiVersion: batch/v1
