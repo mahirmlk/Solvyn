@@ -50,6 +50,7 @@
 | **Real-time observability** | WebSocket graph visualization, Prometheus metrics (8 counters/gauges/histograms), structured JSON logging, audit trail |
 | **Cost analytics** | Per-session and per-tenant token/cost tracking with provider-specific pricing tables |
 | **Multi-tenant isolation** | ContextVar-based tenant scoping through the full request lifecycle; API key authentication with constant-time HMAC comparison |
+| **Repository intelligence (early)** | Connect public GitHub repositories to projects, inspect bounded file trees and manifests, and search file paths without executing repository code |
 | **Production-ready deployment** | Docker Compose for dev, Kubernetes with HPA autoscaling (2-10 replicas), GitHub Actions CI/CD with staging→prod promotion |
 
 ---
@@ -669,6 +670,7 @@ solvyn/
 |----------|-------------|
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | Full system architecture, component design, data flow, technology decisions |
 | [API.md](./API.md) | Complete API reference — endpoints, request/response schemas, auth, error codes |
+| [Repository Intelligence](./docs/REPOSITORY_INTELLIGENCE.md) | Current GitHub provider scope, limits, and security boundaries |
 | [SECURITY.md](./SECURITY.md) | Security model, authentication, multi-tenant isolation, compliance guidance |
 | [DEPLOYMENT.md](./DEPLOYMENT.md) | Deployment guide — Docker, Kubernetes, CI/CD, rollback procedures |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | Contribution guidelines, development setup, coding standards, PR process |

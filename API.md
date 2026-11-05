@@ -11,10 +11,11 @@
 3. [Health](#health)
 4. [Sessions](#sessions)
 5. [Workflows](#workflows)
-6. [Observability](#observability)
-7. [WebSocket](#websocket)
-8. [Error Codes](#error-codes)
-9. [Common Patterns](#common-patterns)
+6. [Repository Intelligence](#repository-intelligence)
+7. [Observability](#observability)
+8. [WebSocket](#websocket)
+9. [Error Codes](#error-codes)
+10. [Common Patterns](#common-patterns)
 
 ---
 
@@ -577,6 +578,40 @@ List available agent types and their capabilities.
 curl -H "X-API-Key: your-api-key" \
      http://localhost:8000/api/v1/workflows/agents
 ```
+
+---
+
+## Repository Intelligence
+
+These endpoints require a user JWT in `Authorization: Bearer <access-token>` and membership in the organization that owns the project. Tenant API keys alone cannot connect or inspect repositories.
+
+The GitHub provider currently supports public repositories. Inspection is read-only: it does not clone repositories, execute repository code, or change remote branches. Repository text and metadata are untrusted input.
+
+### `POST /api/v1/projects/{project_id}/repositories`
+
+Connect a public GitHub repository to a project. Requires an organization owner or admin.
+
+```json
+{ "full_name": "owner/repository" }
+```
+
+### `GET /api/v1/projects/{project_id}/repositories`
+
+List repositories connected to a project visible to the caller.
+
+### `GET /api/v1/repositories/{repository_id}/inspect`
+
+Inspect the default branch. Returns repository metadata, revision SHA, file count, top-level entries, language counts, up to six common manifests (each capped at 64 KB), parsed direct dependencies, and a compact project context. `content_trust` is `untrusted_repository_data`.
+
+### `GET /api/v1/repositories/{repository_id}/files/search?query=...`
+
+Search file paths case-insensitively. This endpoint searches paths only; it does not search file contents.
+
+### `GET /api/v1/repositories/{repository_id}/branches`
+
+List up to the first 100 branches and their commit SHAs. When `possibly_truncated` is true, the repository has at least 100 branches and the response may omit later branches.
+
+GitHub 404 responses map to not found, rate limits to 429, and provider/network failures to 502 or 504. Large or truncated trees return 413.
 
 ---
 

@@ -17,6 +17,7 @@
 9. [Observability Stack](#observability-stack)
 10. [Technology Decisions](#technology-decisions)
 11. [Directory Structure](#directory-structure)
+12. [Repository Intelligence](#repository-intelligence)
 
 ---
 
@@ -675,3 +676,9 @@ solvyn/
 ├── .pre-commit-config.yaml         # ruff, mypy, yaml/json/toml checks
 └── .env.example                    # All config env vars
 ```
+
+## Repository Intelligence
+
+The Phase 2 repository provider boundary currently has a read-only GitHub implementation. Project members can connect public repositories and request a bounded default-branch inspection. The API derives file-path matches, language counts, direct dependencies, and a small project context from GitHub metadata and common manifests.
+
+Provider responses are treated as untrusted repository data. This slice does not clone or execute repository code, mutate branches, or create pull requests. Private repository support requires a separate credential and permission design. See [the current scope and endpoint limits](docs/REPOSITORY_INTELLIGENCE.md).
