@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -83,14 +84,42 @@ class AmbiguousPullRequestGitHub(FakeDeliveryGitHub):
         raise GitHubRepositoryError(504, "GitHub request timed out")
 
 
+class FakeDeliverySession:
+    def __init__(self, existing: Any | None = None) -> None:
+        self.records: list[Any] = []
+        self.commits = 0
+        self.existing = existing
+
+    async def execute(self, _statement: Any) -> Any:
+        return SimpleNamespace(scalar_one_or_none=lambda: self.existing)
+
+    def add(self, record: Any) -> None:
+        if record.id is None:
+            record.id = uuid.uuid4()
+        self.records.append(record)
+
+    async def commit(self) -> None:
+        self.commits += 1
+        now = datetime.now(UTC)
+        for record in self.records:
+            record.created_at = record.created_at or now
+            record.updated_at = now
+
+    async def refresh(self, _record: Any) -> None:
+        return None
+
+    async def rollback(self) -> None:
+        return None
+
+
 def _delivery_fixture(tmp_path: Any) -> tuple[Any, ...]:
     manager = WorkspaceManager(tmp_path / "workspaces")
     workspace = manager.create()
     manager.write_file(workspace, "src/main.py", b"print('after')\n")
-    workspace_record = SimpleNamespace(id=workspace.id, source_commit_sha="a" * 40)
-    repository = SimpleNamespace(id="repo-id", full_name="octo/repo", default_branch="main")
+    workspace_record = SimpleNamespace(id=uuid.uuid4(), source_commit_sha="a" * 40)
+    repository = SimpleNamespace(id=uuid.uuid4(), full_name="octo/repo", default_branch="main")
     return (
-        SimpleNamespace(id="task-id"),
+        SimpleNamespace(id=uuid.uuid4(), tenant_id=uuid.uuid4()),
         workspace_record,
         repository,
         SimpleNamespace(),
@@ -248,6 +277,7 @@ async def test_delivery_creates_pinned_branch_commit_and_draft_pr(
     verification_api = _verification_api()
     context = _delivery_fixture(tmp_path)
     github = FakeDeliveryGitHub()
+    db = FakeDeliverySession()
     preview = await verification_api._build_delivery_preview(
         context[2], context[1], context[4], context[5], context[6], FakeGitHub()  # type: ignore[arg-type]
     )
@@ -266,13 +296,17 @@ async def test_delivery_creates_pinned_branch_commit_and_draft_pr(
             commit_message="Update source",
             pull_request_title="Update source",
         ),
-        db=object(),  # type: ignore[arg-type]
+        db=db,  # type: ignore[arg-type]
     )
 
     assert github.writes == ["branch", "commit", "pull-request"]
     assert result["commit_sha"] == "b" * 40
     assert result["pull_request"]["draft"] is True
     assert result["merged"] is False
+    assert result["replayed"] is False
+    assert len(db.records) == 1
+    assert db.records[0].status == "pull_request_open"
+    assert db.records[0].pull_request_number == 12
 
 
 @pytest.mark.asyncio
@@ -282,6 +316,7 @@ async def test_ambiguous_pull_request_failure_reports_unknown_outcome(
     verification_api = _verification_api()
     context = _delivery_fixture(tmp_path)
     github = AmbiguousPullRequestGitHub()
+    db = FakeDeliverySession()
     preview = await verification_api._build_delivery_preview(
         context[2], context[1], context[4], context[5], context[6], FakeGitHub()  # type: ignore[arg-type]
     )
@@ -301,10 +336,111 @@ async def test_ambiguous_pull_request_failure_reports_unknown_outcome(
                 commit_message="Update source",
                 pull_request_title="Update source",
             ),
-            db=object(),  # type: ignore[arg-type]
+            db=db,  # type: ignore[arg-type]
         )
 
     assert github.writes == ["branch", "commit", "pull-request"]
     assert error.value.status_code == 504
     assert error.value.detail["pull_request_created"] == "unknown"
     assert error.value.detail["commit_sha"] == "b" * 40
+    assert len(db.records) == 1
+    assert db.records[0].status == "unknown"
+    assert db.records[0].commit_sha == "b" * 40
+
+
+@pytest.mark.asyncio
+async def test_delivery_replays_persisted_pull_request_without_github_writes(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verification_api = _verification_api()
+    context = _delivery_fixture(tmp_path)
+    github = FakeDeliveryGitHub()
+    preview = await verification_api._build_delivery_preview(
+        context[2], context[1], context[4], context[5], context[6], FakeGitHub()  # type: ignore[arg-type]
+    )
+    delivery = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="pull_request_open",
+        pull_request_url="https://github.com/octo/repo/pull/12",
+        pull_request_title="Original saved title",
+        pull_request_number=12,
+        commit_sha="b" * 40,
+        branch_name="solvyn/task-12",
+        diff_digest=preview["diff_digest"],
+    )
+    db = FakeDeliverySession(existing=delivery)
+
+    async def load_context(*_args: Any) -> tuple[Any, ...]:
+        return context
+
+    monkeypatch.setattr(verification_api, "_task_delivery_context", load_context)
+    monkeypatch.setattr(verification_api, "GitHubClient", lambda **_kwargs: github)
+    result = await verification_api.deliver_task_workspace(
+        execution_id=uuid.uuid4(),
+        task_id=uuid.uuid4(),
+        payload=verification_api.TaskDeliveryRequest(
+            expected_diff_digest=preview["diff_digest"],
+            branch_name="solvyn/task-12",
+            commit_message="Update source",
+            pull_request_title="Update source",
+        ),
+        db=db,  # type: ignore[arg-type]
+    )
+
+    assert result["replayed"] is True
+    assert result["pull_request"]["url"] == delivery.pull_request_url
+    assert result["pull_request"]["title"] == delivery.pull_request_title
+    assert result["pull_request"]["state"] == "recorded"
+    assert result["pull_request"]["draft"] is None
+    assert github.writes == []
+    assert db.records == []
+
+
+@pytest.mark.asyncio
+async def test_delivery_blocks_retry_for_unresolved_persisted_attempt(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verification_api = _verification_api()
+    context = _delivery_fixture(tmp_path)
+    github = FakeDeliveryGitHub()
+    preview = await verification_api._build_delivery_preview(
+        context[2], context[1], context[4], context[5], context[6], FakeGitHub()  # type: ignore[arg-type]
+    )
+    delivery = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="unknown",
+        diff_digest=preview["diff_digest"],
+        base_branch="main",
+        branch_name="solvyn/task-12",
+        branch_sha="a" * 40,
+        commit_sha="b" * 40,
+        pull_request_title=None,
+        pull_request_number=None,
+        pull_request_url=None,
+        error="GitHub request timed out",
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    db = FakeDeliverySession(existing=delivery)
+
+    async def load_context(*_args: Any) -> tuple[Any, ...]:
+        return context
+
+    monkeypatch.setattr(verification_api, "_task_delivery_context", load_context)
+    monkeypatch.setattr(verification_api, "GitHubClient", lambda **_kwargs: github)
+    with pytest.raises(HTTPException) as error:
+        await verification_api.deliver_task_workspace(
+            execution_id=uuid.uuid4(),
+            task_id=uuid.uuid4(),
+            payload=verification_api.TaskDeliveryRequest(
+                expected_diff_digest=preview["diff_digest"],
+                branch_name="solvyn/task-12",
+                commit_message="Update source",
+                pull_request_title="Update source",
+            ),
+            db=db,  # type: ignore[arg-type]
+        )
+
+    assert error.value.status_code == 409
+    assert error.value.detail["delivery"]["status"] == "unknown"
+    assert github.writes == []

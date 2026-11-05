@@ -221,14 +221,33 @@ export interface TaskDeliveryDiff {
   unsupported_missing_source_paths: string[];
   diff_digest: string;
   can_deliver: boolean;
+  delivery_history: TaskDeliveryAttempt[];
+}
+
+export interface TaskDeliveryAttempt {
+  id: string;
+  status: "starting" | "branch_created" | "committed" | "pull_request_open" | "unknown";
+  diff_digest: string;
+  base_branch: string;
+  branch: string;
+  branch_sha: string | null;
+  commit_sha: string | null;
+  pull_request_title: string | null;
+  pull_request_number: number | null;
+  pull_request_url: string | null;
+  error: string | null;
+  created_at: string | null;
+  updated_at: string | null;
 }
 
 export interface TaskDeliveryResult {
+  delivery_id: string;
   branch: string;
   commit_sha: string;
-  pull_request: { number: number; title: string; url: string; state: string; draft: boolean };
+  pull_request: { number: number; title: string; url: string; state: string; draft: boolean | null };
   merged: false;
   approved_diff_digest: string;
+  replayed: boolean;
 }
 
 // Admin panel types -----------------------------------------------------

@@ -13,6 +13,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.api.v1._rbac import OWNER_ADMIN
@@ -24,6 +25,7 @@ from solvyn.db.models import (
     Repository,
     Task,
     TaskAcceptanceCriterion,
+    TaskDelivery,
     TaskHandoff,
     TaskWorkspace,
     TeammateToolInvocation,
@@ -37,7 +39,7 @@ from solvyn.repositories.credentials import (
     GitHubCredentialNotFoundError,
     load_organization_github_token,
 )
-from solvyn.repositories.github import GitHubClient, GitHubRepositoryError
+from solvyn.repositories.github import GitHubClient, GitHubRepositoryError, _validate_solvyn_branch
 from solvyn.repositories.providers import get_repository_provider
 from solvyn.sandbox.factory import create_sandbox_runner
 from solvyn.sandbox.remote import RemoteSandboxResult, RemoteSandboxRunner
@@ -353,6 +355,24 @@ def _verification_dict(run: VerificationRun) -> dict[str, Any]:
         "source_digest": run.source_digest,
         "started_at": run.started_at.isoformat() if run.started_at else None,
         "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+    }
+
+
+def _task_delivery_dict(delivery: TaskDelivery) -> dict[str, Any]:
+    return {
+        "id": str(delivery.id),
+        "status": delivery.status,
+        "diff_digest": delivery.diff_digest,
+        "base_branch": delivery.base_branch,
+        "branch": delivery.branch_name,
+        "branch_sha": delivery.branch_sha,
+        "commit_sha": delivery.commit_sha,
+        "pull_request_title": delivery.pull_request_title,
+        "pull_request_number": delivery.pull_request_number,
+        "pull_request_url": delivery.pull_request_url,
+        "error": delivery.error,
+        "created_at": delivery.created_at.isoformat() if delivery.created_at else None,
+        "updated_at": delivery.updated_at.isoformat() if delivery.updated_at else None,
     }
 
 
@@ -842,11 +862,21 @@ async def preview_task_delivery(
     ) = await _task_delivery_context(execution_id, task_id, db)
     try:
         async with GitHubClient(token=token) as github:
-            return await _build_delivery_preview(
+            preview = await _build_delivery_preview(
                 repository, workspace_record, source_paths, manager, workspace, github
             )
     except GitHubRepositoryError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    deliveries = (
+        await db.execute(
+            select(TaskDelivery)
+            .where(TaskDelivery.tenant_id == _task.tenant_id, TaskDelivery.task_id == _task.id)
+            .order_by(TaskDelivery.created_at.desc(), TaskDelivery.id.desc())
+            .limit(20)
+        )
+    ).scalars().all()
+    preview["delivery_history"] = [_task_delivery_dict(item) for item in deliveries]
+    return preview
 
 
 @router.post("/deliver", status_code=201, summary="Create a draft PR from the approved workspace diff")
@@ -858,6 +888,10 @@ async def deliver_task_workspace(
 ) -> dict[str, Any]:
     if not payload.commit_message.strip() or not payload.pull_request_title.strip():
         raise HTTPException(status_code=422, detail="Commit message and pull request title must not be blank")
+    try:
+        _validate_solvyn_branch(payload.branch_name)
+    except GitHubRepositoryError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
     (
         _task,
         workspace_record,
@@ -871,8 +905,6 @@ async def deliver_task_workspace(
     pinned_source_sha = workspace_record.source_commit_sha
     if not isinstance(pinned_source_sha, str) or not pinned_source_sha:
         raise HTTPException(status_code=409, detail="Task workspace has no pinned source commit")
-    branch_created: dict[str, str] | None = None
-    commit_created: dict[str, str] | None = None
     try:
         async with GitHubClient(token=token) as github:
             preview = await _build_delivery_preview(
@@ -885,12 +917,115 @@ async def deliver_task_workspace(
                     status_code=409,
                     detail="Delivery requires at least one change and all selected source files; deletions are unsupported",
                 )
+            existing = (
+                await db.execute(
+                    select(TaskDelivery)
+                    .where(
+                        TaskDelivery.tenant_id == _task.tenant_id,
+                        TaskDelivery.task_id == _task.id,
+                        TaskDelivery.diff_digest == preview["diff_digest"],
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                if existing.status == "pull_request_open" and existing.pull_request_url and existing.commit_sha:
+                    return {
+                        "delivery_id": str(existing.id),
+                        "branch": existing.branch_name,
+                        "commit_sha": existing.commit_sha,
+                        "pull_request": {
+                            "number": existing.pull_request_number,
+                            "title": existing.pull_request_title or "Pull request",
+                            "url": existing.pull_request_url,
+                            "state": "recorded",
+                            "draft": None,
+                        },
+                        "merged": False,
+                        "approved_diff_digest": existing.diff_digest,
+                        "replayed": True,
+                    }
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": f"This diff already has a delivery attempt in {existing.status} state.",
+                        "delivery": _task_delivery_dict(existing),
+                        "recovery": "Inspect the recorded branch and GitHub pull requests before starting another delivery.",
+                    },
+                )
+
+            delivery = TaskDelivery(
+                tenant_id=_task.tenant_id,
+                task_id=_task.id,
+                workspace_id=workspace_record.id,
+                repository_id=repository.id,
+                source_commit_sha=pinned_source_sha,
+                base_branch=preview["base_branch"],
+                diff_digest=preview["diff_digest"],
+                branch_name=payload.branch_name,
+                status="starting",
+            )
+            db.add(delivery)
+            try:
+                await db.commit()
+                await db.refresh(delivery)
+            except IntegrityError as exc:
+                await db.rollback()
+                concurrent = (
+                    await db.execute(
+                        select(TaskDelivery).where(
+                            TaskDelivery.tenant_id == _task.tenant_id,
+                            TaskDelivery.task_id == _task.id,
+                            TaskDelivery.diff_digest == preview["diff_digest"],
+                        )
+                    )
+                ).scalar_one_or_none()
+                if concurrent is not None and concurrent.status == "pull_request_open" and concurrent.pull_request_url:
+                    return {
+                        "delivery_id": str(concurrent.id),
+                        "branch": concurrent.branch_name,
+                        "commit_sha": concurrent.commit_sha,
+                        "pull_request": {
+                            "number": concurrent.pull_request_number,
+                            "title": concurrent.pull_request_title or "Pull request",
+                            "url": concurrent.pull_request_url,
+                            "state": "recorded",
+                            "draft": None,
+                        },
+                        "merged": False,
+                        "approved_diff_digest": concurrent.diff_digest,
+                        "replayed": True,
+                    }
+                raise HTTPException(
+                    status_code=409,
+                    detail="A delivery attempt for this exact diff is already in progress or needs recovery.",
+                ) from exc
+
             try:
                 branch_created = await github.create_branch_at_commit(
                     repository.full_name,
                     payload.branch_name,
                     pinned_source_sha,
                 )
+            except GitHubRepositoryError as exc:
+                delivery.status = "unknown"
+                delivery.error = exc.message[:2000]
+                await db.commit()
+                raise HTTPException(
+                    status_code=exc.status_code,
+                    detail={
+                        "message": exc.message,
+                        "delivery_id": str(delivery.id),
+                        "branch": payload.branch_name,
+                        "branch_created": "unknown",
+                        "recovery": "Check GitHub for this branch before retrying the same task diff.",
+                    },
+                ) from exc
+
+            delivery.status = "branch_created"
+            delivery.branch_sha = branch_created["sha"]
+            await db.commit()
+            try:
                 commit_created = await github.commit_files(
                     repository.full_name,
                     branch_created["name"],
@@ -898,6 +1033,26 @@ async def deliver_task_workspace(
                     message=payload.commit_message,
                     files=preview["files"],
                 )
+            except GitHubRepositoryError as exc:
+                delivery.status = "unknown"
+                delivery.error = exc.message[:2000]
+                await db.commit()
+                raise HTTPException(
+                    status_code=exc.status_code,
+                    detail={
+                        "message": exc.message,
+                        "delivery_id": str(delivery.id),
+                        "branch": branch_created["name"],
+                        "branch_sha": branch_created["sha"],
+                        "commit_sha": "unknown",
+                        "recovery": "Inspect the branch head and GitHub pull requests before retrying this task diff.",
+                    },
+                ) from exc
+
+            delivery.status = "committed"
+            delivery.commit_sha = commit_created["sha"]
+            await db.commit()
+            try:
                 pull_request = await github.create_pull_request(
                     repository.full_name,
                     title=payload.pull_request_title,
@@ -906,29 +1061,36 @@ async def deliver_task_workspace(
                     base=preview["base_branch"],
                 )
             except GitHubRepositoryError as exc:
-                if branch_created is None:
-                    raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+                delivery.status = "unknown"
+                delivery.error = exc.message[:2000]
+                await db.commit()
                 raise HTTPException(
                     status_code=exc.status_code,
                     detail={
                         "message": exc.message,
+                        "delivery_id": str(delivery.id),
                         "branch": branch_created["name"],
                         "branch_sha": branch_created["sha"],
-                        "commit_sha": commit_created["sha"] if commit_created else None,
-                        "pull_request_created": "unknown" if commit_created else False,
-                        "recovery": (
-                            "Check GitHub for an open pull request from this branch before retrying."
-                            if commit_created
-                            else None
-                        ),
+                        "commit_sha": commit_created["sha"],
+                        "pull_request_created": "unknown",
+                        "recovery": "Check GitHub for an open pull request from this branch before retrying.",
                     },
                 ) from exc
+
+            delivery.status = "pull_request_open"
+            delivery.pull_request_title = str(pull_request.get("title") or payload.pull_request_title)[:256]
+            delivery.pull_request_number = pull_request.get("number")
+            delivery.pull_request_url = pull_request.get("url") or None
+            delivery.error = None
+            await db.commit()
     except GitHubRepositoryError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
     return {
+        "delivery_id": str(delivery.id),
         "branch": branch_created["name"],
         "commit_sha": commit_created["sha"],
         "pull_request": pull_request,
         "merged": False,
         "approved_diff_digest": preview["diff_digest"],
+        "replayed": False,
     }
