@@ -3,11 +3,12 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from solvyn.api.v1.verification import _verification_history
 from solvyn.db.models import VerificationRun
 
 
 def test_overlapping_verification_runs_are_inconclusive() -> None:
+    from solvyn.api.v1.verification import _verification_history
+
     now = datetime.now(UTC)
     tenant_id = uuid.uuid4()
     task_id = uuid.uuid4()
