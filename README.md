@@ -50,7 +50,7 @@
 | **Real-time observability** | WebSocket graph visualization, Prometheus metrics (8 counters/gauges/histograms), structured JSON logging, audit trail |
 | **Cost analytics** | Per-session and per-tenant token/cost tracking with provider-specific pricing tables |
 | **Multi-tenant isolation** | ContextVar-based tenant scoping through the full request lifecycle; API key authentication with constant-time HMAC comparison |
-| **Repository intelligence (early)** | Connect public GitHub repositories to projects, inspect bounded file trees and manifests, and search file paths without executing repository code |
+| **Repository intelligence (early)** | Connect public GitHub repositories to projects, inspect bounded trees and manifests, search paths, and optionally pass a selected repository summary to a teammate as untrusted context |
 | **Sandbox runtime (internal preview)** | Run argv commands in a one-shot restricted Docker container; the runner is not yet exposed to teammates or API users |
 | **Self-hosting foundation** | Development Compose plus a production-oriented Compose stack with migrations, health checks, persistent data, and a separate scheduler worker. See the current [shipment readiness assessment](./docs/SHIPMENT_READINESS.md) for remaining product limitations. |
 

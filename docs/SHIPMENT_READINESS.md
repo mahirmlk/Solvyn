@@ -19,9 +19,9 @@ This status compares the repository with `UPDATE.md`, including its primary engi
 
 ## Product shipment blockers
 
-The central `UPDATE.md` workflow is not complete. Repository integration supports bounded public-repository inspection and selected GitHub operations, but the agent runtime does not receive repository files/context as task inputs. The verification workspace accepts caller-supplied files, and the internal Docker sandbox runner is not connected to a deployable sandbox service. Private repository reads are also not implemented. Therefore Solvyn cannot yet reliably inspect an existing repository, implement a requested change in an isolated worktree, run its checks, present an evidence-backed diff, and create a pull request end to end.
+The central `UPDATE.md` workflow is not complete. An explicitly requested teammate run can receive a bounded, untrusted public repository summary and selected manifests, but agents do not receive source files as task inputs or edit repositories. The verification workspace accepts caller-supplied files, and the internal Docker sandbox runner is not connected to a deployable sandbox service. Private repository reads are also not implemented. Therefore Solvyn cannot yet reliably inspect relevant source files, implement a requested change in an isolated worktree, run its checks, present an evidence-backed diff, and create a pull request end to end.
 
-Other significant gaps include PostgreSQL row-level security, durable product execution history for every tool invocation, proactive maintenance that performs checks (current schedules create triage inbox events), and comprehensive independent verification. These require separate product workstreams and migrations; this shipment-hardening branch does not claim to close them.
+Other significant gaps include PostgreSQL row-level security, durable product execution history for every tool invocation, proactive maintenance that performs checks (current schedules create triage inbox events), and comprehensive independent verification. These require separate product workstreams and migrations; the current repository-context slice does not claim to close them.
 
 ## Release decision
 

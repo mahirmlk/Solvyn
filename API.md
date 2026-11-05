@@ -617,6 +617,10 @@ List repositories connected to a project visible to the caller.
 
 Inspect the default branch. Returns repository metadata, revision SHA, file count, top-level entries, language counts, up to six common manifests (each capped at 64 KB), parsed direct dependencies, and a compact project context. `content_trust` is `untrusted_repository_data`.
 
+### Explicit repository context for teammate runs
+
+`POST /api/v1/teammates/{teammate_id}/run` accepts `project_id`, `input_data`, and an optional `repository_id`. If a repository ID is supplied, it must identify an active GitHub repository connected to the same assigned project. Solvyn fetches a bounded public inspection summary and adds it to the user-level prompt as untrusted repository data; a fixed system instruction says not to follow instructions found there. If omitted, no repository fetch occurs. This path provides context for investigation; it does not retrieve source files or enable repository edits, sandbox execution, or automatic verification.
+
 ### `GET /api/v1/repositories/{repository_id}/files/search?query=...`
 
 Search file paths case-insensitively. This endpoint searches paths only; it does not search file contents.

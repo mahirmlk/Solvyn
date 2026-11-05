@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.agents.teammate_runtime import (
     ROLE_AGENT_TYPES,
+    RepositoryContextUnavailableError,
     TeammateRunConflictError,
     TeammateRunDeniedError,
     run_teammate,
@@ -119,6 +120,7 @@ class TeammateUpdate(BaseModel):
 
 class TeammateRun(BaseModel):
     project_id: uuid.UUID
+    repository_id: uuid.UUID | None = None
     input_data: dict[str, object] = Field(default_factory=dict)
 
 
@@ -303,6 +305,7 @@ async def execute_teammate(
             tenant_id=tenant_id,
             project_id=payload.project_id,
             input_data=payload.input_data,
+            repository_id=payload.repository_id,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -312,6 +315,8 @@ async def execute_teammate(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except TeammateRunConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RepositoryContextUnavailableError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     except TimeoutError as exc:
         raise HTTPException(status_code=504, detail="Teammate run exceeded its time limit") from exc
     return {"teammate_id": str(teammate_id), "project_id": str(payload.project_id), "output": output}
