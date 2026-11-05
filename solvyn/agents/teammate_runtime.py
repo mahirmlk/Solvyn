@@ -13,12 +13,15 @@ from solvyn.agents.registry import agent_registry
 from solvyn.db.models import (
     Project,
     ProjectKnowledge,
+    Repository,
     TeammateMemory,
     TeammatePermission,
     TeammateProfile,
     TeammateProjectAssignment,
     TeammateStatus,
 )
+from solvyn.repositories.github import GitHubRepositoryError
+from solvyn.repositories.providers import get_repository_provider
 
 ROLE_AGENT_TYPES = {
     "Tech Lead": "system-designer",
@@ -33,6 +36,7 @@ _DEFAULT_MAX_TOKENS = 4_096
 _HARD_MAX_TOKENS = 16_000
 _DEFAULT_MAX_RUN_SECONDS = 300
 _HARD_MAX_RUN_SECONDS = 900
+_MAX_REPOSITORY_CONTEXT_CHARS = 6_000
 
 
 class TeammateRunConflictError(RuntimeError):
@@ -41,6 +45,10 @@ class TeammateRunConflictError(RuntimeError):
 
 class TeammateRunDeniedError(PermissionError):
     """Raised when a teammate or project is outside the caller's run scope."""
+
+
+class RepositoryContextUnavailableError(RuntimeError):
+    """Raised when explicitly requested connected repository context cannot be loaded."""
 
 
 def validate_role_agent_type(role: str, agent_type: str) -> None:
@@ -85,6 +93,38 @@ def build_teammate_system_context(
     return "\n".join(sections)[:_MAX_CONTEXT_CHARS]
 
 
+async def _load_repository_context(repository: Repository) -> str:
+    """Return bounded summaries and manifests for a connected GitHub repository."""
+    try:
+        async with get_repository_provider(repository.provider) as provider:
+            inspection = await provider.inspect(repository.full_name)
+            dependencies = provider.parse_dependencies(inspection.get("manifests", {}))
+            frameworks = provider.detect_frameworks(dependencies)
+    except GitHubRepositoryError as exc:
+        raise RepositoryContextUnavailableError("Connected repository context is temporarily unavailable") from exc
+
+    repository_info = inspection.get("repository", {})
+    manifests = inspection.get("manifests", {})
+    entries = inspection.get("top_level_entries", [])
+    languages = inspection.get("languages", {})
+    lines = [
+        f"Repository: {repository.full_name}",
+        f"Default branch: {repository.default_branch}",
+        f"Description: {str(repository_info.get('description') or '')[:800]}",
+        "Languages: " + ", ".join(str(name) for name in list(languages)[:12]),
+        "Detected frameworks: " + (", ".join(frameworks[:20]) or "none detected"),
+        "Top-level paths: " + ", ".join(str(entry)[:120] for entry in entries[:60]),
+    ]
+    if dependencies:
+        lines.append("Manifest dependencies (untrusted):")
+        for manager, packages in list(dependencies.items())[:10]:
+            lines.append(f"- {manager}: {', '.join(str(package)[:100] for package in packages[:30])}")
+    readme = manifests.get("README.md")
+    if isinstance(readme, str) and readme:
+        lines.extend(["README excerpt (untrusted repository content):", readme[:2_000]])
+    return "\n".join(lines)[:_MAX_REPOSITORY_CONTEXT_CHARS]
+
+
 async def run_teammate(
     db: AsyncSession,
     teammate: TeammateProfile,
@@ -93,6 +133,7 @@ async def run_teammate(
     project_id: uuid.UUID,
     input_data: dict[str, Any],
     session_id: str | None = None,
+    repository_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """Run one registered agent as a persisted teammate on an assigned project."""
     if teammate.tenant_id != tenant_id:
@@ -117,6 +158,22 @@ async def run_teammate(
     project = project_result.scalar_one_or_none()
     if project is None:
         raise TeammateRunDeniedError("Project is not assigned to this teammate")
+
+    repository_context = None
+    if repository_id is not None:
+        repository_result = await db.execute(
+            select(Repository).where(
+                Repository.id == repository_id,
+                Repository.project_id == project_id,
+                Repository.is_active.is_(True),
+            )
+        )
+        repository = repository_result.scalar_one_or_none()
+        if repository is None:
+            raise TeammateRunDeniedError("Repository is not connected to the assigned project")
+        if repository.provider != "github":
+            raise RepositoryContextUnavailableError("Repository context is not supported for this provider")
+        repository_context = await _load_repository_context(repository)
 
     knowledge_result = await db.execute(
         select(ProjectKnowledge)
@@ -155,6 +212,7 @@ async def run_teammate(
     agent._llm_provider = teammate.model_provider
     agent._llm_model = teammate.model_name
     agent._teammate_system_context = context
+    agent._teammate_repository_context = repository_context or ""
     agent._max_tokens_per_run = min(teammate.max_tokens_per_run or _DEFAULT_MAX_TOKENS, _HARD_MAX_TOKENS)
 
     claimed = await db.execute(
