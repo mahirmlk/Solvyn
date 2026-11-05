@@ -189,15 +189,19 @@ async def test_require_role_fails_without_tenant() -> None:
 
 
 @pytest.mark.asyncio
-async def test_shared_secret_auth_does_not_create_tenant_scope() -> None:
-    """The legacy platform key is authenticated without a fabricated tenant."""
+async def test_shared_secret_auth_does_not_create_admin_scope() -> None:
+    """The legacy shared key is authenticated without tenant admin rights."""
+    from fastapi import HTTPException
+
     from solvyn.multi_tenant.auth import RequireRole
 
     tenant_context.clear()
-    tenant_context.authenticate_shared_secret(TenantRole.ADMIN)
+    tenant_context.authenticate_shared_secret(TenantRole.USER)
     assert tenant_context.is_authenticated is True
     assert tenant_context.tenant_id is None
-    await RequireRole(TenantRole.ADMIN)(MagicMock())
+    with pytest.raises(HTTPException) as exc:
+        await RequireRole(TenantRole.ADMIN)(MagicMock())
+    assert exc.value.status_code == 401
     tenant_context.clear()
 
 

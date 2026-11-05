@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from solvyn.db.models import ApiKey, Organization, OrganizationMembership, Tenant, TenantRole
 from solvyn.db.session import async_session_factory
-from solvyn.multi_tenant.middleware import SHARED_SECRET_PRINCIPAL_ID, tenant_context
+from solvyn.multi_tenant.middleware import tenant_context
 from solvyn.multi_tenant.rate_limiter import redis_rate_limiter
 
 logger = logging.getLogger(__name__)
@@ -161,11 +161,6 @@ class RequireRole:
         if not tenant_context.is_authenticated:
             raise HTTPException(status_code=401, detail="Authentication required")
         if tenant_context.tenant_id is None:
-            if (
-                tenant_context.authenticated_tenant_id == SHARED_SECRET_PRINCIPAL_ID
-                and tenant_context.tenant_role in self.allowed_roles
-            ):
-                return
             raise HTTPException(status_code=401, detail="No tenant context")
         if tenant_context.authenticated_tenant_id != tenant_context.tenant_id:
             raise HTTPException(status_code=401, detail="Tenant context does not match the credential")
@@ -260,10 +255,10 @@ async def auth_middleware(request: Request, call_next: Any) -> Any:
             return JSONResponse(status_code=500, content={"error": "Server not configured: API_KEY_SECRET is empty"})
         if not verify_api_key(api_key, settings.api_key_secret):
             return JSONResponse(status_code=401, content={"error": "Invalid X-API-Key"})
-        # Platform-wide key access stays authenticated but has no tenant scope.
-        # This preserves legacy unscoped read behavior without fabricating a
-        # tenant row that tenant-scoped endpoints might accidentally query.
-        tenant_context.authenticate_shared_secret(TenantRole.ADMIN)
+        # Shared-secret compatibility is authenticated but has no tenant
+        # scope or tenant-admin role. Tenant-scoped operator actions require a
+        # tenant-bound API key with an explicit admin role.
+        tenant_context.authenticate_shared_secret(TenantRole.USER)
 
     try:
         response = await call_next(request)
