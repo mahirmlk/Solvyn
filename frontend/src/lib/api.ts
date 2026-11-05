@@ -149,6 +149,24 @@ export interface ProjectInfo {
   created_at: string;
 }
 
+export interface TeammateInfo {
+  id: string;
+  organization_id: string;
+  name: string;
+  role: string;
+  description: string;
+  responsibilities: string;
+  agent_type: string;
+  is_enabled: boolean;
+  status: string;
+  model_provider: string | null;
+  model_name: string | null;
+  max_tokens_per_run: number | null;
+  max_run_seconds: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
 // Admin panel types -----------------------------------------------------
 
 export interface AdminTenant {
@@ -210,6 +228,15 @@ export const api = {
 
   createProject: (input: { organization_id: string; name: string; slug: string; description: string }) =>
     request<ProjectInfo>("/projects", { method: "POST", body: JSON.stringify(input) }),
+
+  listTeammates: (organizationId: string) =>
+    request<{ teammates: TeammateInfo[]; count: number }>(`/organizations/${organizationId}/teammates`),
+
+  createTeammate: (input: { organization_id: string; name: string; role: string; description: string; responsibilities: string; project_ids: string[] }) =>
+    request<TeammateInfo>("/teammates", { method: "POST", body: JSON.stringify(input) }),
+
+  updateTeammate: (teammateId: string, input: { is_enabled: boolean }) =>
+    request<TeammateInfo>(`/teammates/${teammateId}`, { method: "PATCH", body: JSON.stringify(input) }),
 
   listAgents: () => request<{ agents: AgentInfo[] }>("/workflows/agents"),
 
