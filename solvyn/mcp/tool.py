@@ -7,6 +7,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from solvyn.tools.exceptions import ToolExecutionError
+
 
 class MCPToolParameter(BaseModel):
     name: str
@@ -26,7 +28,9 @@ class MCPToolSchema(BaseModel):
     parameters: list[MCPToolParameter] = Field(default_factory=list)
     required_capabilities: list[str] = Field(default_factory=list)
     timeout_seconds: float = 300.0
-    sandboxed: bool = True
+    # Descriptive metadata only. Runtime isolation is provided separately by
+    # solvyn.sandbox; setting this field does not wrap a handler in a sandbox.
+    sandboxed: bool = False
 
     def to_prompt_schema(self) -> str:
         lines = [f"Tool: {self.name}", f"Description: {self.description}"]
@@ -46,7 +50,7 @@ class MCPTool:
     handler: Any = None
     auth_required: bool = False
     auth_provider: str = ""
-    sandboxed: bool = True
+    sandboxed: bool = False
     _call_count: int = field(default=0, init=False)
     _total_latency_ms: float = field(default=0.0, init=False)
     _error_count: int = field(default=0, init=False)
@@ -58,6 +62,12 @@ class MCPTool:
         self._last_called_at = time.monotonic()
 
         validated = self._validate_parameters(parameters)
+
+        if self.schema.sandboxed or self.sandboxed:
+            raise ToolExecutionError(
+                "Sandboxed tool dispatch is unavailable; refusing to execute the handler directly",
+                tool_name=self.schema.name,
+            )
 
         if self.handler is None:
             raise NotImplementedError(f"Tool '{self.schema.name}' has no handler registered")

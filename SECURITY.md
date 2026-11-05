@@ -265,8 +265,8 @@ await db.execute(select(Memory).where(Memory.key == prefixed_key))
 
 1. **System prompts are separate** — system instructions are passed as `system_prompt` (not interleaved with user input), reducing injection surface
 2. **Output validation** — LLM responses are parsed as JSON where expected; parsing failures trigger fallback handling
-3. **No direct execution** — LLM-generated code is stored in artifacts, not auto-executed
-4. **Agent isolation** — agents run in independent execution contexts with tenant scoping
+3. **Execution boundary** — the internal Phase 3 runner executes argv commands only in a restricted, one-shot Docker container. It does not execute generated code on the API host. The runner is not yet exposed to agents or users; execution must be wired through per-project permissions, approvals, and durable audit records before that access is enabled.
+4. **Agent isolation** — tenant scoping protects agent data, but the agent runtime is not yet isolated per execution. The sandbox runner provides a separate container boundary for controlled commands; it does not by itself isolate the reasoning process.
 
 ### Data Leakage Prevention
 
