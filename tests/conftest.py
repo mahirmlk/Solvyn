@@ -49,6 +49,8 @@ def test_settings(monkeypatch) -> Generator[Settings, None, None]:
         mock.rate_limit_per_tenant = 500
         mock.rate_limit_window = 60
         mock.allowed_origins = ["http://localhost:3000"]
+        mock.sandbox_workspace_root = ".solvyn/test-workspaces"
+        mock.sandbox_image = "solvyn-sandbox:local"
         mock.otel_enabled = False
         mock.otlp_endpoint = None
         yield mock
