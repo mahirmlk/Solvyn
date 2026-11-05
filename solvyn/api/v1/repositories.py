@@ -7,6 +7,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.api.v1._rbac import ANY_ROLE, OWNER_ADMIN, require_org_membership, require_tenant
@@ -117,7 +118,21 @@ async def connect_repository(
         url=metadata["url"],
     )
     db.add(repository)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        duplicate = (
+            await db.execute(
+                select(Repository.id).where(
+                    Repository.project_id == project_id,
+                    Repository.full_name == metadata["full_name"],
+                )
+            )
+        ).scalar_one_or_none()
+        if duplicate is not None:
+            raise HTTPException(status_code=409, detail="Repository is already connected to this project") from exc
+        raise HTTPException(status_code=409, detail="Repository connection conflicted; retry the request") from exc
     await db.refresh(repository)
     return _repository_dict(repository)
 

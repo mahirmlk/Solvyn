@@ -113,3 +113,18 @@ async def test_branches_accepts_github_array_response() -> None:
         {"name": "main", "commit_sha": "abc123", "protected": True},
         {"name": "feature", "commit_sha": "def456", "protected": False},
     ]
+
+
+@pytest.mark.asyncio
+async def test_provider_maps_explicit_rate_limit_response() -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, json={"message": "untrusted upstream details"})
+
+    http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    async with GitHubClient(http) as github:
+        with pytest.raises(GitHubRepositoryError) as exc:
+            await github.repository_metadata("octo/example")
+    await http.aclose()
+
+    assert exc.value.status_code == 429
+    assert "untrusted upstream details" not in exc.value.message

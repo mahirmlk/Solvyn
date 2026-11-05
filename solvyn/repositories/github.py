@@ -110,6 +110,8 @@ class GitHubClient(RepositoryProvider):
 
         if response.status_code == 404:
             raise GitHubRepositoryError(404, "Public GitHub repository or resource not found")
+        if response.status_code == 429:
+            raise GitHubRepositoryError(429, "GitHub rate limit reached")
         if response.status_code == 403:
             raise GitHubRepositoryError(429, "GitHub rate limit or access restriction reached")
         if response.status_code >= 500:
