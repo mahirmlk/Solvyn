@@ -30,6 +30,7 @@ from solvyn.db.models import (
     Project,
     Session,
     Task,
+    TaskAcceptanceCriterion,
     TaskDependency,
     TaskHandoff,
     TeammateProfile,
@@ -560,6 +561,7 @@ async def list_workflow_execution_tasks(
     task_ids = [task.id for task in tasks]
     dependencies: list[TaskDependency] = []
     verification_runs: list[VerificationRun] = []
+    acceptance_criteria: list[TaskAcceptanceCriterion] = []
     if task_ids:
         dependencies = list(
             (
@@ -579,6 +581,17 @@ async def list_workflow_execution_tasks(
                     select(VerificationRun)
                     .where(VerificationRun.tenant_id == tenant_id, VerificationRun.task_id.in_(task_ids))
                     .order_by(VerificationRun.started_at, VerificationRun.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        acceptance_criteria = list(
+            (
+                await db.execute(
+                    select(TaskAcceptanceCriterion)
+                    .where(TaskAcceptanceCriterion.tenant_id == tenant_id, TaskAcceptanceCriterion.task_id.in_(task_ids))
+                    .order_by(TaskAcceptanceCriterion.created_at, TaskAcceptanceCriterion.id)
                 )
             )
             .scalars()
@@ -614,6 +627,9 @@ async def list_workflow_execution_tasks(
     verification_by_task: dict[uuid.UUID, list[VerificationRun]] = {}
     for run in verification_runs:
         verification_by_task.setdefault(run.task_id, []).append(run)
+    criteria_by_task: dict[uuid.UUID, list[TaskAcceptanceCriterion]] = {}
+    for criterion in acceptance_criteria:
+        criteria_by_task.setdefault(criterion.task_id, []).append(criterion)
 
     return {
         "execution_id": str(execution_id),
@@ -633,6 +649,7 @@ async def list_workflow_execution_tasks(
                 "scheduled_at": task.scheduled_at.isoformat() if task.scheduled_at else None,
                 "started_at": task.started_at.isoformat() if task.started_at else None,
                 "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+                "acceptance_criteria_defined": task.acceptance_criteria_defined,
                 "verification_runs": [
                     {
                         "id": str(run.id),
@@ -646,6 +663,19 @@ async def list_workflow_execution_tasks(
                         "completed_at": run.completed_at.isoformat() if run.completed_at else None,
                     }
                     for run in verification_by_task.get(task.id, [])
+                ],
+                "acceptance_criteria": [
+                    {
+                        "id": str(criterion.id),
+                        "text": criterion.text,
+                        "status": criterion.status,
+                        "reviewer_user_id": str(criterion.reviewer_user_id) if criterion.reviewer_user_id else None,
+                        "reviewer_organization_id": str(criterion.reviewer_organization_id) if criterion.reviewer_organization_id else None,
+                        "decision_note": criterion.decision_note,
+                        "created_at": criterion.created_at.isoformat() if criterion.created_at else None,
+                        "decided_at": criterion.decided_at.isoformat() if criterion.decided_at else None,
+                    }
+                    for criterion in criteria_by_task.get(task.id, [])
                 ],
             }
             for task in tasks

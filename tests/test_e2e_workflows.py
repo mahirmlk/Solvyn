@@ -269,6 +269,79 @@ async def test_task_verification_is_sandboxed_and_durable(
 
 
 @pytest.mark.asyncio
+async def test_acceptance_criteria_require_an_owner_admin_decision(client: AsyncClient) -> None:
+    from sqlalchemy import select
+
+    from solvyn.db.models import Organization, OrganizationMembership, Tenant, User
+    from solvyn.db.session import async_session_factory
+
+    workflow = await client.post("/api/v1/workflows/feature/run", json={"requirement": "Track task acceptance criteria"})
+    assert workflow.status_code == 200
+    execution_id = workflow.json()["execution_id"]
+    task_history = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
+    task_id = task_history.json()["tasks"][0]["task_id"]
+
+    criteria = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria",
+        json={"criteria": ["The task output includes the requested API contract", "Failure cases are covered"]},
+    )
+    assert criteria.status_code == 201
+    assert [criterion["status"] for criterion in criteria.json()["acceptance_criteria"]] == ["pending", "pending"]
+
+    unsigned_decision = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria/{criteria.json()['acceptance_criteria'][0]['id']}/decision",
+        json={"decision": "accepted", "note": "Reviewed"},
+    )
+    assert unsigned_decision.status_code == 401
+
+    user_id = uuid.uuid4()
+    organization_id = uuid.uuid4()
+    async with async_session_factory() as db:
+        tenant = (await db.execute(select(Tenant).where(Tenant.slug == "test-tenant"))).scalar_one()
+        organization = Organization(
+            id=organization_id,
+            name="Acceptance Review",
+            slug=f"acceptance-review-{uuid.uuid4().hex[:10]}",
+            tenant_id=tenant.id,
+        )
+        db.add_all(
+            [
+                organization,
+                User(id=user_id, email=f"acceptance-{uuid.uuid4().hex[:12]}@example.com", password_hash="test-hash"),
+            ]
+        )
+        await db.flush()
+        db.add(OrganizationMembership(user_id=user_id, organization_id=organization.id, role="owner"))
+        await db.commit()
+
+    from solvyn.identity.security import create_access_token
+
+    client.headers["Authorization"] = f"Bearer {create_access_token(subject=str(user_id))}"
+    client.headers["X-Tenant-Slug"] = "test-tenant"
+    criterion_id = criteria.json()["acceptance_criteria"][0]["id"]
+    decision = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria/{criterion_id}/decision",
+        json={"decision": "accepted", "note": "Reviewed against the task output"},
+    )
+    assert decision.status_code == 200
+    assert decision.json()["status"] == "accepted"
+    assert decision.json()["reviewer_user_id"] == str(user_id)
+    assert decision.json()["reviewer_organization_id"] == str(organization_id)
+    assert decision.json()["decided_at"] is not None
+
+    repeated_decision = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria/{criterion_id}/decision",
+        json={"decision": "rejected"},
+    )
+    assert repeated_decision.status_code == 409
+
+    updated_history = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
+    task = next(item for item in updated_history.json()["tasks"] if item["task_id"] == task_id)
+    assert task["acceptance_criteria"][0]["status"] == "accepted"
+    assert task["acceptance_criteria"][0]["reviewer_organization_id"] == str(organization_id)
+
+
+@pytest.mark.asyncio
 async def test_feature_workflow_runs_to_completion(client: AsyncClient) -> None:
     """POST /workflows/feature/run completes synchronously with all 9 nodes."""
     response = await client.post(
