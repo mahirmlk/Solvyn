@@ -107,7 +107,14 @@ async def connect_repository(
             name="Public GitHub API",
         )
         db.add(integration)
-        await db.flush()
+        try:
+            await db.flush()
+        except IntegrityError as exc:
+            await db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="Repository connection conflicted; retry the request",
+            ) from exc
 
     repository = Repository(
         project_id=project_id,
