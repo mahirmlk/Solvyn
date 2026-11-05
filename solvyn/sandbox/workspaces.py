@@ -99,9 +99,23 @@ class WorkspaceManager:
             raise WorkspaceError("File exceeds the read limit")
         return target.read_bytes()
 
-    def list_files(self, workspace: ManagedWorkspace, *, limit: int = 1000) -> list[str]:
+    def list_files(
+        self,
+        workspace: ManagedWorkspace,
+        *,
+        limit: int = 1000,
+        exclude_git: bool = False,
+    ) -> list[str]:
         self._check_tree(workspace)
-        files = sorted(path.relative_to(workspace.path).as_posix() for path in workspace.path.rglob("*") if path.is_file())
+        files = []
+        for path in workspace.path.rglob("*"):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(workspace.path)
+            if exclude_git and any(part.casefold() == ".git" for part in relative.parts):
+                continue
+            files.append(relative.as_posix())
+        files.sort()
         return files[:limit]
 
     def delete(self, workspace_id: uuid.UUID) -> None:

@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from pathlib import Path
 from typing import Any
 
-from sqlalchemy import case, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.agents.registry import agent_registry
+from solvyn.agents.workspace_tools import TeammateWorkspaceToolRuntime
+from solvyn.config import settings
 from solvyn.db.models import (
     Project,
     ProjectKnowledge,
     Repository,
+    TaskHandoff,
+    TaskWorkspace,
     TeammateMemory,
     TeammatePermission,
     TeammateProfile,
@@ -22,6 +27,7 @@ from solvyn.db.models import (
 )
 from solvyn.repositories.github import GitHubRepositoryError
 from solvyn.repositories.providers import get_repository_provider
+from solvyn.sandbox.workspaces import WorkspaceManager
 
 ROLE_AGENT_TYPES = {
     "Tech Lead": "system-designer",
@@ -90,7 +96,8 @@ def build_teammate_system_context(
         sections.append("Persistent teammate memory for this project:")
         sections.extend(f"- {row.key}: {row.value[:2_000]}" for row in memory)
     sections.append(
-        "Granted tool permissions (informational; tools remain unavailable unless the runtime enforces them): "
+        "Granted teammate permissions (the task workspace tool runtime enforces READ_ONLY and MODIFY_FILES; "
+        "other permission types do not expose tools in this runtime): "
         + (", ".join(sorted(permissions)) if permissions else "none")
     )
     return "\n".join(sections)[:_MAX_CONTEXT_CHARS]
@@ -153,6 +160,8 @@ async def run_teammate(
     session_id: str | None = None,
     repository_id: uuid.UUID | None = None,
     repository_paths: list[str] | None = None,
+    task_id: uuid.UUID | None = None,
+    handoff_lease_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """Run one registered agent as a persisted teammate on an assigned project."""
     if teammate.tenant_id != tenant_id:
@@ -210,6 +219,43 @@ async def run_teammate(
         )
     )
     permissions = [row.permission for row in permission_result.scalars().all()]
+
+    if task_id is not None and handoff_lease_id is not None:
+        handoff_result = await db.execute(
+            select(TaskHandoff.id).where(
+                TaskHandoff.tenant_id == tenant_id,
+                TaskHandoff.child_task_id == task_id,
+                TaskHandoff.teammate_id == teammate.id,
+                TaskHandoff.project_id == project_id,
+                TaskHandoff.status == "running",
+                TaskHandoff.lease_owner == handoff_lease_id,
+                TaskHandoff.lease_expires_at > func.now(),
+            )
+        )
+        handoff_id = handoff_result.scalar_one_or_none()
+        workspace_result = await db.execute(
+            select(TaskWorkspace).where(
+                TaskWorkspace.tenant_id == tenant_id,
+                TaskWorkspace.task_id == task_id,
+            )
+        )
+        workspace_record = workspace_result.scalar_one_or_none()
+        if handoff_id is not None and workspace_record is not None and (
+            "READ_ONLY" in permissions or "MODIFY_FILES" in permissions
+        ):
+            agent_tool_runtime = TeammateWorkspaceToolRuntime(
+                db,
+                WorkspaceManager(Path(settings.sandbox_workspace_root)),
+                tenant_id=tenant_id,
+                task_id=task_id,
+                workspace_id=workspace_record.id,
+                teammate_id=teammate.id,
+                handoff_lease_id=handoff_lease_id,
+            )
+        else:
+            agent_tool_runtime = None
+    else:
+        agent_tool_runtime = None
     memory_result = await db.execute(
         select(TeammateMemory)
         .where(
@@ -234,6 +280,7 @@ async def run_teammate(
     agent._llm_model = teammate.model_name
     agent._teammate_system_context = context
     agent._teammate_repository_context = repository_context or ""
+    agent._teammate_tool_runtime = agent_tool_runtime
     agent._max_tokens_per_run = min(teammate.max_tokens_per_run or _DEFAULT_MAX_TOKENS, _HARD_MAX_TOKENS)
 
     claimed = await db.execute(
