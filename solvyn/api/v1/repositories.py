@@ -129,7 +129,7 @@ async def connect_repository(
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()
-        duplicate = (
+        duplicate_id = (
             await db.execute(
                 select(Repository.id).where(
                     Repository.project_id == project_id,
@@ -137,7 +137,7 @@ async def connect_repository(
                 )
             )
         ).scalar_one_or_none()
-        if duplicate is not None:
+        if duplicate_id is not None:
             raise HTTPException(status_code=409, detail="Repository is already connected to this project") from exc
         raise HTTPException(status_code=409, detail="Repository connection conflicted; retry the request") from exc
     await db.refresh(repository)

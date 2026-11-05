@@ -95,7 +95,7 @@ async def test_inspection_rejects_truncated_repository_trees() -> None:
 async def test_branches_accepts_github_array_response() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/repos/octo/example/branches"
-        assert request.url.params == {"per_page": "100", "page": "1"}
+        assert dict(request.url.params) == {"per_page": "100", "page": "1"}
         return httpx.Response(
             200,
             json=[
