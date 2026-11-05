@@ -662,11 +662,11 @@ GitHub 404 responses map to not found, rate limits to 429, and provider/network 
 
 ### `POST /api/v1/webhooks/github`
 
-Configure `GITHUB_WEBHOOK_SECRET` and subscribe GitHub to `workflow_run`. Solvyn verifies `X-Hub-Signature-256`, requires a UUID delivery ID, caps payloads at 256 KB, and records only completed failed workflow runs for repositories linked to active projects. Duplicate delivery UUIDs and repeated workflow run attempts are deduplicated. Verified events appear in the organization's proactive-event inbox; this initial trigger queues human triage and does not start an agent workflow automatically.
+Configure `GITHUB_WEBHOOK_SECRET` and subscribe GitHub to `workflow_run`, `dependabot_alert`, `code_scanning_alert`, and `secret_scanning_alert`. Solvyn verifies `X-Hub-Signature-256`, requires a UUID delivery ID, caps payloads at 256 KB, and records failed workflow runs and open security alert activity for repositories linked to active projects. Duplicate delivery UUIDs and repeated source events are deduplicated. Stored event metadata is bounded; raw webhook payloads and secret values are not stored. Verified events appear in the organization's proactive-event inbox; triggers queue human triage and do not start an agent workflow automatically.
 
 ### `GET /api/v1/organizations/{organization_id}/proactive-events?limit=50`
 
-List verified CI failure events for organization members. Event details are untrusted GitHub data.
+List verified CI failure and security alert events for organization members. Each item includes generic `summary` and `severity` fields while retaining `workflow_name` and `conclusion` for compatibility. Event details are untrusted GitHub data.
 
 ### `POST /api/v1/organizations/{organization_id}/proactive-events/{event_id}/acknowledge`
 
