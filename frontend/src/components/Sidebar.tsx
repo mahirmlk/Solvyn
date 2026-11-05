@@ -1,10 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
+import { api, CurrentUser } from "@/lib/api";
 
 const NAV_ITEMS = [
-  { label: "Command", href: "/" },
+  { label: "Overview", href: "/" },
+  { label: "Projects", href: "/projects" },
   { label: "Workflows", href: "/workflows" },
   { label: "Sessions", href: "/sessions" },
   { label: "Analytics", href: "/analytics" },
@@ -13,6 +16,19 @@ const NAV_ITEMS = [
 
 export function Sidebar() {
   const pathname = usePathname();
+  const router = useRouter();
+  const [user, setUser] = useState<CurrentUser | null>(null);
+  const [identityLoaded, setIdentityLoaded] = useState(false);
+
+  useEffect(() => {
+    api.me().then(setUser).catch(() => setUser(null)).finally(() => setIdentityLoaded(true));
+  }, [pathname]);
+
+  async function signOut() {
+    await api.logout().catch(() => undefined);
+    setUser(null);
+    router.push("/login");
+  }
 
   return (
     <header className="topbar">
@@ -23,7 +39,7 @@ export function Sidebar() {
 
       <nav className="nav-links" aria-label="Primary navigation">
         {NAV_ITEMS.map((item) => {
-          const active = pathname === item.href;
+          const active = pathname === item.href || (item.href !== "/" && pathname.startsWith(`${item.href}/`));
           return (
             <Link
               key={item.href}
@@ -43,7 +59,16 @@ export function Sidebar() {
           Live
         </span>
         <span className="topbar-divider" />
-        <span className="profile-label">Operator</span>
+        {user ? (
+          <>
+            <span className="profile-label">{user.display_name || user.email}</span>
+            <button className="nav-link" onClick={signOut} type="button">Sign out</button>
+          </>
+        ) : identityLoaded ? (
+          <Link className="nav-link" href="/login">Sign in</Link>
+        ) : (
+          <span className="profile-label">Loading identity</span>
+        )}
       </div>
     </header>
   );
