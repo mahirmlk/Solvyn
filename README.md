@@ -390,6 +390,7 @@ Base URL: `http://localhost:8000/api/v1`
 | `GET` | `/workflows/` | Required | List available workflow templates |
 | `GET` | `/workflows/{name}` | Required | Get workflow detail with steps |
 | `POST` | `/workflows/{name}/run` | Required | Execute a workflow pipeline |
+| `POST` | `/workflows/{name}/schedule` | Required | Persist a workflow for execution at a future ISO-8601 timestamp |
 | `GET` | `/workflows/executions/{execution_id}` | Required | Read a tenant-scoped durable execution snapshot |
 | `GET` | `/workflows/executions/{execution_id}/tasks` | Required | Inspect durable workflow tasks, attempts, and dependency edges |
 | `POST` | `/workflows/executions/{execution_id}/tasks/{task_id}/handoffs` | Required | Delegate a task to a teammate assigned to a project |
@@ -399,7 +400,7 @@ Base URL: `http://localhost:8000/api/v1`
 | `POST` | `/workflows/generate-tasks` | Required | Generate tasks from a specification |
 | `GET` | `/workflows/agents` | Required | List all registered agents |
 
-Workflow snapshots are saved as nodes start and finish. Workers renew a 60-second lease while executing; a resume request is rejected while that lease is active and can reclaim an expired or failed run. Completed nodes are retained, while unfinished nodes run again at least once, so an external side effect may repeat if a worker stopped after performing it but before saving its result. Cancellation is tenant-scoped: active workers stop after observing the cancellation request, while abandoned or failed runs are cancelled immediately.
+Workflow snapshots are saved as nodes start and finish. Scheduled executions and their inputs are stored in PostgreSQL, and the API worker polls due schedules every five seconds; a schedule remains pending through API restarts and can be cancelled before it starts. Workers renew a 60-second lease while executing; a resume request is rejected while that lease is active and can reclaim an expired or failed run. Completed nodes are retained, while unfinished nodes run again at least once, so an external side effect may repeat if a worker stopped after performing it but before saving its result. Cancellation is tenant-scoped: active workers stop after observing the cancellation request, while scheduled, abandoned, or failed runs are cancelled immediately.
 
 Each workflow node also has a durable task record. The task endpoint exposes its assigned agent, dependency task IDs, execution status, attempt count, timestamps, inputs, outputs, and errors. Recovery attempts are currently uncapped; `max_attempts` is null until a retry budget is configured.
 

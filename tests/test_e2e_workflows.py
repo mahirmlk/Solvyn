@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -160,6 +161,42 @@ async def test_health_endpoints_share_no_auth_requirement(unauthed_client: Async
 
 
 # ─── Full feature workflow ──────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_scheduled_workflow_is_durable_and_cancellable(client: AsyncClient) -> None:
+    scheduled_at = datetime.now(UTC) + timedelta(minutes=2)
+    response = await client.post(
+        "/api/v1/workflows/feature/schedule",
+        json={"scheduled_at": scheduled_at.isoformat(), "inputs": {"requirement": "Build a scheduled feature"}},
+    )
+    assert response.status_code == 200
+    scheduled = response.json()
+    assert scheduled["status"] == "scheduled"
+
+    snapshot = await client.get(f"/api/v1/workflows/executions/{scheduled['execution_id']}")
+    assert snapshot.status_code == 200
+    assert snapshot.json()["status"] == "scheduled"
+    assert snapshot.json()["snapshot"]["template"] == "feature"
+
+    cancelled = await client.post(f"/api/v1/workflows/executions/{scheduled['execution_id']}/cancel")
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_schedule_rejects_a_naive_or_past_timestamp(client: AsyncClient) -> None:
+    naive = await client.post(
+        "/api/v1/workflows/feature/schedule",
+        json={"scheduled_at": "2030-01-01T00:00:00", "inputs": {}},
+    )
+    assert naive.status_code == 400
+
+    past = await client.post(
+        "/api/v1/workflows/feature/schedule",
+        json={"scheduled_at": (datetime.now(UTC) - timedelta(minutes=1)).isoformat(), "inputs": {}},
+    )
+    assert past.status_code == 400
 
 
 @pytest.mark.asyncio
