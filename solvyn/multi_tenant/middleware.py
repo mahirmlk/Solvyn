@@ -8,6 +8,8 @@ from sqlalchemy import select
 from solvyn.db.models import Tenant, TenantRole
 from solvyn.db.session import async_session_factory
 
+SHARED_SECRET_PRINCIPAL_ID = uuid.UUID(int=0)
+
 
 class TenantContext:
     def __init__(self) -> None:
@@ -69,6 +71,13 @@ class TenantContext:
 
     def authenticate(self, tenant_id: uuid.UUID, slug: str, role: str, *, user_id: uuid.UUID | None = None) -> None:
         self.set(tenant_id, slug, role, authenticated_tenant_id=tenant_id, user_id=user_id)
+
+    def authenticate_shared_secret(self, role: str) -> None:
+        """Authenticate a platform-wide shared key without inventing a tenant."""
+        self._tenant_id.set(None)
+        self._tenant_slug.set(None)
+        self._tenant_role.set(role)
+        self._authenticated_tenant_id.set(SHARED_SECRET_PRINCIPAL_ID)
 
     def set_authenticated(self, tenant_id: uuid.UUID | None, user_id: uuid.UUID | None = None) -> None:
         if tenant_id is not None:

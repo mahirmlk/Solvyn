@@ -146,7 +146,7 @@ async def test_require_role_passes_for_allowed_role() -> None:
     """Should not raise when tenant has an allowed role."""
     from solvyn.multi_tenant.auth import RequireRole
 
-    tenant_context.set(uuid.uuid4(), "test", TenantRole.ADMIN)
+    tenant_context.authenticate(uuid.uuid4(), "test", TenantRole.ADMIN)
     dep = RequireRole(TenantRole.ADMIN, TenantRole.USER)
 
     mock_request = MagicMock()
@@ -162,7 +162,7 @@ async def test_require_role_fails_for_disallowed_role() -> None:
 
     from solvyn.multi_tenant.auth import RequireRole
 
-    tenant_context.set(uuid.uuid4(), "test", TenantRole.VIEWER)
+    tenant_context.authenticate(uuid.uuid4(), "test", TenantRole.VIEWER)
     dep = RequireRole(TenantRole.ADMIN)
 
     mock_request = MagicMock()
@@ -186,6 +186,19 @@ async def test_require_role_fails_without_tenant() -> None:
     with pytest.raises(HTTPException) as exc_info:
         await dep(mock_request)
     assert exc_info.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_shared_secret_auth_does_not_create_tenant_scope() -> None:
+    """The legacy platform key is authenticated without a fabricated tenant."""
+    from solvyn.multi_tenant.auth import RequireRole
+
+    tenant_context.clear()
+    tenant_context.authenticate_shared_secret(TenantRole.ADMIN)
+    assert tenant_context.is_authenticated is True
+    assert tenant_context.tenant_id is None
+    await RequireRole(TenantRole.ADMIN)(MagicMock())
+    tenant_context.clear()
 
 
 # ---------------------------------------------------------------------------
