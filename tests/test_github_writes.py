@@ -36,6 +36,38 @@ async def test_create_branch_uses_source_sha_and_solvyn_prefix() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_branch_at_commit_uses_exact_pinned_revision() -> None:
+    source_sha = "a" * 40
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path.endswith("/git/refs")
+        assert request.read() == (
+            b'{"ref":"refs/heads/solvyn/task-12","sha":"' + source_sha.encode() + b'"}'
+        )
+        return httpx.Response(201, json={"object": {"sha": source_sha}})
+
+    http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    async with GitHubClient(http, token="secret-token") as github:
+        result = await github.create_branch_at_commit("octo/repo", "solvyn/task-12", source_sha)
+    await http.aclose()
+
+    assert result == {"name": "solvyn/task-12", "sha": source_sha}
+
+
+@pytest.mark.asyncio
+async def test_create_branch_at_commit_rejects_invalid_revision_without_request() -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("Invalid source revision must not make a GitHub request")
+
+    http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    async with GitHubClient(http, token="secret-token") as github:
+        with pytest.raises(GitHubRepositoryError, match="Source commit revision is invalid"):
+            await github.create_branch_at_commit("octo/repo", "solvyn/task-12", "not-a-sha")
+    await http.aclose()
+
+
+@pytest.mark.asyncio
 async def test_commit_files_checks_expected_head_and_updates_ref_without_force() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["authorization"] == "Bearer secret-token"

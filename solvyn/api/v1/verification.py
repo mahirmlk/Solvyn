@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import difflib
+import hashlib
 import json
 import uuid
 from datetime import UTC, datetime
@@ -30,7 +32,12 @@ from solvyn.db.models import (
 )
 from solvyn.db.session import get_session
 from solvyn.multi_tenant.middleware import SHARED_SECRET_PRINCIPAL_ID, tenant_context
-from solvyn.repositories.github import GitHubRepositoryError
+from solvyn.repositories.credentials import (
+    CredentialEncryptionUnavailableError,
+    GitHubCredentialNotFoundError,
+    load_organization_github_token,
+)
+from solvyn.repositories.github import GitHubClient, GitHubRepositoryError
 from solvyn.repositories.providers import get_repository_provider
 from solvyn.sandbox.factory import create_sandbox_runner
 from solvyn.sandbox.remote import RemoteSandboxResult, RemoteSandboxRunner
@@ -43,6 +50,9 @@ _MAX_INITIAL_FILES_BYTES = 16 * 1024 * 1024
 _MAX_REPOSITORY_PATHS = 50
 _MAX_REPOSITORY_FILE_BYTES = 1_000_000
 _MAX_STORED_OUTPUT_CHARS = 256 * 1024
+_MAX_DELIVERY_FILES = 50
+_MAX_DELIVERY_BYTES = 500_000
+_MAX_DELIVERY_DIFF_BYTES = 1_000_000
 VerificationKind = Literal["test", "build", "lint", "typecheck", "security"]
 
 
@@ -64,6 +74,14 @@ class AcceptanceCriteriaCreate(BaseModel):
 class AcceptanceDecision(BaseModel):
     decision: Literal["accepted", "rejected"]
     note: str | None = Field(default=None, max_length=2000)
+
+
+class TaskDeliveryRequest(BaseModel):
+    expected_diff_digest: str = Field(..., min_length=64, max_length=64)
+    branch_name: str = Field(..., min_length=8, max_length=240)
+    commit_message: str = Field(..., min_length=1, max_length=2000)
+    pull_request_title: str = Field(..., min_length=1, max_length=256)
+    pull_request_body: str = Field(default="", max_length=20_000)
 
 
 _DEFAULT_VERIFICATION_COMMANDS: dict[VerificationKind, list[str]] = {
@@ -89,6 +107,188 @@ def _tenant_ref() -> str:
     if tenant_context.authenticated_tenant_id == SHARED_SECRET_PRINCIPAL_ID and tenant_context.user_id is None:
         return settings.default_tenant_id
     raise HTTPException(status_code=403, detail="A tenant membership is required for verification access")
+
+
+async def _task_delivery_context(
+    execution_id: uuid.UUID,
+    task_id: uuid.UUID,
+    db: AsyncSession,
+) -> tuple[Task, TaskWorkspace, Repository, Any, list[str], Any, Any, str]:
+    task = await _owned_task(execution_id, task_id, db)
+    workspace_record = (
+        await db.execute(
+            select(TaskWorkspace).where(
+                TaskWorkspace.tenant_id == task.tenant_id,
+                TaskWorkspace.task_id == task.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if workspace_record is None or workspace_record.repository_id is None or not workspace_record.source_commit_sha:
+        raise HTTPException(status_code=409, detail="GitHub delivery requires a repository-backed task workspace")
+    handoff = (
+        await db.execute(
+            select(TaskHandoff).where(
+                TaskHandoff.tenant_id == task.tenant_id,
+                TaskHandoff.child_task_id == task.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if handoff is None or handoff.status not in {"pending", "running", "failed", "completed"}:
+        raise HTTPException(status_code=403, detail="Task has no approved project handoff for GitHub delivery")
+
+    try:
+        repository, project = await _load_authorized_repository(
+            workspace_record.repository_id, db, roles=OWNER_ADMIN
+        )
+        if project.id != handoff.project_id:
+            raise HTTPException(status_code=403, detail="Task repository is outside its assigned project")
+        token = await load_organization_github_token(db, project.organization_id)
+    except GitHubCredentialNotFoundError as exc:
+        raise HTTPException(status_code=409, detail="Connect a GitHub organization token before delivery") from exc
+    except CredentialEncryptionUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="GitHub credential cannot be decrypted with current configuration",
+        ) from exc
+
+    try:
+        source_paths = json.loads(workspace_record.source_paths or "[]")
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=409, detail="Task workspace source provenance is invalid") from exc
+    if (
+        not isinstance(source_paths, list)
+        or not source_paths
+        or any(not isinstance(path, str) for path in source_paths)
+    ):
+        raise HTTPException(status_code=409, detail="Task workspace has no valid selected source paths")
+    normalized_paths: list[str] = []
+    for path in source_paths:
+        try:
+            normalized = safe_relative_path(path).as_posix()
+        except WorkspaceError as exc:
+            raise HTTPException(status_code=409, detail="Task workspace source provenance is invalid") from exc
+        if normalized != path or any(part.casefold() == ".git" for part in normalized.split("/")):
+            raise HTTPException(status_code=409, detail="Task workspace source provenance is invalid")
+        normalized_paths.append(normalized)
+    if len({path.casefold() for path in normalized_paths}) != len(normalized_paths):
+        raise HTTPException(status_code=409, detail="Task workspace source paths are not unique")
+
+    manager = _workspace_manager()
+    try:
+        workspace = manager.get(workspace_record.id)
+    except WorkspaceError as exc:
+        raise HTTPException(status_code=404, detail="Managed task workspace is unavailable") from exc
+    return task, workspace_record, repository, project, normalized_paths, manager, workspace, token
+
+
+async def _build_delivery_preview(
+    repository: Repository,
+    workspace_record: TaskWorkspace,
+    source_paths: list[str],
+    manager: WorkspaceManager,
+    workspace: Any,
+    github: GitHubClient,
+) -> dict[str, Any]:
+    try:
+        metadata = await github.repository_metadata(repository.full_name)
+        base_branch = metadata.get("default_branch")
+        if not isinstance(base_branch, str) or not base_branch:
+            raise HTTPException(status_code=502, detail="GitHub returned an invalid pull request base branch")
+    except GitHubRepositoryError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    current_paths = manager.list_files(workspace, limit=1001, exclude_git=True)
+    if len(current_paths) > 1000:
+        raise HTTPException(status_code=413, detail="Delivery preview is limited to workspaces with at most 1,000 files")
+    for path in current_paths:
+        try:
+            normalized = safe_relative_path(path).as_posix()
+        except WorkspaceError as exc:
+            raise HTTPException(status_code=409, detail="Workspace contains an invalid delivery path") from exc
+        if normalized != path or any(part.casefold() == ".git" for part in normalized.split("/")):
+            raise HTTPException(status_code=409, detail="Workspace contains an invalid delivery path")
+
+    missing_source_paths = sorted(set(source_paths) - set(current_paths))
+    try:
+        _, source_tree = await github.repository_tree(repository.full_name, workspace_record.source_commit_sha)
+    except GitHubRepositoryError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    source_tree_entries = {
+        entry.get("path"): entry for entry in source_tree if entry.get("type") == "blob"
+    }
+    source_tree_paths = set(source_tree_entries)
+    source_tree_paths_casefold = {path.casefold() for path in source_tree_paths if isinstance(path, str)}
+
+    files: list[dict[str, str]] = []
+    diffs: list[dict[str, str]] = []
+    total_content_bytes = 0
+    total_diff_bytes = 0
+    for path in current_paths:
+        try:
+            content = manager.read_file(workspace, path, max_bytes=1_000_000).decode("utf-8")
+        except (WorkspaceError, UnicodeDecodeError) as exc:
+            raise HTTPException(status_code=422, detail=f"Delivery supports UTF-8 text files up to 1 MB: {path}") from exc
+        if path in source_paths:
+            baseline = await github.text_file(
+                repository.full_name,
+                path,
+                workspace_record.source_commit_sha,
+                max_bytes=1_000_000,
+            )
+            if baseline is None:
+                raise HTTPException(status_code=409, detail=f"Source file is no longer readable as text: {path}")
+        else:
+            if path.casefold() in source_tree_paths_casefold:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Workspace added an unselected path that already exists at the source revision: {path}",
+                )
+            baseline = ""
+        if content == baseline:
+            continue
+        if path in source_paths and source_tree_entries.get(path, {}).get("mode") == "100755":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Delivery cannot preserve the executable mode of a changed source file: {path}",
+            )
+        file_bytes = len(content.encode("utf-8"))
+        total_content_bytes += file_bytes
+        if len(files) >= _MAX_DELIVERY_FILES or total_content_bytes > _MAX_DELIVERY_BYTES:
+            raise HTTPException(status_code=413, detail="Delivery exceeds the 50-file or 500 KB limit")
+        files.append({"path": path, "content": content})
+        diff = "".join(
+            difflib.unified_diff(
+                baseline.splitlines(keepends=True),
+                content.splitlines(keepends=True),
+                fromfile=f"a/{path}" if baseline else "/dev/null",
+                tofile=f"b/{path}",
+            )
+        )
+        total_diff_bytes += len(diff.encode("utf-8"))
+        if total_diff_bytes > _MAX_DELIVERY_DIFF_BYTES:
+            raise HTTPException(status_code=413, detail="Rendered delivery diff exceeds the 1 MB limit")
+        diffs.append({"path": path, "diff": diff})
+
+    digest_payload = {
+        "source_commit_sha": workspace_record.source_commit_sha,
+        "base_branch": base_branch,
+        "files": files,
+        "unsupported_missing_source_paths": missing_source_paths,
+    }
+    try:
+        canonical = json.dumps(digest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    except UnicodeEncodeError as exc:
+        raise HTTPException(status_code=422, detail="Delivery files must contain valid UTF-8 text") from exc
+    return {
+        "repository_id": str(repository.id),
+        "source_commit_sha": workspace_record.source_commit_sha,
+        "base_branch": base_branch,
+        "files": files,
+        "diffs": diffs,
+        "unsupported_missing_source_paths": missing_source_paths,
+        "diff_digest": digest,
+        "can_deliver": bool(files) and not missing_source_paths,
+    }
 
 
 async def _owned_task(
@@ -603,3 +803,110 @@ async def decide_task_acceptance_criterion(
         )
     ).scalar_one()
     return _criterion_dict(record)
+
+
+@router.get("/delivery-preview", summary="Preview bounded task workspace changes for GitHub")
+async def preview_task_delivery(
+    execution_id: uuid.UUID,
+    task_id: uuid.UUID,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    (
+        _task,
+        workspace_record,
+        repository,
+        _project,
+        source_paths,
+        manager,
+        workspace,
+        token,
+    ) = await _task_delivery_context(execution_id, task_id, db)
+    try:
+        async with GitHubClient(token=token) as github:
+            return await _build_delivery_preview(
+                repository, workspace_record, source_paths, manager, workspace, github
+            )
+    except GitHubRepositoryError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+
+@router.post("/deliver", status_code=201, summary="Create a draft PR from the approved workspace diff")
+async def deliver_task_workspace(
+    execution_id: uuid.UUID,
+    task_id: uuid.UUID,
+    payload: TaskDeliveryRequest,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    if not payload.commit_message.strip() or not payload.pull_request_title.strip():
+        raise HTTPException(status_code=422, detail="Commit message and pull request title must not be blank")
+    (
+        _task,
+        workspace_record,
+        repository,
+        _project,
+        source_paths,
+        manager,
+        workspace,
+        token,
+    ) = await _task_delivery_context(execution_id, task_id, db)
+    branch_created: dict[str, str] | None = None
+    commit_created: dict[str, str] | None = None
+    try:
+        async with GitHubClient(token=token) as github:
+            preview = await _build_delivery_preview(
+                repository, workspace_record, source_paths, manager, workspace, github
+            )
+            if preview["diff_digest"] != payload.expected_diff_digest:
+                raise HTTPException(status_code=409, detail="Task workspace changed after the delivery preview")
+            if not preview["can_deliver"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Delivery requires at least one change and all selected source files; deletions are unsupported",
+                )
+            try:
+                branch_created = await github.create_branch_at_commit(
+                    repository.full_name,
+                    payload.branch_name,
+                    workspace_record.source_commit_sha,
+                )
+                commit_created = await github.commit_files(
+                    repository.full_name,
+                    branch_created["name"],
+                    expected_head_sha=branch_created["sha"],
+                    message=payload.commit_message,
+                    files=preview["files"],
+                )
+                pull_request = await github.create_pull_request(
+                    repository.full_name,
+                    title=payload.pull_request_title,
+                    body=payload.pull_request_body,
+                    head=branch_created["name"],
+                    base=preview["base_branch"],
+                )
+            except GitHubRepositoryError as exc:
+                if branch_created is None:
+                    raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+                raise HTTPException(
+                    status_code=exc.status_code,
+                    detail={
+                        "message": exc.message,
+                        "branch": branch_created["name"],
+                        "branch_sha": branch_created["sha"],
+                        "commit_sha": commit_created["sha"] if commit_created else None,
+                        "pull_request_created": "unknown" if commit_created else False,
+                        "recovery": (
+                            "Check GitHub for an open pull request from this branch before retrying."
+                            if commit_created
+                            else None
+                        ),
+                    },
+                ) from exc
+    except GitHubRepositoryError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    return {
+        "branch": branch_created["name"],
+        "commit_sha": commit_created["sha"],
+        "pull_request": pull_request,
+        "merged": False,
+        "approved_diff_digest": preview["diff_digest"],
+    }
