@@ -167,6 +167,7 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
             conclusion=failure["conclusion"],
             branch=failure["branch"],
             details_url=failure["details_url"],
+            status="pending",
         )
         db.add(event)
         events.append(event)
@@ -206,6 +207,7 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
                     conclusion=failure["conclusion"],
                     branch=failure["branch"],
                     details_url=failure["details_url"],
+                    status="pending",
                 )
                 db.add(event)
                 events.append(event)
