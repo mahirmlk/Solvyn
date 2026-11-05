@@ -391,11 +391,14 @@ Base URL: `http://localhost:8000/api/v1`
 | `GET` | `/workflows/{name}` | Required | Get workflow detail with steps |
 | `POST` | `/workflows/{name}/run` | Required | Execute a workflow pipeline |
 | `GET` | `/workflows/executions/{execution_id}` | Required | Read a tenant-scoped durable execution snapshot |
+| `GET` | `/workflows/executions/{execution_id}/tasks` | Required | Inspect durable workflow tasks, attempts, and dependency edges |
 | `POST` | `/workflows/executions/{execution_id}/resume` | Required | Resume unfinished nodes after a worker lease expires |
 | `POST` | `/workflows/generate-tasks` | Required | Generate tasks from a specification |
 | `GET` | `/workflows/agents` | Required | List all registered agents |
 
 Workflow snapshots are saved as nodes start and finish. Workers renew a 60-second lease while executing; a resume request is rejected while that lease is active and can reclaim an expired or failed run. Completed nodes are retained, while unfinished nodes run again at least once, so an external side effect may repeat if a worker stopped after performing it but before saving its result. Execution snapshots and resume operations are scoped to the authenticated tenant.
+
+Each workflow node also has a durable task record. The task endpoint exposes its assigned agent, dependency task IDs, execution status, attempt count, timestamps, inputs, outputs, and errors. Recovery attempts are currently uncapped; `max_attempts` is null until a retry budget is configured.
 
 ### Observability
 
