@@ -33,7 +33,16 @@ class TaskWorkspaceCreate(BaseModel):
 
 class VerificationRequest(BaseModel):
     kind: VerificationKind
-    command: list[str] = Field(min_length=1, max_length=128)
+    command: list[str] | None = Field(default=None, min_length=1, max_length=128)
+
+
+_DEFAULT_VERIFICATION_COMMANDS: dict[VerificationKind, list[str]] = {
+    "test": ["pytest", "-q"],
+    "build": ["python", "-m", "compileall", "-q", "."],
+    "lint": ["ruff", "check", "."],
+    "typecheck": ["mypy", "."],
+    "security": ["ruff", "check", "--select", "S", "."],
+}
 
 
 def _workspace_manager() -> WorkspaceManager:
@@ -158,9 +167,10 @@ async def run_task_verification(
     ).scalar_one_or_none()
     if workspace_record is None:
         raise HTTPException(status_code=409, detail="Create a task workspace before running verification")
-    if any(not part or "\x00" in part for part in payload.command):
+    command = payload.command or _DEFAULT_VERIFICATION_COMMANDS[payload.kind]
+    if any(not part or "\x00" in part for part in command):
         raise HTTPException(status_code=422, detail="Command arguments must be non-empty strings without NUL bytes")
-    if any(len(part.encode("utf-8")) > 4096 for part in payload.command) or sum(len(part.encode("utf-8")) for part in payload.command) > 16_384:
+    if any(len(part.encode("utf-8")) > 4096 for part in command) or sum(len(part.encode("utf-8")) for part in command) > 16_384:
         raise HTTPException(status_code=422, detail="Command arguments exceed the 16 KiB limit")
 
     try:
@@ -174,7 +184,7 @@ async def run_task_verification(
         execution_id=execution_id,
         workspace_id=workspace_record.id,
         kind=payload.kind,
-        command=json.dumps(payload.command),
+        command=json.dumps(command),
         status="running",
         runner_version="docker-sandbox/1",
     )
@@ -183,7 +193,7 @@ async def run_task_verification(
     try:
         result: SandboxResult = await DockerSandboxRunner(
             _workspace_manager(), image=settings.sandbox_image
-        ).run(workspace, payload.command)
+        ).run(workspace, command)
     except (SandboxRuntimeError, WorkspaceError, ValueError) as exc:
         return await _finish_run(
             db,
