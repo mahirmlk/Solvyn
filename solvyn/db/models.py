@@ -416,6 +416,8 @@ class ApprovalStatus(StrEnum):
     APPROVED = "approved"
     REJECTED = "rejected"
     EXPIRED = "expired"
+    CONSUMED = "consumed"
+    STALE = "stale"
 
 
 class ApprovalKind(StrEnum):
@@ -425,6 +427,7 @@ class ApprovalKind(StrEnum):
     PULL_REQUEST = "pull_request"
     MERGE = "merge"
     DEPLOY = "deploy"
+    VERIFICATION_RUN = "verification_run"
 
 
 class User(Base):
@@ -745,7 +748,10 @@ class Approval(Base):
     """Human checkpoint: plan, command, file change, PR, merge, or deploy."""
 
     __tablename__ = "approvals"
-    __table_args__ = (UniqueConstraint("task_handoff_id", name="uq_approvals_task_handoff"),)
+    __table_args__ = (
+        UniqueConstraint("task_handoff_id", name="uq_approvals_task_handoff"),
+        UniqueConstraint("verification_run_id", name="uq_approvals_verification_run"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True)
@@ -753,6 +759,9 @@ class Approval(Base):
     teammate_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("teammate_profiles.id"), nullable=True)
     task_handoff_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("task_handoffs.id", ondelete="SET NULL"), nullable=True
+    )
+    verification_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("verification_runs.id", ondelete="SET NULL"), nullable=True
     )
     kind: Mapped[str] = mapped_column(String(50), nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False)

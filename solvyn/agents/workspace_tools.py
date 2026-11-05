@@ -9,23 +9,18 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.config import settings
-from solvyn.db.models import Task, TaskHandoff, TaskWorkspace, TeammatePermission, TeammateToolInvocation, VerificationRun
+from solvyn.db.models import Approval, Project, Task, TaskHandoff, TaskWorkspace, TeammatePermission, TeammateProfile, TeammateToolInvocation, VerificationRun
 from solvyn.llm.providers.base import LLMResponse
-from solvyn.sandbox.factory import create_sandbox_runner
-from solvyn.sandbox.remote import RemoteSandboxResult
-from solvyn.sandbox.runtime import SandboxResult
 from solvyn.sandbox.workspaces import ManagedWorkspace, WorkspaceError, WorkspaceManager, safe_relative_path
 
 _MAX_TOOL_CALLS = 12
 _MAX_READ_BYTES = 64 * 1024
 _MAX_WRITE_BYTES = 256 * 1024
 _MAX_LIST_FILES = 200
-_MAX_VERIFICATION_TOOL_OUTPUT = 16 * 1024
-_MAX_STORED_VERIFICATION_OUTPUT = 256 * 1024
 _DEFAULT_VERIFICATION_COMMANDS = {
     "test": ["pytest", "-q"],
     "build": ["python", "-m", "compileall", "-q", "."],
@@ -407,6 +402,16 @@ class TeammateWorkspaceToolRuntime:
         content = text.encode("utf-8")
         if len(content) > _MAX_WRITE_BYTES:
             raise ValueError("file_too_large")
+        active_verification = await self.db.execute(
+            select(VerificationRun.id).where(
+                VerificationRun.tenant_id == self.tenant_id,
+                VerificationRun.task_id == self.task_id,
+                VerificationRun.workspace_id == self.workspace_id,
+                VerificationRun.status.in_(["pending_approval", "approved", "running"]),
+            )
+        )
+        if active_verification.scalar_one_or_none() is not None:
+            raise ToolDeniedError("verification_approval_freezes_workspace")
         self.workspaces.write_file(workspace, normalized, content)
         return {"path": normalized, "bytes_written": len(content)}
 
@@ -418,99 +423,63 @@ class TeammateWorkspaceToolRuntime:
         execution_id = task_result.scalar_one_or_none()
         if execution_id is None:
             raise ToolDeniedError("task_scope_lost")
-
+        handoff_result = await self.db.execute(
+            select(TaskHandoff.project_id).where(
+                TaskHandoff.tenant_id == self.tenant_id,
+                TaskHandoff.child_task_id == self.task_id,
+                TaskHandoff.teammate_id == self.teammate_id,
+            )
+        )
+        project_id = handoff_result.scalar_one_or_none()
+        teammate = await self.db.get(TeammateProfile, self.teammate_id)
+        if project_id is None or teammate is None or teammate.tenant_id != self.tenant_id:
+            raise ToolDeniedError("approval_scope_lost")
+        project = await self.db.get(Project, project_id)
+        if project is None or project.tenant_id != self.tenant_id or project.organization_id != teammate.organization_id:
+            raise ToolDeniedError("approval_scope_lost")
+        run_id = uuid.uuid4()
+        source_digest = self.workspaces.fingerprint(workspace)
         run = VerificationRun(
+            id=run_id,
             tenant_id=self.tenant_id,
             task_id=self.task_id,
             execution_id=execution_id,
             workspace_id=self.workspace_id,
             kind=kind,
             command=json.dumps(command),
-            status="running",
+            status="pending_approval",
             runner_version="sandbox-service/1" if settings.sandbox_runtime_url else "docker-sandbox/1",
-            source_digest=self.workspaces.fingerprint(workspace),
+            source_digest=source_digest,
+        )
+        approval = Approval(
+            organization_id=project.organization_id,
+            project_id=project.id,
+            teammate_id=self.teammate_id,
+            verification_run_id=run_id,
+            kind="verification_run",
+            summary=f"Run {kind} verification for {self.task_id}",
+            payload=json.dumps(
+                {
+                    "execution_id": str(execution_id),
+                    "task_id": str(self.task_id),
+                    "verification_run_id": str(run_id),
+                    "workspace_id": str(self.workspace_id),
+                    "kind": kind,
+                    "command": command,
+                    "source_digest": source_digest,
+                }
+            ),
+            requested_by=teammate.name,
         )
         self.db.add(run)
+        self.db.add(approval)
         await self.db.commit()
-
-        try:
-            result: SandboxResult | RemoteSandboxResult = await create_sandbox_runner(self.workspaces).run(workspace, command)
-        except Exception:
-            updated = await self._complete_verification(
-                run,
-                {
-                    "status": "failed",
-                    "error": "sandbox_execution_failed",
-                    "completed_at": datetime.now(UTC),
-                },
-            )
-            if not updated:
-                return self._terminal_verification_result(run, kind)
-            return {"verification_run_id": str(run.id), "kind": kind, "status": run.status, "error_code": "sandbox_execution_failed"}
-
-        stdout = result.stdout[:_MAX_STORED_VERIFICATION_OUTPUT]
-        stderr = result.stderr[:_MAX_STORED_VERIFICATION_OUTPUT]
-        stdout_limit = _MAX_VERIFICATION_TOOL_OUTPUT // 2
-        output_truncated = (
-            result.output_truncated
-            or len(result.stdout) > _MAX_STORED_VERIFICATION_OUTPUT
-            or len(result.stderr) > _MAX_STORED_VERIFICATION_OUTPUT
-            or len(stdout) > stdout_limit
-            or len(stderr) > stdout_limit
-        )
-        updated = await self._complete_verification(
-            run,
-            {
-                "status": "timed_out" if result.timed_out else ("passed" if result.exit_code == 0 else "failed"),
-                "exit_code": result.exit_code,
-                "timed_out": result.timed_out,
-                "output_truncated": output_truncated,
-                "stdout": stdout,
-                "stderr": stderr,
-                "duration_seconds": result.duration_seconds,
-                "completed_at": datetime.now(UTC),
-            },
-        )
-        if not updated:
-            return self._terminal_verification_result(run, kind)
-
         return {
             "verification_run_id": str(run.id),
+            "approval_id": str(approval.id),
             "kind": kind,
             "status": run.status,
-            "exit_code": run.exit_code,
-            "timed_out": run.timed_out,
-            "output_truncated": run.output_truncated,
-            "stdout": run.stdout[:stdout_limit],
-            "stderr": run.stderr[:stdout_limit],
-        }
-
-    async def _complete_verification(self, run: VerificationRun, values: dict[str, Any]) -> bool:
-        completed = await self.db.execute(
-            update(VerificationRun)
-            .where(
-                VerificationRun.id == run.id,
-                VerificationRun.tenant_id == self.tenant_id,
-                VerificationRun.status == "running",
-            )
-            .values(**values)
-            .returning(VerificationRun.id)
-        )
-        if completed.scalar_one_or_none() is None:
-            await self.db.rollback()
-            await self.db.refresh(run)
-            return False
-        await self.db.commit()
-        await self.db.refresh(run)
-        return True
-
-    @staticmethod
-    def _terminal_verification_result(run: VerificationRun, kind: str) -> dict[str, Any]:
-        return {
-            "verification_run_id": str(run.id),
-            "kind": kind,
-            "status": run.status,
-            "error_code": "verification_run_already_terminal",
+            "message": "Verification requested; an organization owner or admin must approve it before execution.",
         }
 
     async def _finish(

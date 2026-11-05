@@ -5,9 +5,30 @@ import Link from "next/link";
 import { api, ApprovalInfo } from "@/lib/api";
 import styles from "@/components/WorkspacePages.module.css";
 
-type ApprovalStatus = "pending" | "approved" | "rejected";
+type ApprovalStatus = "pending" | "approved" | "rejected" | "consumed" | "stale";
 
-const STATUS_OPTIONS: ApprovalStatus[] = ["pending", "approved", "rejected"];
+type VerificationApprovalDetails = {
+  execution_id: string;
+  task_id: string;
+  verification_run_id: string;
+  workspace_id: string;
+  kind: string;
+  command: string[];
+  source_digest: string;
+};
+
+const STATUS_OPTIONS: ApprovalStatus[] = ["pending", "approved", "rejected", "consumed", "stale"];
+
+function verificationDetails(approval: ApprovalInfo): VerificationApprovalDetails | null {
+  if (approval.kind !== "verification_run" || !approval.payload) return null;
+  try {
+    const value = JSON.parse(approval.payload) as Partial<VerificationApprovalDetails>;
+    if (!value.execution_id || !value.task_id || !value.verification_run_id || !value.workspace_id || !Array.isArray(value.command)) return null;
+    return value as VerificationApprovalDetails;
+  } catch {
+    return null;
+  }
+}
 
 export default function ApprovalsPage() {
   const [status, setStatus] = useState<ApprovalStatus>("pending");
@@ -15,6 +36,8 @@ export default function ApprovalsPage() {
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [busyApprovalId, setBusyApprovalId] = useState<string | null>(null);
+  const [busyRunApprovalId, setBusyRunApprovalId] = useState<string | null>(null);
+  const [executionMessage, setExecutionMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const loadApprovals = useCallback(async () => {
@@ -50,6 +73,22 @@ export default function ApprovalsPage() {
     }
   }
 
+  async function executeVerification(approval: ApprovalInfo) {
+    const details = verificationDetails(approval);
+    if (!details) return;
+    setError(null);
+    setBusyRunApprovalId(approval.id);
+    try {
+      const result = await api.executeTaskVerification(details.execution_id, details.task_id, details.verification_run_id);
+      setExecutionMessage(`Verification finished with status: ${result.status}.`);
+      await loadApprovals();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not run the approved verification.");
+    } finally {
+      setBusyRunApprovalId(null);
+    }
+  }
+
   return (
     <div className="route-page">
       <header className="page-intro">
@@ -71,6 +110,7 @@ export default function ApprovalsPage() {
           {error.includes("401") && <Link className="action-button secondary" href="/login">Sign in</Link>}
         </section>
       )}
+      {executionMessage && <section className={styles.notice} role="status"><p>{executionMessage}</p></section>}
 
       <section className={styles.groups} aria-label={`${status} approvals`}>
         {loading ? (
@@ -79,6 +119,10 @@ export default function ApprovalsPage() {
           <div className="empty-state">No {status} approval requests.</div>
         ) : approvals.map((approval) => (
           <article className={`${styles.approvalCard} pearl-pane`} key={approval.id}>
+            {(() => {
+              const details = verificationDetails(approval);
+              return (
+                <>
             <div className={styles.approvalHead}>
               <div>
                 <span className="eyebrow">{approval.kind.replaceAll("_", " ")}</span>
@@ -93,7 +137,23 @@ export default function ApprovalsPage() {
               {approval.teammate_id && <div><dt>Teammate</dt><dd className="mono">{approval.teammate_id.slice(0, 8)}</dd></div>}
               {approval.task_handoff_id && <div><dt>Task handoff</dt><dd className="mono">{approval.task_handoff_id.slice(0, 8)}</dd></div>}
             </dl>
+            {details && (
+              <section className={styles.decisionNote} aria-label="Approved verification details">
+                <strong>Verification request · {details.kind}</strong>
+                <p>Task <code>{details.task_id}</code> · workspace <code>{details.workspace_id}</code></p>
+                <p>Workspace digest <code>{details.source_digest}</code></p>
+                <p>Exact command <code>{details.command.map((part) => JSON.stringify(part)).join(" ")}</code></p>
+              </section>
+            )}
             {approval.decision_note && <p className={styles.decisionNote}>Decision note: {approval.decision_note}</p>}
+            {details && approval.status === "approved" && (
+              <div className={styles.approvalActions}>
+                <button className="action-button" disabled={busyRunApprovalId === approval.id} onClick={() => void executeVerification(approval)} type="button">
+                  {busyRunApprovalId === approval.id ? "Running approved check…" : "Run approved verification"}
+                </button>
+                <span className="copy-muted">Execution rechecks that the workspace still matches this approved digest.</span>
+              </div>
+            )}
             {approval.status === "pending" && (
               <div className={styles.approvalActions}>
                 <label className="field">
@@ -109,6 +169,9 @@ export default function ApprovalsPage() {
                 </div>
               </div>
             )}
+                </>
+              );
+            })()}
           </article>
         ))}
       </section>
