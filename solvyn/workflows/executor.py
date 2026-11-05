@@ -3,7 +3,7 @@ import json
 import logging
 import uuid
 from collections.abc import Coroutine
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import and_, func, or_, select, update
@@ -11,7 +11,7 @@ from sqlalchemy import and_, func, or_, select, update
 from solvyn.agents.graph import AgentGraph
 from solvyn.agents.schema import ExecutionEdge, ExecutionGraph, ExecutionNode
 from solvyn.db.models import ExecutionGraph as ExecutionGraphModel
-from solvyn.db.models import Session, Tenant
+from solvyn.db.models import Session, Task, TaskDependency, Tenant
 from solvyn.db.session import async_session_factory
 from solvyn.workflows.templates import WORKFLOW_TEMPLATES, WorkflowStep
 
@@ -297,7 +297,73 @@ class WorkflowExecutor:
                 )
                 if updated.scalar_one_or_none() is None:
                     raise RuntimeError("Workflow execution lease was lost; refusing to overwrite its state")
+
+            tasks_by_node: dict[str, Task] = {}
+            for node in graph.nodes:
+                task_result = await db.execute(
+                    select(Task).where(
+                        Task.execution_id == graph_id,
+                        Task.node_id == node.id,
+                        Task.tenant_id == tenant_id,
+                    )
+                )
+                task = task_result.scalar_one_or_none()
+                if task is None:
+                    task = Task(
+                        id=uuid.uuid4(),
+                        tenant_id=tenant_id,
+                        session_id=uuid.UUID(graph.session_id),
+                        execution_id=graph_id,
+                        node_id=node.id,
+                        title=f"{node.agent_type} workflow step",
+                        description=json.dumps(node.input or {}),
+                        assigned_agent=node.agent_type,
+                        status=node.status,
+                        priority=0,
+                        attempt_count=1 if node.status == "running" else 0,
+                        scheduled_at=func.now(),
+                    )
+                else:
+                    if node.status == "running" and task.status != "running":
+                        task.attempt_count += 1
+                    task.description = json.dumps(node.input or {})
+                    task.status = node.status
+                task.result = json.dumps(node.output) if node.output is not None else None
+                task.error = node.error
+                task.started_at = self._parse_timestamp(node.started_at)
+                task.completed_at = self._parse_timestamp(node.completed_at)
+                db.add(task)
+                tasks_by_node[node.id] = task
+
+            await db.flush()
+            for edge in graph.edges:
+                source = tasks_by_node.get(edge.source)
+                target = tasks_by_node.get(edge.target)
+                if source is None or target is None:
+                    continue
+                dependency = (
+                    await db.execute(
+                        select(TaskDependency).where(
+                            TaskDependency.tenant_id == tenant_id,
+                            TaskDependency.task_id == target.id,
+                            TaskDependency.depends_on_task_id == source.id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if dependency is None:
+                    db.add(
+                        TaskDependency(
+                            id=uuid.uuid4(),
+                            tenant_id=tenant_id,
+                            task_id=target.id,
+                            depends_on_task_id=source.id,
+                        )
+                    )
             await db.commit()
+
+    @staticmethod
+    def _parse_timestamp(value: str | None) -> datetime | None:
+        return datetime.fromisoformat(value) if value else None
 
     async def _execute_with_lease(
         self,

@@ -22,7 +22,7 @@ from solvyn.agents.registry import agent_registry
 from solvyn.api_metadata import COMMON_RESPONSES
 from solvyn.config import settings
 from solvyn.db.models import ExecutionGraph as ExecutionGraphModel
-from solvyn.db.models import Session
+from solvyn.db.models import Session, Task, TaskDependency
 from solvyn.db.session import get_session
 from solvyn.workflows.executor import workflow_executor
 from solvyn.workflows.task_generator import TaskGenerator
@@ -250,6 +250,81 @@ async def resume_workflow_execution(execution_id: uuid.UUID) -> dict[str, Any]:
         "nodes": [
             {"id": node.id, "agent_type": node.agent_type, "status": node.status, "error": node.error}
             for node in result.nodes
+        ],
+    }
+
+
+@router.get("/executions/{execution_id}/tasks", summary="List durable tasks for a workflow execution")
+async def list_workflow_execution_tasks(
+    execution_id: uuid.UUID,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    tenant_ref = _workflow_tenant_ref()
+    try:
+        tenant_id = await workflow_executor._resolve_tenant_uuid(tenant_ref)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Workflow tenant is not configured") from exc
+
+    graph = (
+        await db.execute(
+            select(ExecutionGraphModel)
+            .join(Session, Session.id == ExecutionGraphModel.session_id)
+            .where(ExecutionGraphModel.id == execution_id, Session.tenant_id == tenant_id)
+        )
+    ).scalar_one_or_none()
+    if graph is None:
+        raise HTTPException(status_code=404, detail="Workflow execution not found")
+
+    tasks: list[Task] = list(
+        (
+            await db.execute(
+                select(Task)
+                .where(Task.execution_id == execution_id, Task.tenant_id == tenant_id)
+                .order_by(Task.created_at, Task.node_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    task_ids = [task.id for task in tasks]
+    dependencies: list[TaskDependency] = []
+    if task_ids:
+        dependencies = list(
+            (
+                await db.execute(
+                    select(TaskDependency).where(
+                        TaskDependency.tenant_id == tenant_id,
+                        TaskDependency.task_id.in_(task_ids),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    depends_on: dict[uuid.UUID, list[str]] = {}
+    for dependency in dependencies:
+        depends_on.setdefault(dependency.task_id, []).append(str(dependency.depends_on_task_id))
+
+    return {
+        "execution_id": str(execution_id),
+        "tasks": [
+            {
+                "task_id": str(task.id),
+                "node_id": task.node_id,
+                "title": task.title,
+                "assigned_agent": task.assigned_agent,
+                "status": task.status,
+                "attempt_count": task.attempt_count,
+                "max_attempts": task.max_attempts,
+                "dependencies": depends_on.get(task.id, []),
+                "input": json.loads(task.description) if task.description else {},
+                "result": json.loads(task.result) if task.result else None,
+                "error": task.error,
+                "scheduled_at": task.scheduled_at.isoformat() if task.scheduled_at else None,
+                "started_at": task.started_at.isoformat() if task.started_at else None,
+                "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+            }
+            for task in tasks
         ],
     }
 

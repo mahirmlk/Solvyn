@@ -176,6 +176,13 @@ async def test_feature_workflow_runs_to_completion(client: AsyncClient) -> None:
     assert "session_id" in data
     # 9 steps in the feature template
     assert len(data["nodes"]) == 9
+    task_response = await client.get(f"/api/v1/workflows/executions/{data['execution_id']}/tasks")
+    assert task_response.status_code == 200
+    tasks = task_response.json()["tasks"]
+    assert len(tasks) == 9
+    assert all(task["attempt_count"] >= 1 for task in tasks)
+    assert all(task["max_attempts"] is None for task in tasks)
+    assert any(task["dependencies"] for task in tasks)
     agent_types = {n["agent_type"] for n in data["nodes"]}
     expected = {
         "product-manager",
@@ -456,6 +463,7 @@ def test_websocket_connects_with_valid_api_key() -> None:
 def test_websocket_rejects_unauthorized_connection() -> None:
     """A WebSocket without an API key is closed by the server (4001)."""
     from fastapi.websockets import WebSocketDisconnect
+
     from solvyn.main import create_app
 
     app = create_app()
@@ -470,6 +478,7 @@ def test_websocket_rejects_unauthorized_connection() -> None:
 def test_websocket_rejects_invalid_api_key() -> None:
     """A WebSocket with a wrong API key is closed by the server."""
     from fastapi.websockets import WebSocketDisconnect
+
     from solvyn.main import create_app
 
     app = create_app()
