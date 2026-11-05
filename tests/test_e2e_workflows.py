@@ -299,6 +299,126 @@ async def test_feature_workflow_runs_to_completion(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_abandoned_workflow_execution(client: AsyncClient) -> None:
+    """Abandoned and active executions cancel without allowing stale checkpoint writes."""
+    import json
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import select
+
+    from solvyn.agents.schema import ExecutionEdge
+    from solvyn.agents.schema import ExecutionGraph as ExecutionGraphState
+    from solvyn.db.models import ExecutionGraph, Session, Task, Tenant
+    from solvyn.db.session import async_session_factory
+
+    session_id = uuid.uuid4()
+    execution_id = uuid.uuid4()
+    running_task_id = uuid.uuid4()
+    pending_task_id = uuid.uuid4()
+    active_execution_id = uuid.uuid4()
+    active_session_id = uuid.uuid4()
+    active_lease_id = uuid.uuid4()
+    active_task_id = uuid.uuid4()
+    async with async_session_factory() as db:
+        tenant = (await db.execute(select(Tenant).where(Tenant.slug == "test-tenant"))).scalar_one()
+        db.add(Session(id=session_id, tenant_id=tenant.id, title="Cancellation test"))
+        db.add(
+            ExecutionGraph(
+                id=execution_id,
+                session_id=session_id,
+                status="failed",
+                graph_data=json.dumps(
+                    {
+                        "template": "feature",
+                        "inputs": {},
+                        "nodes": [
+                            {"id": str(running_task_id), "agent_type": "backend-engineer", "status": "running"},
+                            {"id": str(pending_task_id), "agent_type": "qa-engineer", "status": "pending"},
+                        ],
+                        "edges": [],
+                    }
+                ),
+            )
+        )
+        db.add(Session(id=active_session_id, tenant_id=tenant.id, title="Active cancellation test"))
+        db.add(
+            ExecutionGraph(
+                id=active_execution_id,
+                session_id=active_session_id,
+                status="running",
+                graph_data=json.dumps(
+                    {
+                        "template": "feature",
+                        "inputs": {},
+                        "nodes": [{"id": str(active_task_id), "agent_type": "backend-engineer", "status": "running"}],
+                        "edges": [],
+                    }
+                ),
+                lease_owner=active_lease_id,
+                lease_expires_at=datetime.now(UTC) + timedelta(seconds=60),
+            )
+        )
+        await db.commit()
+        db.add(
+            Task(id=running_task_id, tenant_id=tenant.id, session_id=session_id, execution_id=execution_id,
+                 node_id=str(running_task_id), title="Running task", status="running")
+        )
+        db.add(
+            Task(id=pending_task_id, tenant_id=tenant.id, session_id=session_id, execution_id=execution_id,
+                 node_id=str(pending_task_id), title="Pending task", status="pending")
+        )
+        db.add(
+            Task(id=active_task_id, tenant_id=tenant.id, session_id=active_session_id,
+                 execution_id=active_execution_id, node_id=str(active_task_id),
+                 title="Actively running task", status="running")
+        )
+        await db.commit()
+
+    response = await client.post(f"/api/v1/workflows/executions/{execution_id}/cancel")
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+
+    snapshot = await client.get(f"/api/v1/workflows/executions/{execution_id}")
+    assert snapshot.status_code == 200
+    assert snapshot.json()["status"] == "cancelled"
+    assert {node["status"] for node in snapshot.json()["snapshot"]["nodes"]} == {"cancelled"}
+    tasks = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
+    assert tasks.status_code == 200
+    assert {task["status"] for task in tasks.json()["tasks"]} == {"cancelled"}
+
+    active_cancel = await client.post(f"/api/v1/workflows/executions/{active_execution_id}/cancel")
+    assert active_cancel.status_code == 200
+    assert active_cancel.json()["status"] == "cancelling"
+    from solvyn.db.models import Tenant as TenantModel
+    from solvyn.workflows.executor import workflow_executor
+
+    async with async_session_factory() as db:
+        active_tenant = (await db.execute(select(TenantModel).where(TenantModel.slug == "test-tenant"))).scalar_one()
+    await workflow_executor._mark_failed(str(active_execution_id), active_lease_id, active_tenant.id)
+
+    active_snapshot = await client.get(f"/api/v1/workflows/executions/{active_execution_id}")
+    assert active_snapshot.status_code == 200
+    assert active_snapshot.json()["status"] == "cancelled"
+    assert active_snapshot.json()["snapshot"]["nodes"][0]["status"] == "cancelled"
+    active_tasks = await client.get(f"/api/v1/workflows/executions/{active_execution_id}/tasks")
+    assert active_tasks.status_code == 200
+    assert active_tasks.json()["tasks"][0]["status"] == "cancelled"
+    with pytest.raises(RuntimeError, match="lease was lost"):
+        await workflow_executor._persist_execution_graph(
+            ExecutionGraphState(
+                id=str(active_execution_id),
+                session_id=str(active_session_id),
+                nodes=[],
+                edges=[ExecutionEdge(source="", target="")],
+            ),
+            "feature",
+            {},
+            active_tenant.id,
+            active_lease_id,
+        )
+
+
+@pytest.mark.asyncio
 async def test_feature_workflow_returns_resolvable_session_id(client: AsyncClient) -> None:
     """The session_id returned by the workflow must be queryable via observability."""
     response = await client.post(

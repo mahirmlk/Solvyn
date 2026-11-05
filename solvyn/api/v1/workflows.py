@@ -477,6 +477,19 @@ async def resume_workflow_execution(execution_id: uuid.UUID) -> dict[str, Any]:
     }
 
 
+@router.post("/executions/{execution_id}/cancel", summary="Cancel a workflow execution")
+async def cancel_workflow_execution(execution_id: uuid.UUID) -> dict[str, str]:
+    tenant_ref = _workflow_tenant_ref()
+    try:
+        return await workflow_executor.cancel(execution_id, tenant_ref)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/executions/{execution_id}/tasks", summary="List durable tasks for a workflow execution")
 async def list_workflow_execution_tasks(
     execution_id: uuid.UUID,
