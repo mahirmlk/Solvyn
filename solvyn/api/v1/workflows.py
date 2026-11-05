@@ -9,26 +9,52 @@ the graph at runtime.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
+from collections.abc import Coroutine
+from datetime import timedelta
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.agents.registry import agent_registry
 from solvyn.api_metadata import COMMON_RESPONSES
 from solvyn.config import settings
-from solvyn.db.models import ExecutionGraph as ExecutionGraphModel
-from solvyn.db.models import Session, Task, TaskDependency
-from solvyn.db.session import get_session
+from solvyn.db.models import (
+    ExecutionGraph as ExecutionGraphModel,
+)
+from solvyn.db.models import (
+    Project,
+    Session,
+    Task,
+    TaskDependency,
+    TaskHandoff,
+    TeammateProfile,
+    TeammateProjectAssignment,
+)
+from solvyn.db.session import async_session_factory, get_session
 from solvyn.workflows.executor import workflow_executor
 from solvyn.workflows.task_generator import TaskGenerator
 from solvyn.workflows.templates import WORKFLOW_TEMPLATES
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
+_MAX_HANDOFF_DEPTH = 3
+_MAX_HANDOFF_INPUT_BYTES = 24_000
+_HANDOFF_LEASE_DURATION = timedelta(seconds=60)
+_HANDOFF_HEARTBEAT_INTERVAL = 20
+
+
+class HandoffConflictError(RuntimeError):
+    """Raised when a handoff cannot be claimed by this request."""
+
+
+class HandoffLeaseLostError(RuntimeError):
+    """Raised when a handoff worker loses its durable lease."""
 
 
 def _workflow_tenant_ref() -> str:
@@ -39,6 +65,195 @@ def _workflow_tenant_ref() -> str:
     if tenant_context.authenticated_tenant_id == SHARED_SECRET_PRINCIPAL_ID and tenant_context.user_id is None:
         return str(settings.default_tenant_id)
     raise HTTPException(status_code=403, detail="A tenant membership is required for workflow access")
+
+
+async def _handoff_heartbeat(handoff_id: uuid.UUID, lease_id: uuid.UUID, tenant_id: uuid.UUID) -> bool:
+    while True:
+        await asyncio.sleep(_HANDOFF_HEARTBEAT_INTERVAL)
+        async with async_session_factory() as db:
+            result = await db.execute(
+                update(TaskHandoff)
+                .where(
+                    TaskHandoff.id == handoff_id,
+                    TaskHandoff.tenant_id == tenant_id,
+                    TaskHandoff.status == "running",
+                    TaskHandoff.lease_owner == lease_id,
+                )
+                .values(lease_expires_at=func.now() + _HANDOFF_LEASE_DURATION)
+                .returning(TaskHandoff.id)
+            )
+            await db.commit()
+            if result.scalar_one_or_none() != handoff_id:
+                return False
+
+
+async def _run_teammate_with_handoff_lease(
+    handoff_id: uuid.UUID,
+    lease_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    execute: Coroutine[Any, Any, dict[str, Any]],
+) -> dict[str, Any]:
+    execution_task: asyncio.Task[dict[str, Any]] = asyncio.create_task(execute)
+    heartbeat_task: asyncio.Task[bool] = asyncio.create_task(_handoff_heartbeat(handoff_id, lease_id, tenant_id))
+    try:
+        done, _ = await asyncio.wait({execution_task, heartbeat_task}, return_when=asyncio.FIRST_COMPLETED)
+        if execution_task in done:
+            return await execution_task
+        if not heartbeat_task.result():
+            raise HandoffLeaseLostError("Task handoff lease was lost")
+        return await execution_task
+    finally:
+        if not execution_task.done():
+            execution_task.cancel()
+        if not heartbeat_task.done():
+            heartbeat_task.cancel()
+        await asyncio.gather(execution_task, heartbeat_task, return_exceptions=True)
+
+
+async def _execute_task_handoff(
+    db: AsyncSession,
+    *,
+    handoff: TaskHandoff,
+    child: Task,
+    teammate: TeammateProfile,
+    tenant_id: uuid.UUID,
+    input_data: dict[str, Any],
+    session_id: str | None,
+) -> dict[str, Any]:
+    lease_id = uuid.uuid4()
+    can_claim = or_(
+        TaskHandoff.status.in_(["pending", "failed"]),
+        and_(
+            TaskHandoff.status == "running",
+            or_(TaskHandoff.lease_expires_at.is_(None), TaskHandoff.lease_expires_at < func.now()),
+        ),
+    )
+    claimed = await db.execute(
+        update(TaskHandoff)
+        .where(TaskHandoff.id == handoff.id, TaskHandoff.tenant_id == tenant_id, can_claim)
+        .values(
+            status="running",
+            error=None,
+            completed_at=None,
+            lease_owner=lease_id,
+            lease_expires_at=func.now() + _HANDOFF_LEASE_DURATION,
+        )
+        .returning(TaskHandoff.id)
+    )
+    if claimed.scalar_one_or_none() != handoff.id:
+        await db.rollback()
+        raise HandoffConflictError("Task handoff is already running or has completed")
+
+    await db.execute(
+        update(Task)
+        .where(Task.id == child.id, Task.tenant_id == tenant_id)
+        .values(status="running", error=None, attempt_count=Task.attempt_count + 1, started_at=func.now())
+    )
+    await db.commit()
+
+    from solvyn.agents.teammate_runtime import TeammateRunConflictError, run_teammate
+
+    try:
+        output = await _run_teammate_with_handoff_lease(
+            handoff.id,
+            lease_id,
+            tenant_id,
+            run_teammate(
+                db,
+                teammate,
+                tenant_id=tenant_id,
+                project_id=handoff.project_id,
+                input_data=input_data,
+                session_id=session_id,
+            ),
+        )
+    except TeammateRunConflictError as exc:
+        released = await db.execute(
+            update(TaskHandoff)
+            .where(
+                TaskHandoff.id == handoff.id,
+                TaskHandoff.tenant_id == tenant_id,
+                or_(
+                    TaskHandoff.lease_owner == lease_id,
+                    and_(
+                        TaskHandoff.status == "running",
+                        or_(TaskHandoff.lease_owner.is_(None), TaskHandoff.lease_expires_at < func.now()),
+                    ),
+                ),
+            )
+            .values(status="pending", error=None, lease_owner=None, lease_expires_at=None)
+            .returning(TaskHandoff.id)
+        )
+        if released.scalar_one_or_none() != handoff.id:
+            await db.rollback()
+            raise HandoffLeaseLostError("Task handoff lease was lost")
+        await db.execute(
+            update(Task)
+            .where(Task.id == child.id, Task.tenant_id == tenant_id)
+            .values(status="pending", error=None)
+        )
+        await db.commit()
+        raise HandoffConflictError("Teammate is already running; retry this handoff") from exc
+    except asyncio.CancelledError:
+        released = await db.execute(
+            update(TaskHandoff)
+            .where(TaskHandoff.id == handoff.id, TaskHandoff.tenant_id == tenant_id, TaskHandoff.lease_owner == lease_id)
+            .values(status="pending", lease_owner=None, lease_expires_at=None)
+            .returning(TaskHandoff.id)
+        )
+        if released.scalar_one_or_none() == handoff.id:
+            await db.execute(
+                update(Task)
+                .where(Task.id == child.id, Task.tenant_id == tenant_id)
+                .values(status="pending")
+            )
+            await db.commit()
+        else:
+            await db.rollback()
+        raise
+    except HandoffLeaseLostError:
+        raise
+    except Exception as exc:
+        failed = await db.execute(
+            update(TaskHandoff)
+            .where(TaskHandoff.id == handoff.id, TaskHandoff.tenant_id == tenant_id, TaskHandoff.lease_owner == lease_id)
+            .values(status="failed", error=str(exc), lease_owner=None, lease_expires_at=None, completed_at=func.now())
+            .returning(TaskHandoff.id)
+        )
+        if failed.scalar_one_or_none() != handoff.id:
+            await db.rollback()
+            raise HandoffLeaseLostError("Task handoff lease was lost") from exc
+        await db.execute(
+            update(Task)
+            .where(Task.id == child.id, Task.tenant_id == tenant_id)
+            .values(status="failed", error=str(exc), completed_at=func.now())
+        )
+        await db.commit()
+        return {"handoff_id": str(handoff.id), "task_id": str(child.id), "status": "failed", "error": str(exc)}
+
+    finalized = await db.execute(
+        update(TaskHandoff)
+        .where(TaskHandoff.id == handoff.id, TaskHandoff.tenant_id == tenant_id, TaskHandoff.lease_owner == lease_id)
+        .values(
+            status="completed",
+            output_data=json.dumps(output),
+            error=None,
+            lease_owner=None,
+            lease_expires_at=None,
+            completed_at=func.now(),
+        )
+        .returning(TaskHandoff.id)
+    )
+    if finalized.scalar_one_or_none() != handoff.id:
+        await db.rollback()
+        raise HandoffLeaseLostError("Task handoff lease was lost before saving its result")
+    await db.execute(
+        update(Task)
+        .where(Task.id == child.id, Task.tenant_id == tenant_id)
+        .values(status="completed", result=json.dumps(output), error=None, completed_at=func.now())
+    )
+    await db.commit()
+    return {"handoff_id": str(handoff.id), "task_id": str(child.id), "status": "completed", "output": output}
 
 
 class GenerateTasksRequest(BaseModel):
@@ -76,6 +291,14 @@ class GenerateTasksRequest(BaseModel):
             }
         }
     )
+
+
+class TaskHandoffRequest(BaseModel):
+    idempotency_key: uuid.UUID
+    target_teammate_id: uuid.UUID
+    project_id: uuid.UUID
+    reason: str = Field(min_length=1, max_length=2000)
+    input_data: dict[str, Any] = Field(default_factory=dict)
 
 
 @router.get(
@@ -301,6 +524,22 @@ async def list_workflow_execution_tasks(
             .scalars()
             .all()
         )
+    handoffs: list[TaskHandoff] = []
+    if task_ids:
+        handoffs = list(
+            (
+                await db.execute(
+                    select(TaskHandoff)
+                    .where(
+                        TaskHandoff.tenant_id == tenant_id,
+                        TaskHandoff.parent_task_id.in_(task_ids),
+                    )
+                    .order_by(TaskHandoff.created_at)
+                )
+            )
+            .scalars()
+            .all()
+        )
     depends_on: dict[uuid.UUID, list[str]] = {}
     for dependency in dependencies:
         depends_on.setdefault(dependency.task_id, []).append(str(dependency.depends_on_task_id))
@@ -326,7 +565,284 @@ async def list_workflow_execution_tasks(
             }
             for task in tasks
         ],
+        "handoffs": [
+            {
+                "handoff_id": str(handoff.id),
+                "idempotency_key": str(handoff.idempotency_key),
+                "parent_task_id": str(handoff.parent_task_id),
+                "child_task_id": str(handoff.child_task_id),
+                "teammate_id": str(handoff.teammate_id),
+                "project_id": str(handoff.project_id),
+                "delegated_from": handoff.delegated_from,
+                "delegated_to": handoff.delegated_to,
+                "reason": handoff.reason,
+                "input": json.loads(handoff.input_data),
+                "output": json.loads(handoff.output_data) if handoff.output_data else None,
+                "status": handoff.status,
+                "error": handoff.error,
+                "created_at": handoff.created_at.isoformat() if handoff.created_at else None,
+                "completed_at": handoff.completed_at.isoformat() if handoff.completed_at else None,
+            }
+            for handoff in handoffs
+        ],
     }
+
+
+@router.post(
+    "/executions/{execution_id}/tasks/{task_id}/handoffs",
+    summary="Delegate a workflow task to an assigned teammate",
+)
+async def create_task_handoff(
+    execution_id: uuid.UUID,
+    task_id: uuid.UUID,
+    payload: TaskHandoffRequest,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    tenant_ref = _workflow_tenant_ref()
+    try:
+        tenant_id = await workflow_executor._resolve_tenant_uuid(tenant_ref)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Workflow tenant is not configured") from exc
+
+    parent = (
+        await db.execute(
+            select(Task)
+            .join(ExecutionGraphModel, ExecutionGraphModel.id == Task.execution_id)
+            .join(Session, Session.id == ExecutionGraphModel.session_id)
+            .where(
+                Task.id == task_id,
+                Task.execution_id == execution_id,
+                Task.tenant_id == tenant_id,
+                Session.tenant_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if parent is None:
+        raise HTTPException(status_code=404, detail="Workflow task not found")
+    input_json = json.dumps(payload.input_data)
+    if len(input_json.encode("utf-8")) > _MAX_HANDOFF_INPUT_BYTES:
+        raise HTTPException(status_code=413, detail="Handoff input exceeds the 24 KB limit")
+    if not payload.reason.strip():
+        raise HTTPException(status_code=400, detail="Handoff reason must not be blank")
+
+    handoff = (
+        await db.execute(
+            select(TaskHandoff).where(
+                TaskHandoff.tenant_id == tenant_id,
+                TaskHandoff.parent_task_id == parent.id,
+                TaskHandoff.idempotency_key == payload.idempotency_key,
+            )
+        )
+    ).scalar_one_or_none()
+    if handoff is not None and (
+        handoff.teammate_id != payload.target_teammate_id
+        or handoff.project_id != payload.project_id
+        or handoff.reason != payload.reason
+        or handoff.input_data != input_json
+    ):
+        raise HTTPException(status_code=409, detail="Idempotency key was already used for a different handoff")
+    if handoff is not None and handoff.status == "completed":
+        child = (
+            await db.execute(select(Task).where(Task.id == handoff.child_task_id, Task.tenant_id == tenant_id))
+        ).scalar_one()
+        return {
+            "handoff_id": str(handoff.id),
+            "task_id": str(child.id),
+            "status": "completed",
+            "output": json.loads(handoff.output_data) if handoff.output_data else None,
+        }
+
+    depth = 0
+    ancestor = parent
+    while ancestor.parent_task_id is not None:
+        depth += 1
+        if depth >= _MAX_HANDOFF_DEPTH:
+            raise HTTPException(status_code=409, detail="Maximum task delegation depth reached")
+        parent_task = (
+            await db.execute(
+                select(Task).where(Task.id == ancestor.parent_task_id, Task.tenant_id == tenant_id)
+            )
+        ).scalar_one_or_none()
+        if parent_task is None:
+            raise HTTPException(status_code=409, detail="Task delegation ancestry is incomplete")
+        ancestor = parent_task
+
+    teammate = (
+        await db.execute(
+            select(TeammateProfile)
+            .join(TeammateProjectAssignment, TeammateProjectAssignment.teammate_id == TeammateProfile.id)
+            .join(Project, Project.id == TeammateProjectAssignment.project_id)
+            .where(
+                TeammateProfile.id == payload.target_teammate_id,
+                TeammateProfile.tenant_id == tenant_id,
+                TeammateProfile.is_enabled.is_(True),
+                Project.id == payload.project_id,
+                Project.tenant_id == tenant_id,
+                Project.organization_id == TeammateProfile.organization_id,
+                Project.is_active.is_(True),
+            )
+        )
+    ).scalar_one_or_none()
+    if teammate is None:
+        raise HTTPException(status_code=404, detail="Assigned teammate not found")
+
+    from solvyn.agents.teammate_runtime import validate_role_agent_type
+
+    try:
+        validate_role_agent_type(teammate.role, teammate.agent_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if handoff is None:
+        child = Task(
+            id=uuid.uuid4(),
+            tenant_id=tenant_id,
+            session_id=parent.session_id,
+            execution_id=execution_id,
+            title=f"Delegated to {teammate.name}: {parent.title}",
+            description=input_json,
+            assigned_agent=teammate.agent_type,
+            status="pending",
+            priority=parent.priority,
+            parent_task_id=parent.id,
+        )
+        handoff = TaskHandoff(
+            id=uuid.uuid4(),
+            tenant_id=tenant_id,
+            parent_task_id=parent.id,
+            child_task_id=child.id,
+            idempotency_key=payload.idempotency_key,
+            teammate_id=teammate.id,
+            project_id=payload.project_id,
+            delegated_from=parent.assigned_agent or "workflow",
+            delegated_to=teammate.agent_type,
+            reason=payload.reason,
+            input_data=input_json,
+            status="pending",
+        )
+        db.add_all([child, handoff])
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            handoff = (
+                await db.execute(
+                    select(TaskHandoff).where(
+                        TaskHandoff.tenant_id == tenant_id,
+                        TaskHandoff.parent_task_id == parent.id,
+                        TaskHandoff.idempotency_key == payload.idempotency_key,
+                    )
+                )
+            ).scalar_one_or_none()
+            if handoff is None:
+                raise
+            if (
+                handoff.teammate_id != payload.target_teammate_id
+                or handoff.project_id != payload.project_id
+                or handoff.reason != payload.reason
+                or handoff.input_data != input_json
+            ):
+                raise HTTPException(status_code=409, detail="Idempotency key was already used for a different handoff")
+            teammate = (
+                await db.execute(
+                    select(TeammateProfile).where(
+                        TeammateProfile.id == handoff.teammate_id,
+                        TeammateProfile.tenant_id == tenant_id,
+                        TeammateProfile.is_enabled.is_(True),
+                    )
+                )
+            ).scalar_one_or_none()
+            if teammate is None:
+                raise HTTPException(status_code=409, detail="Assigned teammate is disabled")
+    else:
+        child = (
+            await db.execute(select(Task).where(Task.id == handoff.child_task_id, Task.tenant_id == tenant_id))
+        ).scalar_one()
+
+    try:
+        return await _execute_task_handoff(
+            db,
+            handoff=handoff,
+            child=child,
+            teammate=teammate,
+            tenant_id=tenant_id,
+            input_data=payload.input_data,
+            session_id=str(parent.session_id) if parent.session_id else None,
+        )
+    except HandoffConflictError as exc:
+        current = (
+            await db.execute(
+                select(TaskHandoff)
+                .where(TaskHandoff.id == handoff.id, TaskHandoff.tenant_id == tenant_id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if current is not None and current.status == "completed":
+            return {
+                "handoff_id": str(current.id),
+                "task_id": str(current.child_task_id),
+                "status": "completed",
+                "output": json.loads(current.output_data) if current.output_data else None,
+            }
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except HandoffLeaseLostError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post(
+    "/executions/{execution_id}/tasks/{task_id}/handoffs/{handoff_id}/resume",
+    summary="Resume a pending or abandoned teammate handoff",
+)
+async def resume_task_handoff(
+    execution_id: uuid.UUID,
+    task_id: uuid.UUID,
+    handoff_id: uuid.UUID,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    tenant_ref = _workflow_tenant_ref()
+    try:
+        tenant_id = await workflow_executor._resolve_tenant_uuid(tenant_ref)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Workflow tenant is not configured") from exc
+
+    result = await db.execute(
+        select(TaskHandoff, Task, TeammateProfile)
+        .join(Task, Task.id == TaskHandoff.child_task_id)
+        .join(ExecutionGraphModel, ExecutionGraphModel.id == Task.execution_id)
+        .join(Session, Session.id == ExecutionGraphModel.session_id)
+        .join(TeammateProfile, TeammateProfile.id == TaskHandoff.teammate_id)
+        .where(
+            TaskHandoff.id == handoff_id,
+            TaskHandoff.tenant_id == tenant_id,
+            TaskHandoff.parent_task_id == task_id,
+            TaskHandoff.child_task_id == Task.id,
+            Task.parent_task_id == task_id,
+            Task.execution_id == execution_id,
+            Task.tenant_id == tenant_id,
+            Session.tenant_id == tenant_id,
+        )
+    )
+    row = result.one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Workflow task handoff not found")
+    handoff, child, teammate = row
+    if not teammate.is_enabled:
+        raise HTTPException(status_code=409, detail="Assigned teammate is disabled")
+
+    try:
+        return await _execute_task_handoff(
+            db,
+            handoff=handoff,
+            child=child,
+            teammate=teammate,
+            tenant_id=tenant_id,
+            input_data=json.loads(handoff.input_data),
+            session_id=str(child.session_id) if child.session_id else None,
+        )
+    except HandoffConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except HandoffLeaseLostError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post(

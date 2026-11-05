@@ -183,6 +183,106 @@ async def test_feature_workflow_runs_to_completion(client: AsyncClient) -> None:
     assert all(task["attempt_count"] >= 1 for task in tasks)
     assert all(task["max_attempts"] is None for task in tasks)
     assert any(task["dependencies"] for task in tasks)
+
+    from sqlalchemy import select, update
+
+    from solvyn.db.models import (
+        Organization,
+        Project,
+        TeammateProfile,
+        TeammateProjectAssignment,
+        TeammateStatus,
+        Tenant,
+    )
+    from solvyn.db.session import async_session_factory
+
+    project_id = uuid.uuid4()
+    teammate_id = uuid.uuid4()
+    async with async_session_factory() as db:
+        tenant = (await db.execute(select(Tenant).where(Tenant.slug == "test-tenant"))).scalar_one()
+        organization = Organization(
+            id=uuid.uuid4(),
+            name="Handoff Test Org",
+            slug=f"handoff-{uuid.uuid4().hex[:12]}",
+            tenant_id=tenant.id,
+        )
+        project = Project(
+            id=project_id,
+            organization_id=organization.id,
+            tenant_id=tenant.id,
+            name="Handoff Test Project",
+            slug=f"handoff-{uuid.uuid4().hex[:12]}",
+        )
+        teammate = TeammateProfile(
+            id=teammate_id,
+            organization_id=organization.id,
+            tenant_id=tenant.id,
+            name="Handoff Engineer",
+            role="Software Engineer",
+            agent_type="backend-engineer",
+            status=TeammateStatus.BUSY,
+        )
+        db.add_all(
+            [
+                organization,
+                project,
+                teammate,
+                TeammateProjectAssignment(teammate_id=teammate_id, project_id=project_id),
+            ]
+        )
+        await db.commit()
+
+    handoff_response = await client.post(
+        f"/api/v1/workflows/executions/{data['execution_id']}/tasks/{tasks[0]['task_id']}/handoffs",
+        json={
+            "idempotency_key": str(uuid.uuid4()),
+            "target_teammate_id": str(teammate_id),
+            "project_id": str(project_id),
+            "reason": "Implement the assigned backend follow-up",
+            "input_data": {"task": "Implement the assigned backend follow-up"},
+        },
+    )
+    assert handoff_response.status_code == 409
+
+    pending_tasks = await client.get(f"/api/v1/workflows/executions/{data['execution_id']}/tasks")
+    pending_handoff = pending_tasks.json()["handoffs"][0]
+    assert pending_handoff["status"] == "pending"
+    async with async_session_factory() as db:
+        await db.execute(
+            update(TeammateProfile)
+            .where(TeammateProfile.id == teammate_id)
+            .values(status=TeammateStatus.IDLE)
+        )
+        await db.commit()
+
+    handoff_response = await client.post(
+        f"/api/v1/workflows/executions/{data['execution_id']}/tasks/{tasks[0]['task_id']}/handoffs/{pending_handoff['handoff_id']}/resume"
+    )
+    assert handoff_response.status_code == 200
+    assert handoff_response.json()["status"] == "completed"
+
+    updated_tasks = await client.get(f"/api/v1/workflows/executions/{data['execution_id']}/tasks")
+    handoffs = updated_tasks.json()["handoffs"]
+    assert len(handoffs) == 1
+    assert handoffs[0]["delegated_to"] == "backend-engineer"
+    assert handoffs[0]["status"] == "completed"
+    assert handoffs[0]["output"] is not None
+    assert len(updated_tasks.json()["tasks"]) == 10
+
+    repeated_handoff = await client.post(
+        f"/api/v1/workflows/executions/{data['execution_id']}/tasks/{tasks[0]['task_id']}/handoffs",
+        json={
+            "idempotency_key": handoffs[0]["idempotency_key"],
+            "target_teammate_id": str(teammate_id),
+            "project_id": str(project_id),
+            "reason": "Implement the assigned backend follow-up",
+            "input_data": {"task": "Implement the assigned backend follow-up"},
+        },
+    )
+    assert repeated_handoff.status_code == 200
+    assert repeated_handoff.json()["handoff_id"] == handoffs[0]["handoff_id"]
+    assert len((await client.get(f"/api/v1/workflows/executions/{data['execution_id']}/tasks")).json()["tasks"]) == 10
+
     agent_types = {n["agent_type"] for n in data["nodes"]}
     expected = {
         "product-manager",

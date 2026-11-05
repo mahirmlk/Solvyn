@@ -92,6 +92,7 @@ async def run_teammate(
     tenant_id: uuid.UUID,
     project_id: uuid.UUID,
     input_data: dict[str, Any],
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     """Run one registered agent as a persisted teammate on an assigned project."""
     if teammate.tenant_id != tenant_id:
@@ -147,7 +148,7 @@ async def run_teammate(
     agent = agent_registry.create(
         teammate.agent_type,
         agent_id=str(teammate.id),
-        session_id=str(uuid.uuid4()),
+        session_id=session_id or str(uuid.uuid4()),
         tenant_id=str(tenant_id),
         config={"teammate_id": str(teammate.id), "project_id": str(project.id)},
     )
