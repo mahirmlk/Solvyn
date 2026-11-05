@@ -48,7 +48,16 @@ class DeepSeekProvider(LLMProvider):
         cost = (prompt_tokens * prompt_cost + completion_tokens * completion_cost) / 1_000_000
 
         choices = data.get("choices", [])
-        content = choices[0].get("message", {}).get("content", "") if choices else ""
+        choice = choices[0] if choices else {}
+        message = choice.get("message", {}) if isinstance(choice, dict) else {}
+        content = message.get("content", "") if isinstance(message, dict) else ""
+        if content is None:
+            content = ""
+        if not isinstance(content, str):
+            content = str(content)
+        tool_calls = message.get("tool_calls", []) if isinstance(message, dict) else []
+        if not isinstance(tool_calls, list):
+            tool_calls = []
         return LLMResponse(
             content=content,
             provider="deepseek",
@@ -57,6 +66,8 @@ class DeepSeekProvider(LLMProvider):
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
             cost=cost,
+            tool_calls=[call for call in tool_calls if isinstance(call, dict)],
+            finish_reason=choice.get("finish_reason") if isinstance(choice, dict) else None,
         )
 
     async def close(self) -> None:

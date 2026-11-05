@@ -168,6 +168,8 @@ async def _execute_task_handoff(
                 project_id=handoff.project_id,
                 input_data=input_data,
                 session_id=session_id,
+                task_id=child.id,
+                handoff_lease_id=lease_id,
             ),
         )
     except TeammateRunConflictError as exc:

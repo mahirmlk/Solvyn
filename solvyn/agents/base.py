@@ -2,11 +2,14 @@ import logging
 import uuid
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from solvyn.agents.schema import AgentMessage, AgentMetadata, AgentStatus, Checkpoint, ExecutionNode
 from solvyn.llm.providers.base import LLMResponse
 from solvyn.llm.router import llm_router
+
+if TYPE_CHECKING:
+    from solvyn.agents.workspace_tools import TeammateWorkspaceToolRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,7 @@ class BaseAgent(ABC):
         self._llm_model: str | None = None
         self._teammate_system_context: str = ""
         self._teammate_repository_context: str = ""
+        self._teammate_tool_runtime: TeammateWorkspaceToolRuntime | None = None
         self._max_tokens_per_run: int | None = None
         self._llm_completion_tokens_used = 0
 
@@ -87,37 +91,51 @@ class BaseAgent(ABC):
                 f"{self._teammate_repository_context}\n"
                 f"--- END UNTRUSTED CONNECTED REPOSITORY CONTEXT {repository_boundary} ---"
             )
-        if self._max_tokens_per_run is None:
-            return await llm_router.generate(
-                prompt=effective_prompt,
-                system_prompt=effective_system_prompt,
-                provider=self._llm_provider,
-                model=self._llm_model,
-                **kwargs,
-            )
+        async def generate_once(
+            direct_prompt: str,
+            direct_system_prompt: str | None,
+            **direct_kwargs: Any,
+        ) -> LLMResponse:
+            if self._max_tokens_per_run is None:
+                return await llm_router.generate(
+                    prompt=direct_prompt,
+                    system_prompt=direct_system_prompt,
+                    provider=self._llm_provider,
+                    model=self._llm_model,
+                    **direct_kwargs,
+                )
 
-        remaining = self._max_tokens_per_run - self._llm_completion_tokens_used
-        if remaining <= 0:
-            raise RuntimeError("Teammate run exhausted its completion token budget")
-        requested_max_tokens = kwargs.get("max_tokens") or remaining
-        reserved_tokens = min(requested_max_tokens, remaining)
-        kwargs["max_tokens"] = reserved_tokens
-        # Reserve before awaiting so concurrent model calls share one budget.
-        self._llm_completion_tokens_used += reserved_tokens
-        try:
-            response = await llm_router.generate(
-                prompt=effective_prompt,
-                system_prompt=effective_system_prompt,
-                provider=self._llm_provider,
-                model=self._llm_model,
-                **kwargs,
+            remaining = self._max_tokens_per_run - self._llm_completion_tokens_used
+            if remaining <= 0:
+                raise RuntimeError("Teammate run exhausted its completion token budget")
+            requested_max_tokens = direct_kwargs.get("max_tokens") or remaining
+            reserved_tokens = min(requested_max_tokens, remaining)
+            direct_kwargs["max_tokens"] = reserved_tokens
+            # Reserve before awaiting so concurrent model calls share one budget.
+            self._llm_completion_tokens_used += reserved_tokens
+            try:
+                response = await llm_router.generate(
+                    prompt=direct_prompt,
+                    system_prompt=direct_system_prompt,
+                    provider=self._llm_provider,
+                    model=self._llm_model,
+                    **direct_kwargs,
+                )
+            except BaseException:
+                self._llm_completion_tokens_used -= reserved_tokens
+                raise
+            if response.completion_tokens > 0:
+                self._llm_completion_tokens_used += response.completion_tokens - reserved_tokens
+            return response
+
+        if self._teammate_tool_runtime is not None:
+            return await self._teammate_tool_runtime.run(
+                generate_once,
+                effective_prompt,
+                effective_system_prompt,
+                kwargs,
             )
-        except BaseException:
-            self._llm_completion_tokens_used -= reserved_tokens
-            raise
-        if response.completion_tokens > 0:
-            self._llm_completion_tokens_used += response.completion_tokens - reserved_tokens
-        return response
+        return await generate_once(effective_prompt, effective_system_prompt, **kwargs)
 
     async def request_approval(
         self,

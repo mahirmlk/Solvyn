@@ -24,6 +24,7 @@ from solvyn.db.models import (
     TaskAcceptanceCriterion,
     TaskHandoff,
     TaskWorkspace,
+    TeammateToolInvocation,
     User,
     VerificationRun,
 )
@@ -141,6 +142,23 @@ def _verification_dict(run: VerificationRun) -> dict[str, Any]:
         "source_digest": run.source_digest,
         "started_at": run.started_at.isoformat() if run.started_at else None,
         "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+    }
+
+
+def _tool_invocation_dict(invocation: TeammateToolInvocation) -> dict[str, Any]:
+    return {
+        "id": str(invocation.id),
+        "task_id": str(invocation.task_id),
+        "workspace_id": str(invocation.workspace_id),
+        "teammate_id": str(invocation.teammate_id),
+        "tool_name": invocation.tool_name,
+        "path": invocation.path,
+        "status": invocation.status,
+        "input_bytes": invocation.input_bytes,
+        "output_bytes": invocation.output_bytes,
+        "error_code": invocation.error_code,
+        "started_at": invocation.started_at.isoformat() if invocation.started_at else None,
+        "completed_at": invocation.completed_at.isoformat() if invocation.completed_at else None,
     }
 
 
@@ -467,6 +485,30 @@ async def list_task_verification_runs(
     return {
         "task_id": str(task.id),
         "verification_runs": await _verification_history_for_task(db, task.tenant_id, task.id),
+    }
+
+
+@router.get("/tool-invocations", summary="List task-scoped teammate tool audit records")
+async def list_task_tool_invocations(
+    execution_id: uuid.UUID,
+    task_id: uuid.UUID,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    task = await _owned_task(execution_id, task_id, db)
+    invocations = (
+        await db.execute(
+            select(TeammateToolInvocation)
+            .where(
+                TeammateToolInvocation.tenant_id == task.tenant_id,
+                TeammateToolInvocation.task_id == task.id,
+            )
+            .order_by(TeammateToolInvocation.started_at.desc(), TeammateToolInvocation.id.desc())
+            .limit(500)
+        )
+    ).scalars().all()
+    return {
+        "task_id": str(task.id),
+        "tool_invocations": [_tool_invocation_dict(item) for item in invocations],
     }
 
 
