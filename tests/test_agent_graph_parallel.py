@@ -15,9 +15,9 @@ async def test_agent_graph_runs_independent_nodes_in_parallel() -> None:
 
     graph = AgentGraph()
     # Three independent start nodes (no edges between them)
-    n1 = graph.add_node("agent-a", {"task": "a"})
-    n2 = graph.add_node("agent-b", {"task": "b"})
-    n3 = graph.add_node("agent-c", {"task": "c"})
+    graph.add_node("agent-a", {"task": "a"})
+    graph.add_node("agent-b", {"task": "b"})
+    graph.add_node("agent-c", {"task": "c"})
 
     execution_times: list[float] = []
 
@@ -71,6 +71,52 @@ async def test_agent_graph_runs_levels_sequentially() -> None:
     assert result.status == "completed"
     # agent-a should run before agent-b
     assert call_order == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_agent_graph_persists_node_lifecycle_checkpoints() -> None:
+    from solvyn.agents.graph import AgentGraph
+
+    graph = AgentGraph()
+    graph.add_node("agent-a", {"task": "a"})
+    mock_agent = AsyncMock()
+    mock_agent.run = AsyncMock(return_value={"result": "done"})
+    snapshots = []
+
+    async def save(snapshot) -> None:
+        snapshots.append(snapshot)
+
+    with patch("solvyn.agents.graph.agent_registry.create", return_value=mock_agent):
+        result = await graph.execute("s1", "t1", on_checkpoint=save, graph_id="run-1")
+
+    assert result.id == "run-1"
+    assert result.status == "completed"
+    assert any(snapshot.status == "running" and snapshot.nodes[0].status == "running" for snapshot in snapshots)
+    assert snapshots[-1].status == "completed"
+    assert snapshots[-1].nodes[0].status == "completed"
+    assert any(snapshot.nodes[0].status == "running" for snapshot in snapshots)
+
+
+@pytest.mark.asyncio
+async def test_agent_graph_resume_skips_completed_nodes() -> None:
+    from solvyn.agents.graph import AgentGraph
+
+    graph = AgentGraph()
+    completed = graph.add_node("agent-a", {"task": "already done"})
+    pending = graph.add_node("agent-b", {"source": "agent-a.output"})
+    graph.nodes[completed].status = "completed"
+    graph.nodes[completed].output = {"result": "saved"}
+    graph.add_edge(completed, pending)
+
+    mock_agent = AsyncMock()
+    mock_agent.run = AsyncMock(return_value={"result": "resumed"})
+    with patch("solvyn.agents.graph.agent_registry.create", return_value=mock_agent):
+        result = await graph.execute("s1", "t1", graph_id="run-1", execution_status="resuming")
+
+    assert result.status == "completed"
+    assert graph.nodes[completed].output == {"result": "saved"}
+    assert mock_agent.run.await_count == 1
+    assert mock_agent.run.await_args.args[0]["source"] == {"result": "saved"}
 
 
 @pytest.mark.asyncio

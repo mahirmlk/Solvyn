@@ -9,20 +9,36 @@ the graph at runtime.
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.agents.registry import agent_registry
 from solvyn.api_metadata import COMMON_RESPONSES
 from solvyn.config import settings
+from solvyn.db.models import ExecutionGraph as ExecutionGraphModel
+from solvyn.db.models import Session
+from solvyn.db.session import get_session
 from solvyn.workflows.executor import workflow_executor
 from solvyn.workflows.task_generator import TaskGenerator
 from solvyn.workflows.templates import WORKFLOW_TEMPLATES
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
+
+
+def _workflow_tenant_ref() -> str:
+    from solvyn.multi_tenant.middleware import SHARED_SECRET_PRINCIPAL_ID, tenant_context
+
+    if tenant_context.tenant_id is not None:
+        return str(tenant_context.tenant_id)
+    if tenant_context.authenticated_tenant_id == SHARED_SECRET_PRINCIPAL_ID and tenant_context.user_id is None:
+        return str(settings.default_tenant_id)
+    raise HTTPException(status_code=403, detail="A tenant membership is required for workflow access")
 
 
 class GenerateTasksRequest(BaseModel):
@@ -145,8 +161,9 @@ async def get_workflow(name: str) -> dict[str, Any]:
         "Start an execution of the named workflow template. A new session is "
         "allocated for the run, scoped to the calling tenant. The endpoint "
         "returns the full execution result including the status of every "
-        "step; long-running workflows should be polled via the session and "
-        "trace endpoints rather than waiting on this response."
+        "step and a durable execution ID. Poll GET /workflows/executions/{id} "
+        "to read progress or POST /workflows/executions/{id}/resume after an "
+        "interruption."
     ),
     response_description="The execution result, including per-step status.",
     responses={
@@ -163,23 +180,77 @@ async def run_workflow(name: str, inputs: dict[str, Any] = Body(...)) -> dict[st
     if tmpl is None:
         raise HTTPException(status_code=404, detail=f"Workflow '{name}' not found")
 
-    from solvyn.multi_tenant.middleware import tenant_context
-
     session_id = str(uuid.uuid4())
-    tenant_id = str(tenant_context.tenant_id) if tenant_context.tenant_id else settings.default_tenant_id
+    tenant_id = _workflow_tenant_ref()
     safe_inputs = {k: v for k, v in inputs.items() if k != "tenant_id"}
-    result = await workflow_executor.run(
-        template_name=name,
-        inputs=safe_inputs,
-        session_id=session_id,
-        tenant_id=tenant_id,
-    )
+    try:
+        result = await workflow_executor.run(
+            template_name=name,
+            inputs=safe_inputs,
+            session_id=session_id,
+            tenant_id=tenant_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return {
         "workflow": name,
+        "execution_id": result.id,
         "session_id": result.session_id,
         "status": result.status,
         "nodes": [{"agent_type": n.agent_type, "status": n.status, "error": n.error} for n in result.nodes],
+    }
+
+
+@router.get("/executions/{execution_id}", summary="Get a workflow execution snapshot")
+async def get_workflow_execution(
+    execution_id: uuid.UUID,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    tenant_ref = _workflow_tenant_ref()
+    try:
+        tenant_id = await workflow_executor._resolve_tenant_uuid(tenant_ref)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Workflow tenant is not configured") from exc
+    result = await db.execute(
+        select(ExecutionGraphModel)
+        .join(Session, Session.id == ExecutionGraphModel.session_id)
+        .where(ExecutionGraphModel.id == execution_id, Session.tenant_id == tenant_id)
+    )
+    record = result.scalar_one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Workflow execution not found")
+    return {
+        "execution_id": str(record.id),
+        "session_id": str(record.session_id),
+        "status": record.status,
+        "snapshot": json.loads(record.graph_data),
+        "updated_at": record.updated_at.isoformat() if record.updated_at else "",
+    }
+
+
+@router.post("/executions/{execution_id}/resume", summary="Resume an interrupted workflow execution")
+async def resume_workflow_execution(execution_id: uuid.UUID) -> dict[str, Any]:
+    tenant_ref = _workflow_tenant_ref()
+    try:
+        result = await workflow_executor.resume(execution_id, tenant_ref)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "execution_id": result.id,
+        "session_id": result.session_id,
+        "status": result.status,
+        "recovery_policy": "at_least_once_for_unfinished_nodes",
+        "nodes": [
+            {"id": node.id, "agent_type": node.agent_type, "status": node.status, "error": node.error}
+            for node in result.nodes
+        ],
     }
 
 
