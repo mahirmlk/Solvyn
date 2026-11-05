@@ -44,6 +44,19 @@ def test_workspace_paths_and_size_are_confined(tmp_path: Path) -> None:
         manager.get(workspace.id)
 
 
+def test_workspace_fingerprint_tracks_paths_and_content(tmp_path: Path) -> None:
+    manager = WorkspaceManager(tmp_path / "workspaces")
+    workspace = manager.create()
+    manager.write_file(workspace, "src/main.py", b"before")
+    original = manager.fingerprint(workspace)
+    assert original == manager.fingerprint(workspace)
+    manager.write_file(workspace, "src/main.py", b"after")
+    changed_content = manager.fingerprint(workspace)
+    assert changed_content != original
+    manager.write_file(workspace, "src/renamed.py", b"after")
+    assert manager.fingerprint(workspace) != changed_content
+
+
 def test_workspace_rejects_symlink_traversal(tmp_path: Path) -> None:
     manager = WorkspaceManager(tmp_path / "workspaces")
     workspace = manager.create()

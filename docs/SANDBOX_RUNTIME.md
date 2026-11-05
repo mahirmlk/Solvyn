@@ -7,7 +7,8 @@ Solvyn has a one-shot Docker execution primitive exposed through tenant-scoped t
 - Creates UUID-named workspaces beneath one configured root.
 - Associates one workspace with a tenant-owned workflow task and accepts bounded UTF-8 file contents at creation.
 - Accepts verification kinds for test, build, lint, type checking, and security, with default Python argv profiles when a command override is omitted: pytest, compileall, Ruff, mypy, and Ruff's `S` security rules.
-- Persists command, status, exit code, bounded output, timeout/truncation flags, duration, and runner version against the task and execution.
+- Persists command, the pre-run workspace SHA-256 digest, status, exit code, bounded output, timeout/truncation flags, duration, and runner version against the task and execution.
+- Compares completed results for the same task, workspace, kind, and command, and reports baseline, regression, recovery, unchanged, or inconclusive status with whether the workspace digest changed. Overlapping runs and checks after interrupted runs are inconclusive.
 - Rejects absolute paths, traversal, symlinks, oversized files, and oversized workspaces in filesystem operations.
 - Runs an argv command in a fresh container from a locally built, fixed image. The caller cannot select an image or pass environment variables.
 - Uses no network, a read-only container root, a non-root UID, dropped Linux capabilities, `no-new-privileges`, CPU, memory, PID, tmpfs, command-time, output, and workspace-size limits.
@@ -18,7 +19,7 @@ Solvyn has a one-shot Docker execution primitive exposed through tenant-scoped t
 
 Container isolation depends on a correctly configured Docker Engine and host kernel. The control-plane process still needs Docker Engine access to create containers; do not grant that access to an untrusted teammate or mount the engine socket into the sandbox container. Use a dedicated, trusted runtime host for deployments where the API host should not hold daemon access.
 
-The runtime does not clone repositories, enforce teammate-level permissions, request approvals for verification, or install project dependencies. The default profiles target Python workspaces; callers can provide another argv command for other toolchains if they are present in the image or workspace. These profiles are basic checks, not acceptance criteria or baseline regression comparisons. The runtime does not provide a shell API. Commands are passed as argument vectors directly to the isolated container process. Network access is disabled, so dependencies must already be present in the sandbox image or workspace. Build the image with the command below and configure `SANDBOX_IMAGE` and `SANDBOX_WORKSPACE_ROOT` for the API process.
+The runtime does not clone repositories, enforce teammate-level permissions, request approvals for verification, or install project dependencies. The default profiles target Python workspaces; callers can provide another argv command for other toolchains if they are present in the image or workspace. These profiles are basic checks, not acceptance criteria. Regression results compare outcomes by task, workspace, kind, and command; they do not imply semantic equivalence across different source digests. The runtime does not provide a shell API. Commands are passed as argument vectors directly to the isolated container process. Network access is disabled, so dependencies must already be present in the sandbox image or workspace. Build the image with the command below and configure `SANDBOX_IMAGE` and `SANDBOX_WORKSPACE_ROOT` for the API process.
 
 ## Build and verify locally
 
