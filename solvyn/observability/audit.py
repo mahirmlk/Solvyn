@@ -85,7 +85,7 @@ class AuditLogger:
                 query = query.where(Memory.agent_type == agent_type)
             if session_id:
                 query = query.where(Memory.session_id == _to_uuid(session_id))
-            entries = []
+            entries: list[dict[str, Any]] = []
             page_size = max(limit, 1)
             offset = 0
             while len(entries) < limit:
