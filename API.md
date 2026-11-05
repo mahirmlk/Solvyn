@@ -585,7 +585,7 @@ curl -H "X-API-Key: your-api-key" \
 
 These endpoints require a user JWT in `Authorization: Bearer <access-token>` and membership in the organization that owns the project. Tenant API keys alone cannot connect or inspect repositories.
 
-The GitHub provider currently supports public repositories. Inspection is read-only: it does not clone repositories, execute repository code, or change remote branches. Repository text and metadata are untrusted input.
+Repository inspection supports public repositories. Solvyn can write through a connected organization token using bounded branch and commit operations. Repository text and metadata remain untrusted input.
 
 ### `GET /api/v1/organizations/{organization_id}/integrations/github`
 
@@ -625,13 +625,38 @@ Search file paths case-insensitively. This endpoint searches paths only; it does
 
 List up to the first 100 branches and their commit SHAs. When `possibly_truncated` is true, the repository has at least 100 branches and the response may omit later branches.
 
+### `POST /api/v1/repositories/{repository_id}/branches`
+
+Create a `solvyn/...` work branch from the repository default branch or a selected source branch. Requires an organization owner/admin and a connected GitHub token.
+
+```json
+{ "branch_name": "solvyn/task-123", "from_branch": "main" }
+```
+
+### `POST /api/v1/repositories/{repository_id}/commits`
+
+Create one commit containing up to 50 UTF-8 text files (500 KB total) on a `solvyn/...` branch. The request must include the expected current branch head; stale heads return `409`. The API rejects duplicate paths, traversal paths, and `.git` paths. Requires owner/admin access and a connected GitHub token.
+
+```json
+{
+  "branch": "solvyn/task-123",
+  "expected_head_sha": "current-branch-head-sha",
+  "message": "Add the requested feature",
+  "files": [{ "path": "src/feature.py", "content": "print('hello')\n" }]
+}
+```
+
+### `POST /api/v1/repositories/{repository_id}/pull-requests`
+
+Open a draft pull request from a `solvyn/...` branch to the repository default branch. Solvyn does not mark PRs ready for review or merge them; human review remains in GitHub.
+
 ### `GET /api/v1/repositories/{repository_id}/pull-requests?state=open&limit=50&page=1`
 
 Fetch a live, paginated public GitHub pull request snapshot. `state` accepts `open`, `closed`, or `all`; `limit` is 1–100 and `page` is 1–100. The response is a point-in-time snapshot and does not persist GitHub records locally.
 
 ### `GET /api/v1/repositories/{repository_id}/pull-requests/{number}`
 
-Inspect pull request metadata, the latest review decision per reviewer, requested reviewers, and a bounded unified diff (maximum 1 MB). The review summary scans up to 1,100 reviews and probes the next page; `history_truncated` is true and `state` is `incomplete_history` only when that probe finds additional reviews. Diff and metadata fields are marked `untrusted_repository_data`. These routes do not create, modify, approve, or merge pull requests.
+Inspect pull request metadata, the latest review decision per reviewer, requested reviewers, and a bounded unified diff (maximum 1 MB). The review summary scans up to 1,100 reviews and probes the next page; `history_truncated` is true and `state` is `incomplete_history` only when that probe finds additional reviews. Diff and metadata fields are marked `untrusted_repository_data`. Pull requests created by Solvyn remain drafts for human review; Solvyn does not merge them.
 
 GitHub 404 responses map to not found, rate limits to 429, and provider/network failures to 502 or 504. Large or truncated trees return 413.
 
