@@ -6,8 +6,8 @@ Revises: 0014_maintenance_schedules
 
 from __future__ import annotations
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
 
 revision: str = "0015_task_workspace_repository_source"
