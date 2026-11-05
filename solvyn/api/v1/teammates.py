@@ -1,9 +1,8 @@
-"""Persistent AI teammates (teammate_profiles).
+"""Persistent AI teammate profiles and assigned-project runtime endpoint.
 
-Teammates are durable entities with a role, responsibilities, system
-instructions, model overrides, and explicit least-privilege grants.
-Tool permissions are enforced by the tool gateway at execution time —
-never by system prompts alone (see Phase 3 sandbox-execution).
+The current teammate run path only invokes an LLM-backed registered agent.
+Teammate permissions are loaded as runtime context, but tool dispatch is not
+available through this endpoint until permission-enforced dispatch is wired.
 """
 
 from __future__ import annotations
@@ -16,7 +15,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from solvyn.api.v1._rbac import ANY_ROLE, OWNER_ADMIN, require_org_membership, require_tenant
+from solvyn.agents.teammate_runtime import (
+    ROLE_AGENT_TYPES,
+    TeammateRunConflictError,
+    TeammateRunDeniedError,
+    run_teammate,
+    validate_role_agent_type,
+)
+from solvyn.api.v1._rbac import ANY_ROLE, MEMBER_OR_ABOVE, OWNER_ADMIN, require_org_membership, require_tenant
 from solvyn.db.models import (
     PermissionLevel,
     Project,
@@ -24,6 +30,7 @@ from solvyn.db.models import (
     TeammatePermission,
     TeammateProfile,
     TeammateProjectAssignment,
+    TeammateStatus,
 )
 from solvyn.db.session import get_session
 from solvyn.multi_tenant.middleware import tenant_context
@@ -86,11 +93,11 @@ class TeammateCreate(BaseModel):
     description: str = ""
     responsibilities: str = ""
     system_instructions: str = ""
-    agent_type: str = Field(default="backend-engineer", max_length=100)
+    agent_type: str | None = Field(default=None, max_length=100)
     model_provider: str | None = None
     model_name: str | None = None
-    max_tokens_per_run: int | None = Field(default=None, ge=1)
-    max_run_seconds: int | None = Field(default=None, ge=1)
+    max_tokens_per_run: int | None = Field(default=None, ge=1, le=16_000)
+    max_run_seconds: int | None = Field(default=None, ge=1, le=900)
     permissions: list[str] | None = None
     project_ids: list[uuid.UUID] | None = None
 
@@ -103,10 +110,15 @@ class TeammateUpdate(BaseModel):
     is_enabled: bool | None = None
     model_provider: str | None = None
     model_name: str | None = None
-    max_tokens_per_run: int | None = None
-    max_run_seconds: int | None = None
+    max_tokens_per_run: int | None = Field(default=None, ge=1, le=16_000)
+    max_run_seconds: int | None = Field(default=None, ge=1, le=900)
     permissions: list[str] | None = None
     project_ids: list[uuid.UUID] | None = None
+
+
+class TeammateRun(BaseModel):
+    project_id: uuid.UUID
+    input_data: dict[str, object] = Field(default_factory=dict)
 
 
 @router.get("/organizations/{org_id}/teammates", summary="List teammates in an organization")
@@ -122,6 +134,14 @@ async def create_teammate(payload: TeammateCreate, db: AsyncSession = Depends(ge
     tenant_id = require_tenant()
     await require_org_membership(db, payload.organization_id, roles=OWNER_ADMIN)
     org_id = payload.organization_id
+
+    agent_type = payload.agent_type or ROLE_AGENT_TYPES.get(payload.role)
+    if agent_type is None:
+        raise HTTPException(status_code=400, detail=f"Unsupported teammate role: {payload.role}")
+    try:
+        validate_role_agent_type(payload.role, agent_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     duplicate = (
         await db.execute(
@@ -152,7 +172,7 @@ async def create_teammate(payload: TeammateCreate, db: AsyncSession = Depends(ge
         description=payload.description,
         responsibilities=payload.responsibilities,
         system_instructions=payload.system_instructions,
-        agent_type=payload.agent_type,
+        agent_type=agent_type,
         model_provider=payload.model_provider,
         model_name=payload.model_name,
         max_tokens_per_run=payload.max_tokens_per_run,
@@ -203,6 +223,10 @@ async def update_teammate(teammate_id: uuid.UUID, payload: TeammateUpdate, db: A
     for field_name, value in data.items():
         if value is not None:
             setattr(teammate, field_name, value)
+    if payload.is_enabled is True and teammate.status == TeammateStatus.DISABLED:
+        teammate.status = TeammateStatus.IDLE
+    elif payload.is_enabled is False and teammate.status != TeammateStatus.BUSY:
+        teammate.status = TeammateStatus.DISABLED
     if payload.permissions is not None:
         existing_permissions = (await db.execute(select(TeammatePermission).where(TeammatePermission.teammate_id == teammate_id))).scalars().all()
         for permission_row in existing_permissions:
@@ -227,9 +251,41 @@ async def disable_teammate(teammate_id: uuid.UUID, db: AsyncSession = Depends(ge
     teammate = await _load_teammate(db, teammate_id, tenant_id)
     await require_org_membership(db, teammate.organization_id, roles=OWNER_ADMIN)
     teammate.is_enabled = False
+    if teammate.status != TeammateStatus.BUSY:
+        teammate.status = TeammateStatus.DISABLED
     db.add(teammate)
     await db.commit()
     return {"ok": True, "teammate_id": str(teammate_id), "is_enabled": False}
+
+
+@router.post("/teammates/{teammate_id}/run", summary="Run a teammate on an assigned project")
+async def execute_teammate(
+    teammate_id: uuid.UUID,
+    payload: TeammateRun,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    tenant_id = require_tenant()
+    teammate = await _load_teammate(db, teammate_id, tenant_id)
+    await require_org_membership(db, teammate.organization_id, roles=MEMBER_OR_ABOVE)
+    try:
+        output = await run_teammate(
+            db,
+            teammate,
+            tenant_id=tenant_id,
+            project_id=payload.project_id,
+            input_data=payload.input_data,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except TeammateRunDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TeammateRunConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="Teammate run exceeded its time limit") from exc
+    return {"teammate_id": str(teammate_id), "project_id": str(payload.project_id), "output": output}
 
 
 # ---------------------------------------------------------------------------
