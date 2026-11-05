@@ -289,14 +289,18 @@ async def list_workflow_execution_tasks(
     task_ids = [task.id for task in tasks]
     dependencies: list[TaskDependency] = []
     if task_ids:
-        dependencies = (
-            await db.execute(
-                select(TaskDependency).where(
-                    TaskDependency.tenant_id == tenant_id,
-                    TaskDependency.task_id.in_(task_ids),
+        dependencies = list(
+            (
+                await db.execute(
+                    select(TaskDependency).where(
+                        TaskDependency.tenant_id == tenant_id,
+                        TaskDependency.task_id.in_(task_ids),
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     depends_on: dict[uuid.UUID, list[str]] = {}
     for dependency in dependencies:
         depends_on.setdefault(dependency.task_id, []).append(str(dependency.depends_on_task_id))
