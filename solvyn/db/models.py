@@ -518,6 +518,31 @@ class IntegrationCredential(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class ProactiveEvent(Base):
+    """Verified external engineering signals queued for human triage."""
+
+    __tablename__ = "proactive_events"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "project_id", "delivery_id", name="uq_proactive_events_project_delivery"),
+        UniqueConstraint("organization_id", "project_id", "source_event_id", name="uq_proactive_events_project_source_event"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False, index=True)
+    delivery_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_event_id: Mapped[str] = mapped_column(String(320), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    action: Mapped[str] = mapped_column(String(100), nullable=False)
+    repository_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    workflow_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    conclusion: Mapped[str] = mapped_column(String(50), nullable=False)
+    branch: Mapped[str] = mapped_column(String(255), default="")
+    details_url: Mapped[str] = mapped_column(String(512), default="")
+    status: Mapped[str] = mapped_column(String(50), default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Repository(Base):
     """A connected git repository; tokens live in encrypted integration storage."""
 

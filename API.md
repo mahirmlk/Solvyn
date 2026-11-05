@@ -660,6 +660,18 @@ Inspect pull request metadata, the latest review decision per reviewer, requeste
 
 GitHub 404 responses map to not found, rate limits to 429, and provider/network failures to 502 or 504. Large or truncated trees return 413.
 
+### `POST /api/v1/webhooks/github`
+
+Configure `GITHUB_WEBHOOK_SECRET` and subscribe GitHub to `workflow_run`. Solvyn verifies `X-Hub-Signature-256`, requires a UUID delivery ID, caps payloads at 256 KB, and records only completed failed workflow runs for repositories linked to active projects. Duplicate delivery UUIDs and repeated workflow run attempts are deduplicated. Verified events appear in the organization's proactive-event inbox; this initial trigger queues human triage and does not start an agent workflow automatically.
+
+### `GET /api/v1/organizations/{organization_id}/proactive-events?limit=50`
+
+List verified CI failure events for organization members. Event details are untrusted GitHub data.
+
+### `POST /api/v1/organizations/{organization_id}/proactive-events/{event_id}/acknowledge`
+
+Mark a proactive event acknowledged. Requires an organization owner or admin.
+
 ---
 
 ## Observability

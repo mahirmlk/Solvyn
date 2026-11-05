@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     bootstrap_token: str = ""
     # Comma-separated Fernet keys; first key encrypts new credentials and all listed keys can decrypt.
     integration_encryption_keys: str = ""
+    github_webhook_secret: str = ""
     # Local dev only: allows booting without real secrets.
     # Must remain False in any networked deployment.
     allow_insecure_dev: bool = False
