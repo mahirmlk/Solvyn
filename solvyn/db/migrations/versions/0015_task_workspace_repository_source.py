@@ -1,6 +1,6 @@
 """Record the public repository revision seeded into task workspaces.
 
-Revision ID: 0015_task_workspace_repository_source
+Revision ID: 0015_task_ws_repo_source
 Revises: 0014_maintenance_schedules
 """
 
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
 
-revision: str = "0015_task_workspace_repository_source"
+revision: str = "0015_task_ws_repo_source"
 down_revision: str | None = "0014_maintenance_schedules"
 branch_labels: str | None = None
 depends_on: str | None = None
