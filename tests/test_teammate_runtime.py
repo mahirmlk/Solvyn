@@ -38,13 +38,37 @@ def test_project_context_includes_only_given_project_and_is_bounded() -> None:
         instructions="Keep migrations backward compatible",
     )
     knowledge = [SimpleNamespace(category="convention", key="language", value="Python")]
+    memory = [SimpleNamespace(key="database", value="Use Postgres")]
 
-    context = build_teammate_system_context(profile, project, knowledge, ["READ_ONLY"])
+    context = build_teammate_system_context(profile, project, knowledge, ["READ_ONLY"], memory)
     assert "Billing (billing)" in context
     assert "Keep migrations backward compatible" in context
     assert "[convention] language: Python" in context
+    assert "database: Use Postgres" in context
     assert "READ_ONLY" in context
     assert len(context) <= _MAX_CONTEXT_CHARS
+
+
+def test_teammate_memory_is_unique_per_project_and_key() -> None:
+    from solvyn.db.models import TeammateMemory
+
+    table = TeammateMemory.__table__
+    scope_constraints = [
+        constraint
+        for constraint in table.constraints
+        if getattr(constraint, "name", None) == "uq_teammate_memory_scope_key"
+    ]
+    assert len(scope_constraints) == 1
+    assert [column.name for column in scope_constraints[0].columns] == ["teammate_id", "project_id", "key"]
+
+
+def test_secret_screen_returns_pattern_label_without_secret_contents() -> None:
+    from solvyn.api.v1.teammates import _looks_like_secret
+
+    secret = "api_key=sk-123456789012345678901234"
+    match = _looks_like_secret(secret)
+    assert match == "credential assignment pattern"
+    assert secret not in match
 
 
 @pytest.mark.asyncio

@@ -458,6 +458,24 @@ class TeammateProjectAssignment(Base):
     teammate: Mapped["TeammateProfile"] = relationship(back_populates="project_assignments")
 
 
+class TeammateMemory(Base):
+    """Durable notes scoped to one teammate and one assigned project."""
+
+    __tablename__ = "teammate_memory"
+    __table_args__ = (
+        UniqueConstraint("teammate_id", "project_id", "key", name="uq_teammate_memory_scope_key"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    teammate_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("teammate_profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    key: Mapped[str] = mapped_column(String(255), nullable=False)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class ProjectKnowledge(Base):
     """Validated, scoped engineering knowledge. Never stores secrets.
 
