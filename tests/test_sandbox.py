@@ -129,7 +129,7 @@ async def test_runner_times_out_and_still_cleans_up(tmp_path: Path) -> None:
     calls = [json.loads(line) for line in calls_file.read_text().splitlines()]
     assert result.timed_out is True
     assert result.exit_code is None
-    assert any(call[1] == "kill" for call in calls)
+    assert any(call[0] == "kill" for call in calls)
     assert calls[-1][:2] == ["rm", "--force"]
 
 
