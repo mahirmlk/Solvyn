@@ -13,7 +13,16 @@ from solvyn.multi_tenant.middleware import tenant_context
 
 
 @pytest.fixture(autouse=True)
-def test_settings() -> Generator[Settings, None, None]:
+def test_settings(monkeypatch) -> Generator[Settings, None, None]:
+    """Ensure Settings() can be constructed in tests.
+
+    Production Settings now fail fast when API_KEY_SECRET / JWT_SECRET are
+    missing (P0-002). Tests set harmless dummy values via monkeypatch so the
+    module-level `settings = Settings()` never raises.
+    """
+    monkeypatch.setenv("ALLOW_INSECURE_DEV", "true")
+    monkeypatch.setenv("API_KEY_SECRET", "test-api-key-secret")
+    monkeypatch.setenv("JWT_SECRET", "test-jwt-secret")
     with patch("solvyn.config.settings") as mock:
         mock.database_url = "sqlite+aiosqlite:///:memory:"
         mock.redis_url = "redis://localhost:6379/0"
@@ -28,6 +37,14 @@ def test_settings() -> Generator[Settings, None, None]:
         mock.log_level = "DEBUG"
         mock.json_logging = False
         mock.api_key_secret = "change-me-to-a-random-secret"
+        mock.jwt_secret = "test-jwt-secret"
+        mock.jwt_algorithm = "HS256"
+        mock.access_token_ttl_minutes = 15
+        mock.refresh_token_ttl_days = 30
+        mock.allow_insecure_dev = False
+        mock.db_pool_size = 20
+        mock.db_max_overflow = 10
+        mock.db_pool_recycle_seconds = 1800
         mock.rate_limit_per_ip = 100
         mock.rate_limit_per_tenant = 500
         mock.rate_limit_window = 60

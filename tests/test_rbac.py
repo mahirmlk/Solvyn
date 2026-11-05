@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,7 +9,6 @@ import pytest
 
 from solvyn.db.models import TenantRole
 from solvyn.multi_tenant.middleware import TenantContext, tenant_context
-
 
 # ---------------------------------------------------------------------------
 # TenantContext
@@ -69,7 +67,7 @@ def test_verify_api_key_with_plaintext() -> None:
 
 @pytest.mark.asyncio
 async def test_validate_tenant_api_key_matches() -> None:
-    """Should return the tenant when API key matches."""
+    """Should return the tenant when API key matches (indexed lookup)."""
     from solvyn.multi_tenant.auth import _validate_tenant_api_key
 
     api_key = "tenant-secret-123"
@@ -83,7 +81,7 @@ async def test_validate_tenant_api_key_matches() -> None:
     mock_tenant.role = TenantRole.USER
 
     mock_result = MagicMock()
-    mock_result.scalars.return_value.all.return_value = [mock_tenant]
+    mock_result.scalar_one_or_none.return_value = mock_tenant
 
     mock_session = AsyncMock()
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
@@ -102,7 +100,7 @@ async def test_validate_tenant_api_key_no_match() -> None:
     from solvyn.multi_tenant.auth import _validate_tenant_api_key
 
     mock_result = MagicMock()
-    mock_result.scalars.return_value.all.return_value = []
+    mock_result.scalar_one_or_none.return_value = None
 
     mock_session = AsyncMock()
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
@@ -111,6 +109,30 @@ async def test_validate_tenant_api_key_no_match() -> None:
 
     with patch("solvyn.multi_tenant.auth.async_session_factory", return_value=mock_session):
         result = await _validate_tenant_api_key("wrong-key")
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_validate_tenant_api_key_binds_to_header_tenant() -> None:
+    """A valid key from a *different* tenant must be rejected (P0-003)."""
+    from solvyn.multi_tenant.auth import _validate_tenant_api_key
+
+    api_key = "attacker-key"
+    other_tenant_id = uuid.uuid4()
+
+    mock_result = MagicMock()
+    # Tenant lookup by the header-supplied id returns a tenant whose
+    # api_key_hash does NOT match, and the api_keys fallback is also empty.
+    mock_result.scalar_one_or_none.return_value = None
+
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=None)
+    mock_session.execute.return_value = mock_result
+
+    with patch("solvyn.multi_tenant.auth.async_session_factory", return_value=mock_session):
+        result = await _validate_tenant_api_key(api_key, expected_tenant_id=other_tenant_id)
 
     assert result is None
 
@@ -124,7 +146,7 @@ async def test_require_role_passes_for_allowed_role() -> None:
     """Should not raise when tenant has an allowed role."""
     from solvyn.multi_tenant.auth import RequireRole
 
-    tenant_context.set(uuid.uuid4(), "test", TenantRole.ADMIN)
+    tenant_context.authenticate(uuid.uuid4(), "test", TenantRole.ADMIN)
     dep = RequireRole(TenantRole.ADMIN, TenantRole.USER)
 
     mock_request = MagicMock()
@@ -137,9 +159,10 @@ async def test_require_role_passes_for_allowed_role() -> None:
 async def test_require_role_fails_for_disallowed_role() -> None:
     """Should raise 403 when tenant role is not allowed."""
     from fastapi import HTTPException
+
     from solvyn.multi_tenant.auth import RequireRole
 
-    tenant_context.set(uuid.uuid4(), "test", TenantRole.VIEWER)
+    tenant_context.authenticate(uuid.uuid4(), "test", TenantRole.VIEWER)
     dep = RequireRole(TenantRole.ADMIN)
 
     mock_request = MagicMock()
@@ -151,8 +174,9 @@ async def test_require_role_fails_for_disallowed_role() -> None:
 
 @pytest.mark.asyncio
 async def test_require_role_fails_without_tenant() -> None:
-    """Should raise 403 when no tenant context exists."""
+    """Should raise 401 when unauthenticated (P0-003: credential, not header)."""
     from fastapi import HTTPException
+
     from solvyn.multi_tenant.auth import RequireRole
 
     tenant_context.clear()
@@ -161,7 +185,24 @@ async def test_require_role_fails_without_tenant() -> None:
     mock_request = MagicMock()
     with pytest.raises(HTTPException) as exc_info:
         await dep(mock_request)
-    assert exc_info.value.status_code == 403
+    assert exc_info.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_shared_secret_auth_does_not_create_admin_scope() -> None:
+    """The legacy shared key is authenticated without tenant admin rights."""
+    from fastapi import HTTPException
+
+    from solvyn.multi_tenant.auth import RequireRole
+
+    tenant_context.clear()
+    tenant_context.authenticate_shared_secret(TenantRole.USER)
+    assert tenant_context.is_authenticated is True
+    assert tenant_context.tenant_id is None
+    with pytest.raises(HTTPException) as exc:
+        await RequireRole(TenantRole.ADMIN)(MagicMock())
+    assert exc.value.status_code == 401
+    tenant_context.clear()
 
 
 # ---------------------------------------------------------------------------

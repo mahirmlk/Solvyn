@@ -8,11 +8,10 @@ to provision tenants, rotate API keys, and inspect cross-tenant usage.
 from __future__ import annotations
 
 import hashlib
-import hmac
 import secrets
 import uuid
 from datetime import UTC, datetime
-from typing import Any, TypedDict, cast
+from typing import Any, TypedDict
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -22,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.db.models import ApiKey, Tenant, TenantRole, TokenUsage
 from solvyn.db.models import Session as SessionModel
-from solvyn.db.session import async_session_factory, get_session
+from solvyn.db.session import get_session
 from solvyn.multi_tenant.auth import RequireRole
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -538,17 +537,10 @@ async def authenticate_admin_request(api_key: str) -> bool:
     """
     if not api_key:
         return False
-    key_hash = hashlib.sha256(api_key.encode()).hexdigest()
-    async with async_session_factory() as session:
-        result = await session.execute(
-            select(Tenant).where(Tenant.is_active == True)  # noqa: E712
-        )
-        for tenant in result.scalars().all():
-            stored_hash = str(tenant.api_key_hash or "").lower()
-            if hmac.compare_digest(key_hash, stored_hash):
-                role_value = cast("str", tenant.role)
-                return bool(role_value == TenantRole.ADMIN)
-    return False
+    from solvyn.multi_tenant.auth import _validate_tenant_api_key
+
+    tenant = await _validate_tenant_api_key(api_key)
+    return tenant is not None and str(tenant.role) == TenantRole.ADMIN
 
 
 # Re-export status for the convenience of downstream tests.

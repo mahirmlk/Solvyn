@@ -2,9 +2,9 @@ import logging
 import uuid
 from typing import Any
 
+from solvyn.a2a.protocol import A2AEnvelope, TaskRequest
 from solvyn.agents.base import BaseAgent
 from solvyn.agents.schema import AgentMessage
-from solvyn.a2a.protocol import A2AEnvelope, A2AMessageType, TaskRequest, TaskResponse, TaskStatus
 from solvyn.message_bus.redis import message_bus
 
 logger = logging.getLogger(__name__)

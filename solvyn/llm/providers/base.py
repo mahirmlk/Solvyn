@@ -23,4 +23,8 @@ class LLMProvider(ABC):
     async def generate(self, prompt: str, system_prompt: str | None = None, model: str | None = None, **kwargs: Any) -> LLMResponse: ...
 
     @abstractmethod
+    async def close(self) -> None:
+        """Release underlying HTTP clients (providers create them in __init__)."""
+
+    @abstractmethod
     def get_cost_per_token(self, model: str) -> tuple[float, float]: ...

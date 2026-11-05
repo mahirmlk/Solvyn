@@ -11,7 +11,7 @@
     ║    ███████║ ╚██████╔╝ ███████╗  ╚████╔╝      ██║     ██║ ╚████║  ║
     ║    ╚══════╝  ╚═════╝  ╚══════╝   ╚═══╝       ╚═╝     ╚═╝  ╚═══╝  ║
     ║                                                                  ║
-    ║            AI Operating Center for Engineering Teams             ║
+    ║            Your self-hosted AI engineering team                   ║
     ╚══════════════════════════════════════════════════════════════════╝
 ```
 
@@ -36,7 +36,7 @@
 
 ## Overview
 
-**Solvyn** is an autonomous engineering workspace where 9 specialized AI agents collaborate like a real software company. It converts product requirements into architecture, generates tasks, writes and reviews code, creates tests, runs CI/CD, deploys, and monitors — all orchestrated through a DAG-based workflow engine.
+**Solvyn** is your self-hosted AI engineering team. It gives developers a persistent team of specialized AI workers — Tech Lead, Software Engineer, QA Engineer, and Security Engineer — that understand real projects, execute engineering work in isolated environments, verify it before delivery, and maintain project knowledge over time.
 
 ### Why Solvyn Stands Out
 

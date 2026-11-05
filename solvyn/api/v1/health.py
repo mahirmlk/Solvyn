@@ -24,7 +24,7 @@ router = APIRouter(tags=["health"])
 
 # Health probes are public, so we do not document the standard 401/403/422
 # responses. We do declare 503 because the deep probe may return it.
-HEALTH_RESPONSES: dict[int | str, dict] = {
+HEALTH_RESPONSES: dict[int | str, dict[str, Any]] = {
     503: {
         "description": "One or more critical dependencies (database, Redis) are unhealthy.",
         "content": {
@@ -94,8 +94,8 @@ async def deep_health_check() -> JSONResponse:
 
     # Redis check
     try:
-        if message_bus.redis:
-            await message_bus.redis.ping()  # type: ignore[misc]
+        if message_bus.redis is not None:
+            await message_bus.redis.ping()
             checks["redis"] = {"status": "ok"}
         else:
             checks["redis"] = {"status": "disconnected"}

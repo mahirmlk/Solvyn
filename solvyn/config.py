@@ -1,3 +1,4 @@
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,6 +24,22 @@ class Settings(BaseSettings):
     api_key_secret: str = ""
     allowed_origins: list[str] = ["http://localhost:3000"]
 
+    # --- Auth / identity ---
+    jwt_secret: str = ""
+    jwt_algorithm: str = "HS256"
+    access_token_ttl_minutes: int = 15
+    refresh_token_ttl_days: int = 30
+    allow_public_registration: bool = False
+    bootstrap_token: str = ""
+    # Local dev only: allows booting without real secrets.
+    # Must remain False in any networked deployment.
+    allow_insecure_dev: bool = False
+
+    # --- DB pool tuning (Phase 0 audit: connection-storm crash risk) ---
+    db_pool_size: int = 20
+    db_max_overflow: int = 10
+    db_pool_recycle_seconds: int = 1800
+
     rate_limit_per_ip: int = 100
     rate_limit_per_tenant: int = 500
     rate_limit_window: int = 60
@@ -42,14 +59,40 @@ class Settings(BaseSettings):
     langfuse_secret_key: str = ""
     langfuse_host: str = "https://cloud.langfuse.com"
 
+    @model_validator(mode="after")
+    def _require_secrets_in_prod(self) -> "Settings":
+        """Fail fast in production when auth secrets are missing (P0-002).
+
+        Imports of this module happen during pytest collection before any
+        fixture runs, so the check is *deferred*: `Settings()` never raises
+        on import. `enforce_prod_secrets()` — called from the FastAPI
+        lifespan in `main.py` — raises `RuntimeError` at boot time when the
+        server starts without secrets and ALLOW_INSECURE_DEV is false.
+        Unit tests construct `Settings(api_key_secret=..., ...)` directly so
+        they opt out of the import-time default via explicit arguments.
+        """
+        return self
+
 
 settings = Settings()
 
-if not settings.api_key_secret:
-    import logging
 
-    logging.getLogger(__name__).critical(
-        "SECURITY: API_KEY_SECRET environment variable is not set. "
-        "The server will start but authentication will reject all requests. "
-        "Set a strong, random secret via the API_KEY_SECRET environment variable."
-    )
+def enforce_prod_secrets() -> None:
+    """Raise at server boot if secrets are absent (P0-002).
+
+    Call this from the FastAPI lifespan before accepting traffic. Tests that
+    do not exercise the lifespan are unaffected.
+    """
+    if settings.allow_insecure_dev:
+        return
+    missing = []
+    if not settings.api_key_secret:
+        missing.append("API_KEY_SECRET")
+    if not settings.jwt_secret:
+        missing.append("JWT_SECRET")
+    if missing:
+        raise RuntimeError(
+            f"Refusing to start: missing required secrets {', '.join(missing)}. "
+            "Set them in the environment, or set ALLOW_INSECURE_DEV=true only "
+            "for local development."
+        )

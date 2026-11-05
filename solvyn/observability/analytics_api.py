@@ -223,11 +223,10 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, session_id: s
         await websocket.close(code=4001, reason="Unauthorized")
         return
 
-    # Validate API key and tenant ownership
+    # Validate API key and tenant ownership (key must belong to the URL tenant)
     from solvyn.multi_tenant.auth import _validate_tenant_api_key
     if tenant_context.tenant_id is not None:
-        # Per-tenant mode: validate key matches the tenant in the URL
-        tenant = await _validate_tenant_api_key(api_key)
+        tenant = await _validate_tenant_api_key(api_key, expected_tenant_id=tenant_context.tenant_id)
         if tenant is None or str(tenant.id) != tenant_id:
             await websocket.close(code=4001, reason="Unauthorized")
             return

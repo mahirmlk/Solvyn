@@ -1,4 +1,7 @@
-"""Solvyn — AI Operating Center for Engineering Teams.
+"""Solvyn — your self-hosted AI engineering team.
+
+The AI Operating Center is the internal ops/monitoring layer; the primary
+product experience is an engineering-teammates workspace.
 
 This module wires the FastAPI application together: it registers routers,
 configures middleware (CORS, auth, tenant resolution, rate limiting, metrics,
@@ -11,6 +14,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,8 +22,13 @@ from fastapi.openapi.utils import get_openapi
 from prometheus_client import make_asgi_app
 
 from solvyn.api.v1 import health, sessions, workflows
+from solvyn.api.v1.admin import router as admin_router
+from solvyn.api.v1.approvals import router as approvals_router
+from solvyn.api.v1.auth import router as auth_router
+from solvyn.api.v1.organizations import router as organizations_router
+from solvyn.api.v1.teammates import router as teammates_router
 from solvyn.api_metadata import API_DESCRIPTION, TAGS_METADATA
-from solvyn.config import settings
+from solvyn.config import enforce_prod_secrets, settings
 from solvyn.logging_config import setup_logging
 from solvyn.message_bus.redis import message_bus
 from solvyn.multi_tenant.auth import RateLimitMiddleware, auth_middleware
@@ -41,6 +50,12 @@ init_opentelemetry(
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Startup
+    # P0-002: fail fast when auth secrets are absent (production).
+    try:
+        enforce_prod_secrets()
+    except RuntimeError as exc:
+        logger.critical("SECURITY: %s", exc)
+        raise
     await message_bus.connect()
     logger.info("Solvyn started")
     yield
@@ -78,7 +93,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    def _custom_openapi() -> dict:
+    def _custom_openapi() -> dict[str, Any]:
         """Generate a custom OpenAPI schema with security schemes pre-wired.
 
         FastAPI's auto-generated schema is fine for most projects, but Solvyn
@@ -150,6 +165,11 @@ def create_app() -> FastAPI:
     solvyn_app.include_router(sessions.router, prefix="/api/v1")
     solvyn_app.include_router(workflows.router, prefix="/api/v1")
     solvyn_app.include_router(observability_router, prefix="/api/v1")
+    solvyn_app.include_router(admin_router, prefix="/api/v1")
+    solvyn_app.include_router(auth_router, prefix="/api/v1")
+    solvyn_app.include_router(organizations_router, prefix="/api/v1")
+    solvyn_app.include_router(teammates_router, prefix="/api/v1")
+    solvyn_app.include_router(approvals_router, prefix="/api/v1")
 
     metrics_app = make_asgi_app()
     solvyn_app.mount("/metrics", metrics_app)
@@ -161,7 +181,12 @@ def create_app() -> FastAPI:
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-XSS-Protection"] = "1; mode=block"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'"
+        # P0-005: removed `unsafe-eval` (XSS amplifier). `unsafe-inline` kept
+        # only for style-src because the Next.js frontend injects inline
+        # styles; script-src is locked to self.
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'"
+        )
         if request.url.scheme == "https":
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response
