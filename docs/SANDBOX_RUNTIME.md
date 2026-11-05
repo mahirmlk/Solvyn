@@ -1,10 +1,13 @@
 # Sandbox Runtime — Phase 3 first slice
 
-Solvyn now has an internal, one-shot Docker execution primitive and a managed workspace API. It is not yet connected to teammate tools or exposed as a public endpoint. User and teammate permissions, approval requests, and durable run records must be wired in before agent access is enabled.
+Solvyn has a one-shot Docker execution primitive exposed through tenant-scoped task verification endpoints. Workspace records and bounded verification results are persisted. Teammates do not yet invoke verification automatically; a user or trusted caller can create a task workspace, add files, and submit an argv command for execution.
 
 ## Implemented
 
 - Creates UUID-named workspaces beneath one configured root.
+- Associates one workspace with a tenant-owned workflow task and accepts bounded UTF-8 file contents at creation.
+- Accepts verification kinds for test, build, lint, type checking, and security labels; the kind is metadata and does not infer a tool command.
+- Persists command, status, exit code, bounded output, timeout/truncation flags, duration, and runner version against the task and execution.
 - Rejects absolute paths, traversal, symlinks, oversized files, and oversized workspaces in filesystem operations.
 - Runs an argv command in a fresh container from a locally built, fixed image. The caller cannot select an image or pass environment variables.
 - Uses no network, a read-only container root, a non-root UID, dropped Linux capabilities, `no-new-privileges`, CPU, memory, PID, tmpfs, command-time, output, and workspace-size limits.
@@ -15,7 +18,7 @@ Solvyn now has an internal, one-shot Docker execution primitive and a managed wo
 
 Container isolation depends on a correctly configured Docker Engine and host kernel. The control-plane process still needs Docker Engine access to create containers; do not grant that access to an untrusted teammate or mount the engine socket into the sandbox container. Use a dedicated, trusted runtime host for deployments where the API host should not hold daemon access.
 
-The first slice does not clone repositories, persist workspace/run metadata, enforce project or teammate permissions, request approvals, install dependencies, or add test/build profiles. It does not provide a shell API. Callers pass argument vectors directly to the isolated container process. Network access is disabled, so dependencies must already be present in the sandbox image or workspace.
+The runtime does not clone repositories, enforce teammate-level permissions, request approvals for verification, install dependencies, or add test/build profiles. It does not provide a shell API. Callers pass argument vectors directly to the isolated container process. Network access is disabled, so dependencies must already be present in the sandbox image or workspace. Build the image with the command below and configure `SANDBOX_IMAGE` and `SANDBOX_WORKSPACE_ROOT` for the API process.
 
 ## Build and verify locally
 

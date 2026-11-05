@@ -133,6 +133,43 @@ class Task(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class TaskWorkspace(Base):
+    """Server-managed isolated source tree owned by one tenant task."""
+
+    __tablename__ = "task_workspaces"
+    __table_args__ = (UniqueConstraint("tenant_id", "task_id", name="uq_task_workspace_owner"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class VerificationRun(Base):
+    """Durable, bounded output from a deterministic sandbox verification command."""
+
+    __tablename__ = "verification_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    execution_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("execution_graphs.id", ondelete="CASCADE"), nullable=True, index=True)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("task_workspaces.id", ondelete="CASCADE"), nullable=False)
+    kind: Mapped[str] = mapped_column(String(30), nullable=False)
+    command: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="running", server_default="running")
+    exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    timed_out: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    output_truncated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    stdout: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default=text("''"))
+    stderr: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default=text("''"))
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_seconds: Mapped[float | None] = mapped_column(Numeric(10, 3), nullable=True)
+    runner_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class TaskDependency(Base):
     """Durable dependency edge between task records."""
 

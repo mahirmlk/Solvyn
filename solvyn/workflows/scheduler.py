@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
-from solvyn.db.models import ExecutionGraph, Session
+from solvyn.db.models import ExecutionGraph, Session, VerificationRun
 from solvyn.db.session import async_session_factory
 from solvyn.workflows.executor import workflow_executor
 
 logger = logging.getLogger(__name__)
 _POLL_INTERVAL_SECONDS = 5
 _BATCH_SIZE = 20
+_VERIFICATION_STALE_AFTER = timedelta(minutes=10)
 
 
 async def run_scheduled_workflows() -> None:
@@ -21,6 +23,19 @@ async def run_scheduled_workflows() -> None:
     while True:
         try:
             async with async_session_factory() as db:
+                await db.execute(
+                    update(VerificationRun)
+                    .where(
+                        VerificationRun.status == "running",
+                        VerificationRun.started_at < func.now() - _VERIFICATION_STALE_AFTER,
+                    )
+                    .values(
+                        status="interrupted",
+                        error="Worker stopped before persisting the verification result",
+                        completed_at=func.now(),
+                    )
+                )
+                await db.commit()
                 due = (
                     await db.execute(
                         select(ExecutionGraph.id, Session.tenant_id)

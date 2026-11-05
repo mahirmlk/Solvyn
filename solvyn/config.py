@@ -7,6 +7,8 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://solvyn:solvyn@localhost:5432/solvyn"
     redis_url: str = "redis://localhost:6379/0"
+    sandbox_workspace_root: str = ".solvyn/workspaces"
+    sandbox_image: str = "solvyn-sandbox:local"
 
     openrouter_api_key: str = ""
     groq_api_key: str = ""

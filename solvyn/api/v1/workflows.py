@@ -34,6 +34,7 @@ from solvyn.db.models import (
     TaskHandoff,
     TeammateProfile,
     TeammateProjectAssignment,
+    VerificationRun,
 )
 from solvyn.db.models import (
     ExecutionGraph as ExecutionGraphModel,
@@ -558,6 +559,7 @@ async def list_workflow_execution_tasks(
     )
     task_ids = [task.id for task in tasks]
     dependencies: list[TaskDependency] = []
+    verification_runs: list[VerificationRun] = []
     if task_ids:
         dependencies = list(
             (
@@ -566,6 +568,17 @@ async def list_workflow_execution_tasks(
                         TaskDependency.tenant_id == tenant_id,
                         TaskDependency.task_id.in_(task_ids),
                     )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        verification_runs = list(
+            (
+                await db.execute(
+                    select(VerificationRun)
+                    .where(VerificationRun.tenant_id == tenant_id, VerificationRun.task_id.in_(task_ids))
+                    .order_by(VerificationRun.started_at, VerificationRun.id)
                 )
             )
             .scalars()
@@ -598,6 +611,9 @@ async def list_workflow_execution_tasks(
     depends_on: dict[uuid.UUID, list[str]] = {}
     for dependency in dependencies:
         depends_on.setdefault(dependency.task_id, []).append(str(dependency.depends_on_task_id))
+    verification_by_task: dict[uuid.UUID, list[VerificationRun]] = {}
+    for run in verification_runs:
+        verification_by_task.setdefault(run.task_id, []).append(run)
 
     return {
         "execution_id": str(execution_id),
@@ -617,6 +633,20 @@ async def list_workflow_execution_tasks(
                 "scheduled_at": task.scheduled_at.isoformat() if task.scheduled_at else None,
                 "started_at": task.started_at.isoformat() if task.started_at else None,
                 "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+                "verification_runs": [
+                    {
+                        "id": str(run.id),
+                        "kind": run.kind,
+                        "status": run.status,
+                        "exit_code": run.exit_code,
+                        "timed_out": run.timed_out,
+                        "output_truncated": run.output_truncated,
+                        "runner_version": run.runner_version,
+                        "started_at": run.started_at.isoformat() if run.started_at else None,
+                        "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+                    }
+                    for run in verification_by_task.get(task.id, [])
+                ],
             }
             for task in tasks
         ],

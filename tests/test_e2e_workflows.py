@@ -200,6 +200,74 @@ async def test_schedule_rejects_a_naive_or_past_timestamp(client: AsyncClient) -
 
 
 @pytest.mark.asyncio
+async def test_task_verification_is_sandboxed_and_durable(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    from solvyn.config import settings
+    from solvyn.sandbox.runtime import DockerSandboxRunner, SandboxResult
+
+    monkeypatch.setattr(settings, "sandbox_workspace_root", str(tmp_path / "workspaces"))
+
+    workflow = await client.post("/api/v1/workflows/feature/run", json={"requirement": "Verify a generated feature"})
+    assert workflow.status_code == 200
+    execution_id = workflow.json()["execution_id"]
+    task_list = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
+    task_id = task_list.json()["tasks"][0]["task_id"]
+
+    workspace = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/workspace",
+        json={"files": {"test_sample.py": "def test_sample():\n    assert 1 + 1 == 2\n"}},
+    )
+    assert workspace.status_code == 201
+
+    async def fake_run(self: DockerSandboxRunner, managed_workspace: Any, command: list[str]) -> SandboxResult:
+        return SandboxResult(uuid.uuid4(), tuple(command), 0, False, "1 passed", "", False, 0.05)
+
+    monkeypatch.setattr(DockerSandboxRunner, "run", fake_run)
+    verification = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs",
+        json={"kind": "test", "command": ["pytest", "-q"]},
+    )
+    assert verification.status_code == 200
+    assert verification.json()["status"] == "passed"
+    assert verification.json()["stdout"] == "1 passed"
+
+    history = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
+    first_task = next(task for task in history.json()["tasks"] if task["task_id"] == task_id)
+    assert first_task["verification_runs"][0]["status"] == "passed"
+
+    async def late_result(self: DockerSandboxRunner, managed_workspace: Any, command: list[str]) -> SandboxResult:
+        from sqlalchemy import select
+
+        from solvyn.db.models import VerificationRun
+        from solvyn.db.session import async_session_factory
+
+        async with async_session_factory() as db:
+            run = (
+                await db.execute(
+                    select(VerificationRun)
+                    .where(VerificationRun.task_id == uuid.UUID(task_id), VerificationRun.status == "running")
+                    .order_by(VerificationRun.started_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one()
+            run.status = "interrupted"
+            run.error = "Worker stopped before persisting the verification result"
+            await db.commit()
+        return SandboxResult(uuid.uuid4(), tuple(command), 0, False, "late success", "", False, 0.05)
+
+    monkeypatch.setattr(DockerSandboxRunner, "run", late_result)
+    late = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs",
+        json={"kind": "test", "command": ["pytest", "-q"]},
+    )
+    assert late.status_code == 200
+    assert late.json()["status"] == "interrupted"
+
+
+@pytest.mark.asyncio
 async def test_feature_workflow_runs_to_completion(client: AsyncClient) -> None:
     """POST /workflows/feature/run completes synchronously with all 9 nodes."""
     response = await client.post(

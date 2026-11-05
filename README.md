@@ -393,6 +393,9 @@ Base URL: `http://localhost:8000/api/v1`
 | `POST` | `/workflows/{name}/schedule` | Required | Persist a workflow for execution at a future ISO-8601 timestamp |
 | `GET` | `/workflows/executions/{execution_id}` | Required | Read a tenant-scoped durable execution snapshot |
 | `GET` | `/workflows/executions/{execution_id}/tasks` | Required | Inspect durable workflow tasks, attempts, and dependency edges |
+| `POST` | `/workflows/executions/{execution_id}/tasks/{task_id}/workspace` | Required | Create a tenant-scoped managed workspace with UTF-8 files |
+| `POST` | `/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs` | Required | Run an argv command in the isolated sandbox and persist bounded evidence |
+| `GET` | `/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs` | Required | Read verification history for a task |
 | `POST` | `/workflows/executions/{execution_id}/tasks/{task_id}/handoffs` | Required | Delegate a task to a teammate assigned to a project |
 | `POST` | `/workflows/executions/{execution_id}/tasks/{task_id}/handoffs/{handoff_id}/resume` | Required | Retry a pending handoff or reclaim one with an expired worker lease |
 | `POST` | `/workflows/executions/{execution_id}/resume` | Required | Resume unfinished nodes after a worker lease expires |
@@ -405,6 +408,8 @@ Workflow snapshots are saved as nodes start and finish. Scheduled executions and
 Each workflow node also has a durable task record. The task endpoint exposes its assigned agent, dependency task IDs, execution status, attempt count, timestamps, inputs, outputs, and errors. Recovery attempts are currently uncapped; `max_attempts` is null until a retry budget is configured.
 
 Task handoffs require a caller-provided `idempotency_key`; repeating the same request reuses its durable child task instead of creating duplicate work. Each handoff records the source and target teammate, project, reason, input, output, and status. Delegation is limited to three levels and only runs teammates assigned to the requested project in the caller's tenant. Set `requires_approval` to `true` to persist a human approval checkpoint before the teammate runs. Organization owners or admins can approve or reject it through the approval inbox; an approved handoff is resumed through its task handoff resume route.
+
+Each workflow task can have one managed sandbox workspace populated with UTF-8 files. Verification runs accept an argv command and a kind (`test`, `build`, `lint`, `typecheck`, or `security`); commands run through the networkless, resource-limited Docker sandbox. Solvyn persists the command, status, exit code, timeout and truncation flags, bounded stdout/stderr, duration, and runner version, and exposes summaries in task history. The periodic recovery scan marks runs still in `running` after ten minutes as `interrupted`, and a late response cannot overwrite that terminal status. The kind labels the run; it does not infer or enforce a particular tool. Configure `SANDBOX_WORKSPACE_ROOT` and build the trusted image described in [the sandbox runtime guide](./docs/SANDBOX_RUNTIME.md). Agent-driven repository checkout and automatic verification profiles remain follow-up work.
 
 ### Observability
 
