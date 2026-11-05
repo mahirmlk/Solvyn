@@ -51,6 +51,8 @@ def test_settings(monkeypatch) -> Generator[Settings, None, None]:
         mock.allowed_origins = ["http://localhost:3000"]
         mock.sandbox_workspace_root = ".solvyn/test-workspaces"
         mock.sandbox_image = "solvyn-sandbox:local"
+        mock.sandbox_runtime_url = ""
+        mock.sandbox_runtime_token = ""
         mock.otel_enabled = False
         mock.otlp_endpoint = None
         yield mock
