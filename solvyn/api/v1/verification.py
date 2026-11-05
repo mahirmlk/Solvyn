@@ -359,9 +359,9 @@ async def decide_task_acceptance_criterion(
         .returning(TaskAcceptanceCriterion.id)
     )
     if decided.scalar_one_or_none() is None:
-        existing = (
+        existing_status = (
             await db.execute(
-                select(TaskAcceptanceCriterion).where(
+                select(TaskAcceptanceCriterion.status).where(
                     TaskAcceptanceCriterion.id == criterion_id,
                     TaskAcceptanceCriterion.tenant_id == task.tenant_id,
                     TaskAcceptanceCriterion.task_id == task.id,
@@ -369,9 +369,9 @@ async def decide_task_acceptance_criterion(
             )
         ).scalar_one_or_none()
         await db.rollback()
-        if existing is None:
+        if existing_status is None:
             raise HTTPException(status_code=404, detail="Acceptance criterion not found")
-        raise HTTPException(status_code=409, detail=f"Acceptance criterion is already {existing.status}")
+        raise HTTPException(status_code=409, detail=f"Acceptance criterion is already {existing_status}")
 
     await db.commit()
     record = (
