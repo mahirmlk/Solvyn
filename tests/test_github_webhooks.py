@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
 from starlette.responses import Response
 
-from solvyn.api.v1.webhooks import _parse_workflow_failure, _valid_signature, receive_github_webhook
+from solvyn.api.v1.webhooks import _parse_security_alert, _parse_workflow_failure, _valid_signature, receive_github_webhook
 from solvyn.db.models import ProactiveEvent
 from solvyn.multi_tenant.auth import RateLimitMiddleware
 
@@ -87,6 +87,61 @@ def test_workflow_failure_parser_keeps_only_bounded_safe_fields() -> None:
         "details_url": "https://github.com/Octo/Repo/actions/runs/123",
     }
     assert _parse_workflow_failure({"action": "completed", "workflow_run": {"conclusion": "success"}}) is None
+
+
+def test_security_alert_parser_keeps_bounded_metadata_and_never_secret_values() -> None:
+    parsed = _parse_security_alert(
+        "secret_scanning_alert",
+        {
+            "action": "created",
+            "repository": {"full_name": "Octo/Repo"},
+            "alert": {
+                "number": 42,
+                "state": "open",
+                "secret_type_display_name": "Example token",
+                "secret": "must-not-be-stored",
+                "html_url": "https://github.com/Octo/Repo/security/secret-scanning/42",
+            },
+        },
+    )
+    assert parsed == {
+        "repository_name": "Octo/Repo",
+        "source_event_id": "secret_scanning_alert:octo/repo:42:created",
+        "workflow_name": "Example token",
+        "conclusion": "unknown",
+        "branch": "",
+        "details_url": "https://github.com/Octo/Repo/security/secret-scanning/42",
+        "action": "created",
+    }
+    assert all("must-not-be-stored" not in value for value in parsed.values())
+
+
+def test_security_alert_parser_ignores_resolved_alerts_and_spoofed_urls() -> None:
+    assert _parse_security_alert(
+        "dependabot_alert",
+        {
+            "action": "fixed",
+            "repository": {"full_name": "octo/repo"},
+            "alert": {"number": 7, "state": "fixed"},
+        },
+    ) is None
+    parsed = _parse_security_alert(
+        "code_scanning_alert",
+        {
+            "action": "appeared_in_branch",
+            "repository": {"full_name": "octo/repo"},
+            "alert": {
+                "number": 8,
+                "state": "open",
+                "rule": {"description": "Unsafe call", "security_severity_level": "high"},
+                "html_url": "https://github.com.attacker.example/alert/8",
+            },
+        },
+    )
+    assert parsed is not None
+    assert parsed["workflow_name"] == "Unsafe call"
+    assert parsed["conclusion"] == "high"
+    assert parsed["details_url"] == ""
 
 
 @pytest.mark.asyncio
@@ -159,6 +214,62 @@ async def test_webhook_persists_one_triage_event_per_connected_project() -> None
     assert stub_db.added[0].delivery_id == delivery_id
     assert stub_db.added[0].source_event_id == "octo/repo:456:1"
     assert stub_db.added[0].status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_signed_security_alert_is_persisted_without_secret_material() -> None:
+    body = json.dumps(
+        {
+            "action": "created",
+            "repository": {"full_name": "octo/repo"},
+            "alert": {
+                "number": 73,
+                "state": "open",
+                "secret_type_display_name": "Example token",
+                "secret": "must-never-reach-the-database",
+                "html_url": "https://github.com/octo/repo/security/secret-scanning/73",
+            },
+        }
+    ).encode()
+
+    class StubDB:
+        def __init__(self) -> None:
+            self.execute_count = 0
+            self.added: list[ProactiveEvent] = []
+
+        async def execute(self, _query: object) -> SimpleNamespace:
+            self.execute_count += 1
+            if self.execute_count == 1:
+                return SimpleNamespace(all=lambda: [(uuid.uuid4(), uuid.uuid4())])
+            return SimpleNamespace(scalar_one_or_none=lambda: None)
+
+        def add(self, event: ProactiveEvent) -> None:
+            if event.id is None:
+                event.id = uuid.uuid4()
+            self.added.append(event)
+
+        async def commit(self) -> None:
+            return None
+
+        async def refresh(self, _event: ProactiveEvent) -> None:
+            return None
+
+    stub_db = StubDB()
+    db = cast(AsyncSession, stub_db)
+    with patch("solvyn.api.v1.webhooks.settings.github_webhook_secret", "webhook-secret"):
+        result = await receive_github_webhook(
+            _request(body, event="secret_scanning_alert", signature=_signature("webhook-secret", body)),
+            db=db,
+        )
+
+    assert result["created_count"] == 1
+    assert len(stub_db.added) == 1
+    event = stub_db.added[0]
+    assert event.event_type == "secret_scanning_alert"
+    assert event.action == "created"
+    assert event.workflow_name == "Example token"
+    assert event.status == "pending"
+    assert "must-never-reach-the-database" not in repr(event.__dict__)
 
 
 @pytest.mark.asyncio

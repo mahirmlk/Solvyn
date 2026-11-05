@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import unicodedata
 import uuid
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func, select
@@ -61,6 +63,87 @@ def _parse_workflow_failure(payload: Any) -> dict[str, str] | None:
     }
 
 
+def _bounded_text(value: Any, *, limit: int, fallback: str = "") -> str:
+    if not isinstance(value, str):
+        return fallback
+    cleaned = "".join(character for character in value if unicodedata.category(character) != "Cc").strip()
+    return cleaned[:limit] if cleaned else fallback
+
+
+def _parse_security_alert(event_type: str, payload: Any) -> dict[str, str] | None:
+    if event_type not in {"dependabot_alert", "code_scanning_alert", "secret_scanning_alert"}:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    action = _bounded_text(payload.get("action"), limit=100)
+    alert_value = payload.get("alert")
+    alert = alert_value if isinstance(alert_value, dict) else {}
+    if not action or not alert:
+        return None
+    # Resolved alerts are not new work for the human triage inbox.
+    if action.lower() in {"fixed", "closed_by_user", "dismissed", "resolved", "resolved_by_user", "auto_dismissed"}:
+        return None
+    state = alert.get("state")
+    if isinstance(state, str) and state.lower() not in {"open", "reopened"}:
+        return None
+
+    repository_value = payload.get("repository")
+    repository = repository_value if isinstance(repository_value, dict) else {}
+    full_name = repository.get("full_name")
+    if not isinstance(full_name, str):
+        return None
+    owner, repo = validate_full_name(full_name)
+    owner_repo = f"{owner}/{repo}"
+
+    alert_id = alert.get("number", alert.get("id"))
+    if isinstance(alert_id, bool) or not isinstance(alert_id, int) or alert_id < 1:
+        return None
+
+    rule_value = alert.get("rule")
+    rule = rule_value if isinstance(rule_value, dict) else {}
+    advisory_value = alert.get("security_advisory")
+    advisory = advisory_value if isinstance(advisory_value, dict) else {}
+    vulnerability_value = advisory.get("vulnerabilities")
+    vulnerability = vulnerability_value[0] if isinstance(vulnerability_value, list) and vulnerability_value and isinstance(vulnerability_value[0], dict) else {}
+    package_value = vulnerability.get("package")
+    package = package_value if isinstance(package_value, dict) else {}
+    dependency_value = alert.get("dependency")
+    dependency = dependency_value if isinstance(dependency_value, dict) else {}
+    dependency_package_value = dependency.get("package")
+    dependency_package = dependency_package_value if isinstance(dependency_package_value, dict) else {}
+    security_vulnerability_value = advisory.get("severity")
+    severity = security_vulnerability_value if isinstance(security_vulnerability_value, str) else ""
+    if not severity:
+        severity = _bounded_text(alert.get("security_severity_level"), limit=50) or _bounded_text(rule.get("security_severity_level"), limit=50)
+    if not severity:
+        severity = _bounded_text(vulnerability.get("severity"), limit=50, fallback="unknown")
+
+    summary = (
+        _bounded_text(advisory.get("summary"), limit=255)
+        or _bounded_text(rule.get("description"), limit=255)
+        or _bounded_text(rule.get("name"), limit=255)
+        or _bounded_text(alert.get("secret_type_display_name"), limit=255)
+        or _bounded_text(package.get("name"), limit=255)
+        or _bounded_text(dependency_package.get("name"), limit=255)
+        or f"{event_type.replace('_', ' ').title()} #{alert_id}"
+    )
+    details_url = alert.get("html_url")
+    if not isinstance(details_url, str) or urlparse(details_url).hostname != "github.com" or urlparse(details_url).scheme != "https":
+        details_url = ""
+    branch = _bounded_text(alert.get("ref"), limit=255)
+    if branch.startswith("refs/heads/"):
+        branch = branch[len("refs/heads/") :]
+    return {
+        "repository_name": owner_repo[:255],
+        "source_event_id": f"{event_type}:{owner_repo.lower()}:{alert_id}:{action}"[:320],
+        "workflow_name": summary,
+        "conclusion": severity[:50],
+        "branch": branch,
+        "details_url": details_url[:512],
+        "action": action,
+    }
+
+
 def _event_dict(event: ProactiveEvent) -> dict[str, object]:
     return {
         "id": str(event.id),
@@ -71,7 +154,9 @@ def _event_dict(event: ProactiveEvent) -> dict[str, object]:
         "action": event.action,
         "repository_name": event.repository_name,
         "workflow_name": event.workflow_name,
+        "summary": event.workflow_name,
         "conclusion": event.conclusion,
+        "severity": event.conclusion,
         "branch": event.branch,
         "details_url": event.details_url,
         "status": event.status,
@@ -104,18 +189,20 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
         raise HTTPException(status_code=400, detail="Invalid GitHub delivery identifier") from exc
 
     event_type = request.headers.get("x-github-event", "")
-    if event_type != "workflow_run":
+    supported_event_types = {"workflow_run", "dependabot_alert", "code_scanning_alert", "secret_scanning_alert"}
+    if event_type not in supported_event_types:
         return {"accepted": True, "ignored": True, "reason": "unsupported_event"}
     try:
         payload = json.loads(body)
     except (ValueError, UnicodeDecodeError) as exc:
         raise HTTPException(status_code=400, detail="Invalid GitHub webhook JSON") from exc
     try:
-        failure = _parse_workflow_failure(payload)
+        signal = _parse_workflow_failure(payload) if event_type == "workflow_run" else _parse_security_alert(event_type, payload)
     except GitHubRepositoryError as exc:
         raise HTTPException(status_code=400, detail=exc.message) from exc
-    if failure is None:
-        return {"accepted": True, "ignored": True, "reason": "not_a_failed_workflow_run"}
+    if signal is None:
+        reason = "not_a_failed_workflow_run" if event_type == "workflow_run" else "not_an_open_security_alert"
+        return {"accepted": True, "ignored": True, "reason": reason}
 
     project_matches = (
         await db.execute(
@@ -128,7 +215,7 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
                 Project.is_active == True,  # noqa: E712
                 Organization.is_active == True,  # noqa: E712
                 # GitHub full names are case-insensitive; equality avoids LIKE wildcards.
-                func.lower(Repository.full_name) == failure["repository_name"].lower(),
+                func.lower(Repository.full_name) == signal["repository_name"].lower(),
             )
             .limit(_MAX_PROJECT_MATCHES + 1)
         )
@@ -147,7 +234,7 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
                     ProactiveEvent.organization_id == organization_id,
                     ProactiveEvent.project_id == project_id,
                     (ProactiveEvent.delivery_id == normalized_delivery_id)
-                    | (ProactiveEvent.source_event_id == failure["source_event_id"]),
+                    | (ProactiveEvent.source_event_id == signal["source_event_id"]),
                 )
             )
         ).scalar_one_or_none()
@@ -159,14 +246,14 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
             organization_id=organization_id,
             project_id=project_id,
             delivery_id=normalized_delivery_id,
-            source_event_id=failure["source_event_id"],
+            source_event_id=signal["source_event_id"],
             event_type=event_type,
-            action="completed",
-            repository_name=failure["repository_name"],
-            workflow_name=failure["workflow_name"],
-            conclusion=failure["conclusion"],
-            branch=failure["branch"],
-            details_url=failure["details_url"],
+            action=signal.get("action", "completed"),
+            repository_name=signal["repository_name"],
+            workflow_name=signal["workflow_name"],
+            conclusion=signal["conclusion"],
+            branch=signal["branch"],
+            details_url=signal["details_url"],
             status="pending",
         )
         db.add(event)
@@ -187,7 +274,7 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
                             ProactiveEvent.organization_id == organization_id,
                             ProactiveEvent.project_id == project_id,
                             (ProactiveEvent.delivery_id == normalized_delivery_id)
-                            | (ProactiveEvent.source_event_id == failure["source_event_id"]),
+                            | (ProactiveEvent.source_event_id == signal["source_event_id"]),
                         )
                     )
                 ).scalar_one_or_none()
@@ -199,14 +286,14 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
                     organization_id=organization_id,
                     project_id=project_id,
                     delivery_id=normalized_delivery_id,
-                    source_event_id=failure["source_event_id"],
+                    source_event_id=signal["source_event_id"],
                     event_type=event_type,
-                    action="completed",
-                    repository_name=failure["repository_name"],
-                    workflow_name=failure["workflow_name"],
-                    conclusion=failure["conclusion"],
-                    branch=failure["branch"],
-                    details_url=failure["details_url"],
+                    action=signal.get("action", "completed"),
+                    repository_name=signal["repository_name"],
+                    workflow_name=signal["workflow_name"],
+                    conclusion=signal["conclusion"],
+                    branch=signal["branch"],
+                    details_url=signal["details_url"],
                     status="pending",
                 )
                 db.add(event)
