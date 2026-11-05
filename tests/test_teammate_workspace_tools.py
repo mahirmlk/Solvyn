@@ -29,6 +29,23 @@ class _Session:
         if "UPDATE verification_runs" in sql and self.interrupt_before_completion:
             self.records[1].status = "interrupted"
             return _Result(None)
+        if "UPDATE verification_runs" in sql:
+            record = self.records[1]
+            parameters = statement.compile().params
+            for attribute in (
+                "status",
+                "error",
+                "completed_at",
+                "exit_code",
+                "timed_out",
+                "output_truncated",
+                "stdout",
+                "stderr",
+                "duration_seconds",
+            ):
+                if attribute in parameters:
+                    setattr(record, attribute, parameters[attribute])
+            return _Result(record.id)
         if "teammate_permissions" in sql:
             parameters = statement.compile().params
             values = [
@@ -39,7 +56,10 @@ class _Session:
             ]
             if " IN " in sql and values:
                 return _Result(list(self.granted))
-            required = next((value for value in values if value in {"READ_ONLY", "MODIFY_FILES"}), None)
+            required = next(
+                (value for value in values if value in {"READ_ONLY", "MODIFY_FILES", "EXECUTE_COMMANDS"}),
+                None,
+            )
             return _Result(uuid.uuid4() if required in self.granted else None)
         return _Result(uuid.uuid4())
 
