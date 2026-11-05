@@ -95,6 +95,43 @@
   font-size: 10px;
 }
 
+.teammateRun {
+  margin-top: 2px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-light);
+}
+
+.teammateRun summary {
+  color: var(--color-ink);
+  cursor: pointer;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.teammateRunBody {
+  display: grid;
+  gap: 12px;
+  padding-top: 14px;
+}
+
+.teammateOutput {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line-light);
+  background: rgba(25, 27, 38, 0.035);
+}
+
+.teammateOutput pre {
+  max-height: 320px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
 .approvalFilter {
   display: grid;
   min-width: 150px;

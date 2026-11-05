@@ -272,6 +272,12 @@ export const api = {
   updateTeammate: (teammateId: string, input: { is_enabled: boolean }) =>
     request<TeammateInfo>(`/teammates/${teammateId}`, { method: "PATCH", body: JSON.stringify(input) }),
 
+  runTeammate: (teammateId: string, projectId: string, task: string) =>
+    request<{ teammate_id: string; project_id: string; output: unknown }>(`/teammates/${teammateId}/run`, {
+      method: "POST",
+      body: JSON.stringify({ project_id: projectId, input_data: { task } }),
+    }),
+
   listApprovals: (status: "pending" | "approved" | "rejected" = "pending") =>
     request<{ approvals: ApprovalInfo[]; count: number }>(`/approvals?status=${status}`),
 

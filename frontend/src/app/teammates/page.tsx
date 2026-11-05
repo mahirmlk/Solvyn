@@ -24,6 +24,11 @@ export default function TeammatesPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [busyTeammateId, setBusyTeammateId] = useState<string | null>(null);
+  const [runProjectIds, setRunProjectIds] = useState<Record<string, string>>({});
+  const [runPrompts, setRunPrompts] = useState<Record<string, string>>({});
+  const [runOutputs, setRunOutputs] = useState<Record<string, unknown>>({});
+  const [runErrors, setRunErrors] = useState<Record<string, string>>({});
+  const [runningTeammateId, setRunningTeammateId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const loadTeams = useCallback(async () => {
@@ -93,6 +98,30 @@ export default function TeammatesPage() {
       setError(reason instanceof Error ? reason.message : "Could not update the teammate.");
     } finally {
       setBusyTeammateId(null);
+    }
+  }
+
+  async function sendPrompt(teammate: TeammateInfo) {
+    const projectId = runProjectIds[teammate.id];
+    const task = runPrompts[teammate.id]?.trim();
+    if (!projectId || !task) return;
+    setRunErrors((current) => ({ ...current, [teammate.id]: "" }));
+    setRunOutputs((current) => {
+      const next = { ...current };
+      delete next[teammate.id];
+      return next;
+    });
+    setRunningTeammateId(teammate.id);
+    try {
+      const response = await api.runTeammate(teammate.id, projectId, task);
+      setRunOutputs((current) => ({ ...current, [teammate.id]: response.output }));
+    } catch (reason) {
+      setRunErrors((current) => ({
+        ...current,
+        [teammate.id]: reason instanceof Error ? reason.message : "Could not run this teammate.",
+      }));
+    } finally {
+      setRunningTeammateId(null);
     }
   }
 
@@ -201,6 +230,54 @@ export default function TeammatesPage() {
                             {busyTeammateId === teammate.id ? "Saving…" : teammate.is_enabled ? "Disable" : "Enable"}
                           </button>
                         </div>
+                        {teammate.is_enabled && (
+                          <details className={styles.teammateRun}>
+                            <summary>Ask this teammate</summary>
+                            <div className={styles.teammateRunBody}>
+                              <label className="field">
+                                <span className="field-label">Project assigned to this teammate</span>
+                                <select
+                                  className="editorial-input"
+                                  onChange={(event) => setRunProjectIds((current) => ({ ...current, [teammate.id]: event.target.value }))}
+                                  value={runProjectIds[teammate.id] || ""}
+                                >
+                                  <option value="">Choose a project</option>
+                                  {groups.find((group) => group.organization.id === teammate.organization_id)?.projects.map((project) => (
+                                    <option key={project.id} value={project.id}>{project.name}</option>
+                                  ))}
+                                </select>
+                              </label>
+                              <label className="field">
+                                <span className="field-label">Task</span>
+                                <textarea
+                                  className="editorial-input"
+                                  onChange={(event) => setRunPrompts((current) => ({ ...current, [teammate.id]: event.target.value }))}
+                                  placeholder="Ask a project-specific engineering question or task"
+                                  rows={3}
+                                  value={runPrompts[teammate.id] || ""}
+                                />
+                              </label>
+                              <div className={styles.formFooter}>
+                                <span className="copy-muted">Choose an assigned project. This response is not saved as conversation history, and tool execution is not available through this run endpoint yet.</span>
+                                <button
+                                  className="action-button"
+                                  disabled={runningTeammateId !== null || !runProjectIds[teammate.id] || !runPrompts[teammate.id]?.trim()}
+                                  onClick={() => void sendPrompt(teammate)}
+                                  type="button"
+                                >
+                                  {runningTeammateId === teammate.id ? "Waiting for response…" : "Ask teammate"}
+                                </button>
+                              </div>
+                              {runErrors[teammate.id] && <p className={styles.error} role="alert">{runErrors[teammate.id]}</p>}
+                              {Object.prototype.hasOwnProperty.call(runOutputs, teammate.id) && (
+                                <section aria-live="polite" className={styles.teammateOutput}>
+                                  <span className="eyebrow">Teammate output</span>
+                                  <pre>{JSON.stringify(runOutputs[teammate.id], null, 2)}</pre>
+                                </section>
+                              )}
+                            </div>
+                          </details>
+                        )}
                       </article>
                     ))}
                   </div>
