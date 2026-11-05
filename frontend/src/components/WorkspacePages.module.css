@@ -257,6 +257,54 @@
   text-transform: uppercase;
 }
 
+.activityFilter {
+  display: grid;
+  min-width: 220px;
+  gap: 6px;
+}
+
+.activityCard {
+  display: grid;
+  gap: 16px;
+  padding: clamp(16px, 3vw, 24px);
+  border: 1px solid var(--line-light);
+}
+
+.activityHeading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.activityTime {
+  color: var(--color-muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.activityDetails {
+  max-height: 240px;
+  margin: 0;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--line-light);
+  background: rgba(25, 27, 38, 0.035);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.activityLimit {
+  width: min(100% - 40px, 1120px);
+  margin: -28px auto 38px;
+  color: var(--color-muted);
+  font-size: 9px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
 .taskMeta dd {
   margin: 0;
   font-size: 10px;

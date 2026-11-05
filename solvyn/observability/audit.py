@@ -75,28 +75,42 @@ class AuditLogger:
         agent_type: str | None = None,
         session_id: str | None = None,
         limit: int = 50,
+        tenant_id: uuid.UUID | None = None,
     ) -> list[dict[str, Any]]:
         async with async_session_factory() as db:
             query = select(Memory).where(Memory.key.like(f"{self.AUDIT_PREFIX}%"))
+            if tenant_id is not None:
+                query = query.where(Memory.tenant_id == tenant_id)
             if agent_type:
                 query = query.where(Memory.agent_type == agent_type)
             if session_id:
                 query = query.where(Memory.session_id == _to_uuid(session_id))
-            query = query.order_by(Memory.created_at.desc()).limit(limit)
-            result = await db.execute(query)
-            records = result.scalars().all()
+            entries: list[dict[str, Any]] = []
+            page_size = max(limit, 1)
+            offset = 0
+            while len(entries) < limit:
+                page = query.order_by(Memory.created_at.desc(), Memory.id.desc()).offset(offset).limit(page_size)
+                result = await db.execute(page)
+                records = result.scalars().all()
+                if not records:
+                    break
 
-            entries = []
-            for r in records:
-                try:
-                    data = json.loads(r.value) if r.value else {}
-                    if action and data.get("action") != action:
+                for r in records:
+                    try:
+                        data = json.loads(r.value) if r.value else {}
+                        if action and data.get("action") != action:
+                            continue
+                        data["id"] = r.key
+                        data["created_at"] = r.created_at.isoformat() if r.created_at else None
+                        entries.append(data)
+                        if len(entries) == limit:
+                            break
+                    except (json.JSONDecodeError, TypeError):
                         continue
-                    data["id"] = r.key
-                    data["created_at"] = r.created_at.isoformat() if r.created_at else None
-                    entries.append(data)
-                except (json.JSONDecodeError, TypeError):
-                    continue
+
+                offset += len(records)
+                if len(records) < page_size:
+                    break
 
             return entries
 

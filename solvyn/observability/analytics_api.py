@@ -17,7 +17,7 @@ import logging
 import time
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Response, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 
 from solvyn.agents.cost_tracker import cost_tracker
 from solvyn.api_metadata import COMMON_RESPONSES
@@ -122,10 +122,19 @@ async def get_audit_logs(
     action: str | None = None,
     agent_type: str | None = None,
     session_id: str | None = None,
-    limit: int = 50,
+    limit: int = Query(default=50, ge=1, le=500),
 ) -> dict[str, Any]:
     """Query the audit log with optional filters."""
-    entries = await audit_logger.search(action=action, agent_type=agent_type, session_id=session_id, limit=limit)
+    tenant_id = tenant_context.tenant_id
+    if tenant_id is None or not tenant_context.is_authenticated:
+        raise HTTPException(status_code=401, detail="Authenticated tenant context required")
+    entries = await audit_logger.search(
+        action=action,
+        agent_type=agent_type,
+        session_id=session_id,
+        limit=limit,
+        tenant_id=tenant_id,
+    )
     return {"entries": entries, "count": len(entries)}
 
 

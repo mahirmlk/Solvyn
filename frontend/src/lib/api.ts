@@ -22,7 +22,7 @@ async function performRequest<T>(path: string, options?: RequestInit): Promise<T
   });
   if (!res.ok) {
     const body = await res.json().catch(() => null) as { detail?: string; error?: string } | null;
-    throw new Error(body?.detail || body?.error || `API ${res.status}: ${res.statusText}`);
+    throw new Error(`API ${res.status}: ${body?.detail || body?.error || res.statusText}`);
   }
   return res.json();
 }
@@ -107,10 +107,12 @@ export interface SpanInfo {
 }
 
 export interface AuditEntry {
+  id?: string;
   action: string;
   agent_type: string;
   timestamp: string;
   details: Record<string, unknown>;
+  created_at?: string | null;
 }
 
 export interface SessionAnalytics {

@@ -834,6 +834,87 @@ async def test_unknown_workflow_returns_404(client: AsyncClient) -> None:
     assert response.status_code == 404
 
 
+@pytest.mark.asyncio
+async def test_audit_search_filters_records_by_tenant() -> None:
+    from datetime import timedelta
+
+    from sqlalchemy import delete, select
+
+    from solvyn.db.models import Memory, Tenant
+    from solvyn.db.session import async_session_factory
+    from solvyn.observability.audit import AuditLogger
+
+    audit_id = f"audit:{uuid.uuid4()}"
+    other_audit_id = f"audit:{uuid.uuid4()}"
+    newer_id = f"audit:{uuid.uuid4()}"
+    other_tenant = Tenant(name="Other Audit Tenant", slug=f"audit-{uuid.uuid4().hex[:12]}", api_key_hash="test-hash")
+    async with async_session_factory() as db:
+        tenant = (await db.execute(select(Tenant).where(Tenant.slug == "test-tenant"))).scalar_one()
+        db.add(other_tenant)
+        await db.flush()
+        now = datetime.now(UTC)
+        db.add_all(
+            [
+                Memory(
+                    tenant_id=tenant.id,
+                    agent_type="qa-engineer",
+                    key=audit_id,
+                    value='{"action":"wanted.action"}',
+                    created_at=now - timedelta(minutes=1),
+                ),
+                Memory(
+                    tenant_id=other_tenant.id,
+                    agent_type="qa-engineer",
+                    key=other_audit_id,
+                    value='{"action":"wanted.action"}',
+                    created_at=now + timedelta(minutes=1),
+                ),
+                Memory(
+                    tenant_id=tenant.id,
+                    agent_type="qa-engineer",
+                    key=newer_id,
+                    value='{"action":"other.action"}',
+                    created_at=now,
+                ),
+            ]
+        )
+        await db.commit()
+
+    try:
+        entries = await AuditLogger().search(tenant_id=tenant.id, action="wanted.action", limit=1)
+        assert [entry["id"] for entry in entries] == [audit_id]
+    finally:
+        async with async_session_factory() as db:
+            await db.execute(delete(Memory).where(Memory.key.in_([audit_id, other_audit_id, newer_id])))
+            await db.execute(delete(Tenant).where(Tenant.id == other_tenant.id))
+            await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_audit_api_scopes_search_to_authenticated_tenant() -> None:
+    from types import SimpleNamespace
+
+    from solvyn.observability.analytics_api import get_audit_logs
+
+    tenant_id = uuid.uuid4()
+    with patch("solvyn.observability.analytics_api.audit_logger.search", new_callable=AsyncMock) as search:
+        search.return_value = []
+        with patch(
+            "solvyn.observability.analytics_api.tenant_context",
+            SimpleNamespace(tenant_id=tenant_id, is_authenticated=True),
+        ):
+            response = await get_audit_logs(limit=50)
+    assert response == {"entries": [], "count": 0}
+    assert search.await_args is not None
+    assert search.await_args.kwargs["tenant_id"] == tenant_id
+
+
+@pytest.mark.asyncio
+async def test_audit_endpoint_requires_tenant_context(unauthed_client: AsyncClient) -> None:
+    response = await unauthed_client.get("/api/v1/observability/audit")
+    assert response.status_code == 401
+
+
 # ─── Tenant isolation ───────────────────────────────────────────────────
 
 
