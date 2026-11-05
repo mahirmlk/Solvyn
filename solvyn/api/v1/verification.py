@@ -189,6 +189,9 @@ async def _build_delivery_preview(
     workspace: Any,
     github: GitHubClient,
 ) -> dict[str, Any]:
+    source_commit_sha = workspace_record.source_commit_sha
+    if not isinstance(source_commit_sha, str) or not source_commit_sha:
+        raise HTTPException(status_code=409, detail="Task workspace has no pinned source commit")
     try:
         metadata = await github.repository_metadata(repository.full_name)
         base_branch = metadata.get("default_branch")
@@ -209,14 +212,16 @@ async def _build_delivery_preview(
 
     missing_source_paths = sorted(set(source_paths) - set(current_paths))
     try:
-        _, source_tree = await github.repository_tree(repository.full_name, workspace_record.source_commit_sha)
+        _, source_tree = await github.repository_tree(repository.full_name, source_commit_sha)
     except GitHubRepositoryError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
-    source_tree_entries = {
-        entry.get("path"): entry
-        for entry in source_tree
-        if isinstance(entry.get("path"), str) and isinstance(entry.get("type"), str)
-    }
+    source_tree_entries: dict[str, dict[str, Any]] = {}
+    for entry in source_tree:
+        if not isinstance(entry, dict):
+            continue
+        entry_path = entry.get("path")
+        if isinstance(entry_path, str) and isinstance(entry.get("type"), str):
+            source_tree_entries[entry_path] = entry
     source_tree_blob_entries = {
         path: entry for path, entry in source_tree_entries.items() if entry.get("type") == "blob"
     }
@@ -234,7 +239,7 @@ async def _build_delivery_preview(
             baseline = await github.text_file(
                 repository.full_name,
                 path,
-                workspace_record.source_commit_sha,
+                source_commit_sha,
                 max_bytes=1_000_000,
             )
             if baseline is None:
@@ -283,7 +288,7 @@ async def _build_delivery_preview(
         diffs.append({"path": path, "diff": diff})
 
     digest_payload = {
-        "source_commit_sha": workspace_record.source_commit_sha,
+        "source_commit_sha": source_commit_sha,
         "base_branch": base_branch,
         "files": files,
         "unsupported_missing_source_paths": missing_source_paths,
@@ -295,7 +300,7 @@ async def _build_delivery_preview(
         raise HTTPException(status_code=422, detail="Delivery files must contain valid UTF-8 text") from exc
     return {
         "repository_id": str(repository.id),
-        "source_commit_sha": workspace_record.source_commit_sha,
+        "source_commit_sha": source_commit_sha,
         "base_branch": base_branch,
         "files": files,
         "diffs": diffs,
@@ -863,6 +868,9 @@ async def deliver_task_workspace(
         workspace,
         token,
     ) = await _task_delivery_context(execution_id, task_id, db)
+    pinned_source_sha = workspace_record.source_commit_sha
+    if not isinstance(pinned_source_sha, str) or not pinned_source_sha:
+        raise HTTPException(status_code=409, detail="Task workspace has no pinned source commit")
     branch_created: dict[str, str] | None = None
     commit_created: dict[str, str] | None = None
     try:
@@ -881,7 +889,7 @@ async def deliver_task_workspace(
                 branch_created = await github.create_branch_at_commit(
                     repository.full_name,
                     payload.branch_name,
-                    workspace_record.source_commit_sha,
+                    pinned_source_sha,
                 )
                 commit_created = await github.commit_files(
                     repository.full_name,
