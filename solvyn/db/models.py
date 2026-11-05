@@ -149,6 +149,38 @@ class TaskWorkspace(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class TaskDelivery(Base):
+    """Durable state for one digest-approved GitHub delivery attempt."""
+
+    __tablename__ = "task_deliveries"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "task_id", "diff_digest", name="uq_task_delivery_digest"),
+        CheckConstraint(
+            "status IN ('starting', 'branch_created', 'committed', 'pull_request_open', 'unknown')",
+            name="ck_task_deliveries_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("task_workspaces.id", ondelete="CASCADE"), nullable=False, index=True)
+    repository_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_commit_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    base_branch: Mapped[str] = mapped_column(String(255), nullable=False)
+    diff_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    branch_name: Mapped[str] = mapped_column(String(240), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="starting", server_default="starting")
+    branch_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    commit_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    pull_request_title: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    pull_request_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pull_request_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
 class TeammateToolInvocation(Base):
     """Durable metadata for one model-requested workspace tool call."""
 

@@ -41,19 +41,28 @@ export default function TaskDeliveryReviewPage() {
     setSubmitting(true);
     setError(null);
     try {
-      setResult(await api.deliverTaskWorkspace(executionId, taskId, {
+      const delivery = await api.deliverTaskWorkspace(executionId, taskId, {
         expected_diff_digest: preview.diff_digest,
         branch_name: branchName,
         commit_message: commitMessage,
         pull_request_title: pullRequestTitle,
         pull_request_body: pullRequestBody,
-      }));
+      });
+      setResult(delivery);
+      setPreview(await api.getTaskDeliveryPreview(executionId, taskId));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not create the draft pull request.");
+      try {
+        setPreview(await api.getTaskDeliveryPreview(executionId, taskId));
+      } catch {
+        // Keep the delivery error visible if history cannot be refreshed.
+      }
     } finally {
       setSubmitting(false);
     }
   }
+
+  const currentAttempt = preview?.delivery_history.find((delivery) => delivery.diff_digest === preview.diff_digest);
 
   return (
     <div className="route-page" aria-busy={loading || submitting}>
@@ -127,6 +136,37 @@ export default function TaskDeliveryReviewPage() {
             )}
           </section>
 
+          <section className={`${styles.diffPanel} pearl-pane`} aria-labelledby="history-heading">
+            <div className={styles.sectionHead}>
+              <div>
+                <span className="eyebrow">Durable delivery record</span>
+                <h2 id="history-heading">Delivery history</h2>
+              </div>
+              <span className="status-pill">{preview.delivery_history.length} attempt{preview.delivery_history.length === 1 ? "" : "s"}</span>
+            </div>
+            {preview.delivery_history.length ? (
+              <div className={styles.fileList}>
+                {preview.delivery_history.map((delivery) => (
+                  <article className={styles.file} key={delivery.id}>
+                    <div className={styles.sectionHead}>
+                      <strong>{delivery.status === "pull_request_open" ? "pull request created (recorded)" : delivery.status.replaceAll("_", " ")}</strong>
+                      <time dateTime={delivery.created_at ?? undefined}>{delivery.created_at ? new Date(delivery.created_at).toLocaleString() : "Time unavailable"}</time>
+                    </div>
+                    <p className={styles.digest}>Digest <code>{delivery.diff_digest}</code></p>
+                    <p className={styles.muted}>Branch <code>{delivery.branch}</code>{delivery.commit_sha ? <> · commit <code>{delivery.commit_sha.slice(0, 12)}</code></> : null}</p>
+                    {delivery.pull_request_title && <p>{delivery.pull_request_title}</p>}
+                    {delivery.status === "pull_request_open" && <p className={styles.muted}>This records the state when created. Current GitHub status and reviews are not refreshed here.</p>}
+                    {delivery.error && <p className={styles.blocker}>{delivery.error}</p>}
+                    {delivery.pull_request_url && <a href={delivery.pull_request_url} rel="noreferrer" target="_blank">Open pull request #{delivery.pull_request_number}</a>}
+                    {delivery.status === "unknown" && <p className={styles.muted}>Check GitHub for this branch and pull request before retrying.</p>}
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <p className={styles.muted}>No delivery attempts have been recorded for this task.</p>
+            )}
+          </section>
+
           <section className={`${styles.deliveryPanel} pearl-pane`} aria-labelledby="delivery-heading">
             <div className={styles.sectionHead}>
               <div>
@@ -138,6 +178,12 @@ export default function TaskDeliveryReviewPage() {
             <p className={styles.muted}>
               Submitting confirms this exact diff. Solvyn will create a branch from the pinned commit and leave the pull request in draft for human review.
             </p>
+            {currentAttempt && (
+              <div className={styles.blocker} role="status">
+                <strong>This exact diff already has a delivery record: {currentAttempt.status.replaceAll("_", " ")}.</strong>
+                <p>Review the history above. Solvyn blocks a second delivery attempt until the recorded outcome is reconciled.</p>
+              </div>
+            )}
             <form className={styles.form} onSubmit={submitDelivery}>
               <label>
                 <span className="field-label">Branch name</span>
@@ -155,7 +201,7 @@ export default function TaskDeliveryReviewPage() {
                 <span className="field-label">Pull request description</span>
                 <textarea className="editorial-input" maxLength={20000} onChange={(event) => setPullRequestBody(event.target.value)} rows={4} value={pullRequestBody} />
               </label>
-              <button className="action-button" disabled={!preview.can_deliver || submitting || Boolean(result)} type="submit">
+              <button className="action-button" disabled={!preview.can_deliver || submitting || Boolean(result) || Boolean(currentAttempt)} type="submit">
                 {submitting ? "Creating draft PR…" : "Approve diff and create draft PR"}
               </button>
             </form>
@@ -175,9 +221,10 @@ export default function TaskDeliveryReviewPage() {
       {result && (
         <section className={styles.success} role="status">
           <div>
-            <span className="eyebrow">Draft pull request created</span>
+            <span className="eyebrow">{result.replayed ? "Previously recorded delivery" : "Draft pull request created"}</span>
             <h2>{result.pull_request.title || pullRequestTitle}</h2>
             <p><code>{result.branch}</code> · commit <code>{result.commit_sha.slice(0, 12)}</code></p>
+            {result.replayed && <p className={styles.muted}>This is the saved creation result; the pull request may have changed since it was recorded.</p>}
           </div>
           <a className="action-button" href={result.pull_request.url} rel="noreferrer" target="_blank">Review on GitHub</a>
         </section>
