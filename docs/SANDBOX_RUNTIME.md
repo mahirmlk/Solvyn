@@ -1,6 +1,6 @@
 # Sandbox Runtime — Phase 3 first slice
 
-Solvyn has a one-shot Docker execution primitive exposed through tenant-scoped task verification endpoints. Workspace records and bounded verification results are persisted. Teammates do not yet invoke verification automatically; a user or trusted caller can create a task workspace, add files, and submit an argv command for execution.
+Solvyn has a one-shot Docker execution primitive exposed through tenant-scoped task verification endpoints. Workspace records and bounded verification results are persisted. In production Compose, the API delegates to a private sandbox supervisor on an internal network; the API container does not receive Docker Engine access. Teammates do not yet invoke verification automatically; a user or trusted caller can create a task workspace, add files, and submit an argv command for execution.
 
 ## Implemented
 
@@ -17,9 +17,9 @@ Solvyn has a one-shot Docker execution primitive exposed through tenant-scoped t
 - Exports workspace changes as a bounded tar stream and accepts only regular files and directories with safe relative paths; symlinks and special files are rejected.
 - Removes the container in a `finally` path and reports cleanup failure instead of silently treating it as success. Returns the command, exit code, bounded output, timeout status, duration, and run ID to its caller.
 
-Container isolation depends on a correctly configured Docker Engine and host kernel. The control-plane process still needs Docker Engine access to create containers; do not grant that access to an untrusted teammate or mount the engine socket into the sandbox container. Use a dedicated, trusted runtime host for deployments where the API host should not hold daemon access.
+Container isolation depends on a correctly configured Docker Engine and host kernel. The trusted sandbox supervisor is the only Solvyn service with Docker Engine access. The job container, API, worker, and frontend do not receive the engine socket. Docker socket access gives the supervisor control over its Docker host. The current Compose integration is co-located and uses a local Docker socket plus a shared workspace volume; a separate physical runtime host is not supported yet. Compose places the supervisor on an internal-only network and shares only the managed workspace volume with the API. Do not expose the supervisor port publicly. A remote runtime needs a secure workspace transfer protocol and authenticated transport before it can be supported.
 
-The runtime does not clone repositories, enforce teammate-level permissions, request approvals for verification, or install project dependencies. The default profiles target Python workspaces; callers can provide another argv command for other toolchains if they are present in the image or workspace. These profiles are basic checks, not acceptance criteria. Regression results compare outcomes by task, workspace, kind, and command; they do not imply semantic equivalence across different source digests. The runtime does not provide a shell API. Commands are passed as argument vectors directly to the isolated container process. Network access is disabled, so dependencies must already be present in the sandbox image or workspace. Build the image with the command below and configure `SANDBOX_IMAGE` and `SANDBOX_WORKSPACE_ROOT` for the API process.
+The runtime does not clone repositories, enforce teammate-level permissions, request approvals for verification, or install project dependencies. The default profiles target Python workspaces; callers can provide another argv command for other toolchains if they are present in the image or workspace. These profiles are basic checks, not acceptance criteria. Regression results compare outcomes by task, workspace, kind, and command; they do not imply semantic equivalence across different source digests. The runtime does not provide a shell API. Commands are passed as argument vectors directly to the isolated container process. Network access is disabled, so dependencies must already be present in the sandbox image or workspace. Production Compose builds the fixed execution image and starts the supervisor, requiring `SANDBOX_RUNTIME_TOKEN` in `.env.production`. In standalone API development, leave `SANDBOX_RUNTIME_URL` unset to use the local Docker runner; configure `SANDBOX_IMAGE` and `SANDBOX_WORKSPACE_ROOT` for that process.
 
 ## Build and verify locally
 
@@ -28,6 +28,14 @@ Build the trusted base image explicitly:
 ```sh
 docker build --file sandbox.Dockerfile --tag solvyn-sandbox:local .
 ```
+
+For the production Compose stack, copy `.env.production.example` to `.env.production`, set a unique high-entropy `SANDBOX_RUNTIME_TOKEN`, and start the complete stack with:
+
+```sh
+docker compose --env-file .env.production --file docker-compose.prod.yml up --build -d
+```
+
+Compose builds the fixed job image, initializes the shared workspace volume for the API UID, and waits for the sandbox supervisor's Docker Engine and image health check before starting the API. The supervisor requires a Docker socket at `/var/run/docker.sock` and therefore has authority over the Docker host; this Compose setup is intended for a trusted single-host deployment.
 
 The default pytest suite tests path confinement, output and resource policy construction, timeout handling, cleanup, and hostile archive rejection with a fake Docker CLI. With a running Linux Docker Engine and the image above, run the opt-in end-to-end smoke test:
 

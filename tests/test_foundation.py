@@ -144,6 +144,17 @@ def test_enforce_prod_secrets_raises_when_missing(monkeypatch) -> None:
     with patch_settings(s2):
         enforce_prod_secrets()
 
+    sandbox_without_token = Settings(
+        api_key_secret="api-secret",
+        jwt_secret="jwt-secret",
+        sandbox_runtime_url="http://sandbox:8001",
+        sandbox_runtime_token="",
+        allow_insecure_dev=False,
+    )
+    with patch_settings(sandbox_without_token):
+        with pytest.raises(RuntimeError, match="SANDBOX_RUNTIME_TOKEN"):
+            enforce_prod_secrets()
+
 
 def patch_settings(s):
     from unittest.mock import patch

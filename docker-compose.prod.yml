@@ -69,12 +69,22 @@ services:
       ENABLE_WORKFLOW_SCHEDULER: "false"
       HOST: 0.0.0.0
       PORT: 8000
+      SANDBOX_WORKSPACE_ROOT: /app/.solvyn/workspaces
+      SANDBOX_RUNTIME_URL: http://sandbox:8001
+      SANDBOX_RUNTIME_TOKEN: ${SANDBOX_RUNTIME_TOKEN:?Set SANDBOX_RUNTIME_TOKEN in .env.production}
+    volumes:
+      - sandbox_workspaces:/app/.solvyn/workspaces
+    networks:
+      - default
+      - sandbox-control
     ports:
       - "127.0.0.1:${API_PORT:-8000}:8000"
     depends_on:
       migrate:
         condition: service_completed_successfully
       redis:
+        condition: service_healthy
+      sandbox:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/deep', timeout=4)"]
@@ -96,6 +106,7 @@ services:
     env_file: ${SOLVYN_ENV_FILE:-.env.production}
     environment:
       ENABLE_WORKFLOW_SCHEDULER: "true"
+      SANDBOX_RUNTIME_TOKEN: ""
     command: ["python", "-m", "solvyn.worker"]
     depends_on:
       migrate:
@@ -107,6 +118,59 @@ services:
         limits:
           cpus: "2.0"
           memory: 2G
+
+  sandbox-job-image:
+    build:
+      context: .
+      dockerfile: sandbox.Dockerfile
+    image: solvyn-sandbox:local
+    restart: "no"
+    command: ["true"]
+    networks:
+      - sandbox-control
+
+  sandbox-workspace-init:
+    image: solvyn-sandbox-supervisor:local
+    restart: "no"
+    user: "0:0"
+    entrypoint: ["python", "-c"]
+    command: ["from pathlib import Path; import os; p=Path('/workspaces'); p.mkdir(parents=True, exist_ok=True); os.chown(p, 10001, 10001); p.chmod(0o700)"]
+    volumes:
+      - sandbox_workspaces:/workspaces
+    depends_on:
+      sandbox-job-image:
+        condition: service_completed_successfully
+    networks:
+      - sandbox-control
+
+  sandbox:
+    build:
+      context: .
+      dockerfile: sandbox-supervisor.Dockerfile
+    image: solvyn-sandbox-supervisor:local
+    restart: unless-stopped
+    environment:
+      SANDBOX_WORKSPACE_ROOT: /app/.solvyn/workspaces
+      SANDBOX_RUNTIME_TOKEN: ${SANDBOX_RUNTIME_TOKEN:?Set SANDBOX_RUNTIME_TOKEN in .env.production}
+    volumes:
+      - sandbox_workspaces:/app/.solvyn/workspaces
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - sandbox-control
+    depends_on:
+      sandbox-workspace-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
 
   frontend:
     build:
@@ -129,3 +193,8 @@ services:
 volumes:
   pgdata:
   redisdata:
+  sandbox_workspaces:
+
+networks:
+  sandbox-control:
+    internal: true

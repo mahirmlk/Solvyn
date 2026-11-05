@@ -18,6 +18,7 @@ from solvyn.config import settings
 from solvyn.db.models import Organization, OrganizationMembership, Task, TaskAcceptanceCriterion, TaskWorkspace, User, VerificationRun
 from solvyn.db.session import get_session
 from solvyn.multi_tenant.middleware import SHARED_SECRET_PRINCIPAL_ID, tenant_context
+from solvyn.sandbox.remote import RemoteSandboxResult, RemoteSandboxRunner
 from solvyn.sandbox.runtime import DockerSandboxRunner, SandboxResult, SandboxRuntimeError
 from solvyn.sandbox.workspaces import WorkspaceError, WorkspaceManager
 from solvyn.workflows.executor import workflow_executor
@@ -57,6 +58,19 @@ _DEFAULT_VERIFICATION_COMMANDS: dict[VerificationKind, list[str]] = {
 
 def _workspace_manager() -> WorkspaceManager:
     return WorkspaceManager(Path(settings.sandbox_workspace_root))
+
+
+def _sandbox_runner() -> DockerSandboxRunner | RemoteSandboxRunner:
+    manager = _workspace_manager()
+    if settings.sandbox_runtime_url:
+        if not settings.sandbox_runtime_token:
+            raise SandboxRuntimeError("Remote sandbox runtime is missing its service credential")
+        return RemoteSandboxRunner(
+            manager,
+            base_url=settings.sandbox_runtime_url,
+            token=settings.sandbox_runtime_token,
+        )
+    return DockerSandboxRunner(manager, image=settings.sandbox_image)
 
 
 def _tenant_ref() -> str:
@@ -296,15 +310,13 @@ async def run_task_verification(
         kind=payload.kind,
         command=json.dumps(command),
         status="running",
-        runner_version="docker-sandbox/1",
+        runner_version="sandbox-service/1" if settings.sandbox_runtime_url else "docker-sandbox/1",
         source_digest=source_digest,
     )
     db.add(run)
     await db.commit()
     try:
-        result: SandboxResult = await DockerSandboxRunner(
-            _workspace_manager(), image=settings.sandbox_image
-        ).run(workspace, command)
+        result: SandboxResult | RemoteSandboxResult = await _sandbox_runner().run(workspace, command)
     except (SandboxRuntimeError, WorkspaceError, ValueError) as exc:
         return await _finish_run(
             db,
