@@ -158,6 +158,78 @@
   font-size: 12px;
 }
 
+.taskFilter {
+  display: grid;
+  min-width: 180px;
+  gap: 6px;
+}
+
+.taskGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+  gap: 14px;
+}
+
+.taskCard {
+  display: flex;
+  min-height: 220px;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px;
+  border: 1px solid var(--line-light);
+}
+
+.taskCard h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 16px;
+  letter-spacing: 0.03em;
+}
+
+.taskCard p {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 11px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.taskError {
+  color: var(--color-error) !important;
+}
+
+.taskMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 20px;
+  margin: auto 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-light);
+}
+
+.taskMeta div {
+  display: grid;
+  gap: 4px;
+}
+
+.taskMeta dt,
+.taskLimit {
+  color: var(--color-muted);
+  font-size: 9px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.taskMeta dd {
+  margin: 0;
+  font-size: 10px;
+}
+
+.taskLimit {
+  width: min(100% - 40px, 1120px);
+  margin: -28px auto 38px;
+}
+
 .formFooter {
   margin-top: 4px;
 }
