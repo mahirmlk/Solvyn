@@ -20,4 +20,4 @@ Repository discovery beyond a caller-supplied GitHub name, content search, and b
 
 ## Proactive engineering
 
-GitHub `workflow_run` failures and Dependabot, code scanning, and secret scanning alert activity are signature-verified and deduplicated per connected project. Events are bounded, stored without the raw payload or secret values, and shown to organization members for human triage. These triggers do not automatically start an agent workflow; automatic remediation requires a later explicit policy and execution budget.
+GitHub `workflow_run` failures and Dependabot, code scanning, and secret scanning alert activity are signature-verified and deduplicated per connected project. Owner/admin-configured recurring code quality, dependency review, and documentation review schedules also add due items to the same inbox. Events are bounded, stored without the raw payload or secret values, and shown to organization members for human triage. These triggers do not automatically start an agent workflow; automatic remediation requires a later explicit policy and execution budget.
