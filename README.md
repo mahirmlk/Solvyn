@@ -51,6 +51,7 @@
 | **Cost analytics** | Per-session and per-tenant token/cost tracking with provider-specific pricing tables |
 | **Multi-tenant isolation** | ContextVar-based tenant scoping through the full request lifecycle; API key authentication with constant-time HMAC comparison |
 | **Repository intelligence (early)** | Connect public GitHub repositories to projects, inspect bounded file trees and manifests, and search file paths without executing repository code |
+| **Sandbox runtime (internal preview)** | Run argv commands in a one-shot restricted Docker container; the runner is not yet exposed to teammates or API users |
 | **Production-ready deployment** | Docker Compose for dev, Kubernetes with HPA autoscaling (2-10 replicas), GitHub Actions CI/CD with staging→prod promotion |
 
 ---
@@ -656,6 +657,7 @@ solvyn/
 ├── pyproject.toml                    # Dependencies, ruff, mypy, pytest config
 ├── Makefile                          # dev, lint, test, docker, deploy targets
 ├── Dockerfile                        # Python 3.12-slim
+├── sandbox.Dockerfile                # Restricted command-execution image
 ├── docker-compose.yml                # API + pgvector/pg16 + Redis 7
 ├── alembic.ini                       # Database migration config
 ├── .pre-commit-config.yaml           # Pre-commit hook definitions
@@ -671,6 +673,7 @@ solvyn/
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | Full system architecture, component design, data flow, technology decisions |
 | [API.md](./API.md) | Complete API reference — endpoints, request/response schemas, auth, error codes |
 | [Repository Intelligence](./docs/REPOSITORY_INTELLIGENCE.md) | Current GitHub provider scope, limits, and security boundaries |
+| [Sandbox Runtime](./docs/SANDBOX_RUNTIME.md) | Internal Docker execution boundary, resource policy, and smoke test |
 | [SECURITY.md](./SECURITY.md) | Security model, authentication, multi-tenant isolation, compliance guidance |
 | [DEPLOYMENT.md](./DEPLOYMENT.md) | Deployment guide — Docker, Kubernetes, CI/CD, rollback procedures |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | Contribution guidelines, development setup, coding standards, PR process |
@@ -686,6 +689,6 @@ MIT License — see [LICENSE](./LICENSE) for details.
 
 <div align="center">
 
-**Solvyn** — *9 agents. One operating center. Endless engineering velocity.*
+**Solvyn** — *Your self-hosted AI engineering team.*
 
 </div>

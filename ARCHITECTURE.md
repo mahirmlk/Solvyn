@@ -1,6 +1,6 @@
 # Solvyn Architecture
 
-> AI Operating Center for Engineering Teams — Version 0.1.0
+> Your self-hosted AI engineering team — Architecture version 2.0
 
 ---
 
@@ -18,6 +18,7 @@
 10. [Technology Decisions](#technology-decisions)
 11. [Directory Structure](#directory-structure)
 12. [Repository Intelligence](#repository-intelligence)
+13. [Sandbox Runtime](#sandbox-runtime)
 
 ---
 
@@ -680,5 +681,11 @@ solvyn/
 ## Repository Intelligence
 
 The Phase 2 repository provider boundary currently has a read-only GitHub implementation. Project members can connect public repositories and request a bounded default-branch inspection. The API derives file-path matches, language counts, direct dependencies, and a small project context from GitHub metadata and common manifests.
+
+## Sandbox Runtime
+
+Phase 3 now includes an internal Docker-backed runner and path-confined temporary workspaces (`solvyn/sandbox/`). Commands run in a fresh container with no network, a read-only root, a non-root UID, dropped capabilities, resource limits, bounded output, and a size-limited tmpfs workspace. Only the selected workspace is staged into the container; changed files are returned through a bounded archive that rejects symlinks and special files. The host Docker socket is used only by the trusted supervisor and is never mounted into the execution container.
+
+This is an execution primitive, not yet an agent-facing tool. Repository cloning, project and teammate permission checks, human approval, persisted execution events, and task lifecycle integration remain future Phase 3 work. See [Sandbox Runtime](docs/SANDBOX_RUNTIME.md) for setup and the opt-in container test.
 
 Provider responses are treated as untrusted repository data. This slice does not clone or execute repository code, mutate branches, or create pull requests. Private repository support requires a separate credential and permission design. See [the current scope and endpoint limits](docs/REPOSITORY_INTELLIGENCE.md).

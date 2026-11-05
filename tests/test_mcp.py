@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from solvyn.mcp.tool import MCPTool, MCPToolSchema, MCPToolParameter
 from solvyn.mcp.server import MCPServerManager
-from solvyn.tools.exceptions import ToolNotFoundError, ToolValidationError
+from solvyn.mcp.tool import MCPTool, MCPToolParameter, MCPToolSchema
+from solvyn.tools.exceptions import ToolExecutionError, ToolNotFoundError, ToolValidationError
 
 
 class TestMCPToolSchema:
@@ -32,7 +32,7 @@ class TestMCPTool:
         schema = MCPToolSchema(name="my-tool")
         tool = MCPTool(schema=schema)
         assert tool.schema.name == "my-tool"
-        assert tool.sandboxed is True
+        assert tool.sandboxed is False
 
     @pytest.mark.asyncio
     async def test_tool_execute(self) -> None:
@@ -44,6 +44,20 @@ class TestMCPTool:
         result = await tool.execute({"q": "hello"})
         assert result["success"] is True
         assert result["result"]["result"] == "hello"
+
+    @pytest.mark.asyncio
+    async def test_sandboxed_tool_fails_closed_without_runtime_dispatch(self) -> None:
+        called = False
+
+        def handler(params: dict, ctx: dict) -> dict:
+            nonlocal called
+            called = True
+            return {}
+
+        tool = MCPTool(schema=MCPToolSchema(name="isolated", sandboxed=True), handler=handler)
+        with pytest.raises(ToolExecutionError, match="refusing to execute the handler directly"):
+            await tool.execute({})
+        assert called is False
 
     @pytest.mark.asyncio
     async def test_tool_validate_missing_required(self) -> None:
