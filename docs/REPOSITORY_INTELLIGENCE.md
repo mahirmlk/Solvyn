@@ -17,3 +17,7 @@ See the [Repository Intelligence section in API.md](../API.md#repository-intelli
 - Pull request listing is a paginated live snapshot from GitHub, not a persisted local synchronization. Detail inspection returns the latest review decision per reviewer (scanning up to 1,100 reviews and probing for more), plus a unified diff capped at 1 MB. Pull request data and diffs remain untrusted input.
 
 Repository discovery beyond a caller-supplied GitHub name, content search, and branch/worktree management remain future work. Private-repository access remains unsupported until repository permission mapping and isolated workspaces are designed.
+
+## Proactive engineering
+
+GitHub `workflow_run` failure webhooks are signature-verified and deduplicated per connected project. Events are bounded, stored without the raw payload, and shown to organization members for human triage. This trigger does not automatically start an agent workflow; automatic remediation requires a later explicit policy and execution budget.

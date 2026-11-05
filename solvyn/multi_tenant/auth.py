@@ -28,6 +28,7 @@ PUBLIC_PATHS = (
     "/api/v1/auth/login",
     "/api/v1/auth/refresh",
     "/api/v1/auth/logout",
+    "/api/v1/webhooks/github",
 )
 
 
@@ -283,7 +284,8 @@ class RateLimitMiddleware:
         )
 
     async def __call__(self, request: Request, call_next: Any) -> Any:
-        if request.url.path in PUBLIC_PATHS or request.url.path.startswith("/api/v1/health"):
+        is_github_webhook = request.url.path == "/api/v1/webhooks/github"
+        if (request.url.path in PUBLIC_PATHS and not is_github_webhook) or request.url.path.startswith("/api/v1/health"):
             return await call_next(request)
 
         client_ip = request.client.host if request.client else "unknown"
@@ -295,6 +297,11 @@ class RateLimitMiddleware:
                 status_code=429,
                 content={"error": "Rate limit exceeded", "retry_after": ip_retry, "scope": "ip"},
             )
+
+        # Webhooks have their own signature identity, so apply only the
+        # unauthenticated IP budget rather than a tenant budget.
+        if is_github_webhook:
+            return await call_next(request)
 
         tenant_allowed, tenant_retry = await redis_rate_limiter.check_tenant(tenant_id)
         if not tenant_allowed:
