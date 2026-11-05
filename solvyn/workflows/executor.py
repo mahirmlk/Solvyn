@@ -101,6 +101,74 @@ class WorkflowExecutor:
         logger.info(f"Workflow '{template_name}' completed: {result.status}")
         return result
 
+    async def schedule(
+        self,
+        template_name: str,
+        inputs: dict[str, Any],
+        scheduled_at: datetime,
+        session_id: str | None = None,
+        tenant_id: str = "default",
+    ) -> ExecutionGraph:
+        """Persist a future workflow run so a worker can start it after restart."""
+        template = WORKFLOW_TEMPLATES.get(template_name)
+        if template is None:
+            raise ValueError(f"Unknown workflow: {template_name}. Available: {list(WORKFLOW_TEMPLATES.keys())}")
+        if scheduled_at.tzinfo is None:
+            raise ValueError("scheduled_at must include a timezone")
+        if scheduled_at <= datetime.now(UTC):
+            raise ValueError("scheduled_at must be in the future")
+
+        resolved_session_id = session_id or str(uuid.uuid4())
+        await self._ensure_session(resolved_session_id, tenant_id, template_name)
+        merged_inputs = {**template.default_inputs, **inputs}
+        graph = AgentGraph()
+        node_map: dict[str, str] = {}
+        latest_by_agent_type: dict[str, str] = {}
+        for index, step in enumerate(template.steps):
+            step_key = f"{step.agent_type}_{index}"
+            step_input = self._resolve_inputs(step, merged_inputs, node_map, {})
+            node_id = graph.add_node(agent_type=step.agent_type, input_data=step_input)
+            node_map[step_key] = node_id
+            latest_by_agent_type[step.agent_type] = node_id
+            if step.depends_on:
+                for dependency in step.depends_on:
+                    dependency_id = latest_by_agent_type.get(dependency)
+                    if dependency_id:
+                        graph.add_edge(source=dependency_id, target=node_id)
+
+        execution_id = str(uuid.uuid4())
+        graph_data = json.dumps(
+            {
+                "template": template_name,
+                "inputs": merged_inputs,
+                "nodes": [
+                    {"id": node.id, "agent_type": node.agent_type, "status": "pending", "input": node.input}
+                    for node in graph.nodes.values()
+                ],
+                "edges": [
+                    {"source": edge.source, "target": edge.target, "condition": edge.condition} for edge in graph.edges
+                ],
+            }
+        )
+        async with async_session_factory() as db:
+            db.add(
+                ExecutionGraphModel(
+                    id=uuid.UUID(execution_id),
+                    session_id=uuid.UUID(resolved_session_id),
+                    graph_data=graph_data,
+                    status="scheduled",
+                    scheduled_at=scheduled_at.astimezone(UTC),
+                )
+            )
+            await db.commit()
+        return ExecutionGraph(
+            id=execution_id,
+            session_id=resolved_session_id,
+            nodes=list(graph.nodes.values()),
+            edges=list(graph.edges),
+            status="scheduled",
+        )
+
     async def resume(self, execution_id: uuid.UUID, tenant_id: str) -> ExecutionGraph:
         """Resume an interrupted run, rerunning every unfinished node at least once."""
         tenant_uuid = await self._resolve_tenant_uuid(tenant_id)
@@ -114,12 +182,15 @@ class WorkflowExecutor:
             ).scalar_one_or_none()
             if record is None:
                 raise LookupError("Workflow execution not found")
-            if record.status not in {"running", "failed", "resuming"}:
+            if record.status not in {"scheduled", "running", "failed", "resuming"}:
                 raise RuntimeError(f"Workflow execution cannot resume from status '{record.status}'")
+            if record.status == "scheduled" and record.scheduled_at and record.scheduled_at > datetime.now(UTC):
+                raise RuntimeError("Workflow execution is not due yet")
             graph_data = json.loads(record.graph_data)
             lease_id = uuid.uuid4()
             can_claim = or_(
                 ExecutionGraphModel.status == "failed",
+                and_(ExecutionGraphModel.status == "scheduled", ExecutionGraphModel.scheduled_at <= func.now()),
                 and_(
                     ExecutionGraphModel.status.in_(["running", "resuming"]),
                     or_(ExecutionGraphModel.lease_expires_at.is_(None), ExecutionGraphModel.lease_expires_at < func.now()),
@@ -215,7 +286,7 @@ class WorkflowExecutor:
                 return {"execution_id": str(execution_id), "status": "cancelled"}
             if record.status == "cancelling":
                 return {"execution_id": str(execution_id), "status": "cancelling"}
-            if record.status not in {"running", "resuming", "failed"}:
+            if record.status not in {"scheduled", "running", "resuming", "failed"}:
                 raise RuntimeError(f"Workflow execution cannot be cancelled from status '{record.status}'")
 
             worker_active = (

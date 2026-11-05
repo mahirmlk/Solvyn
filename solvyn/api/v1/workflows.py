@@ -13,7 +13,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import Coroutine
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException
@@ -303,6 +303,11 @@ class TaskHandoffRequest(BaseModel):
     requires_approval: bool = False
 
 
+class WorkflowScheduleRequest(BaseModel):
+    scheduled_at: datetime
+    inputs: dict[str, Any] = Field(default_factory=dict)
+
+
 @router.get(
     "/",
     summary="List workflow templates",
@@ -429,6 +434,32 @@ async def run_workflow(name: str, inputs: dict[str, Any] = Body(...)) -> dict[st
     }
 
 
+@router.post("/{name}/schedule", summary="Schedule a durable workflow execution")
+async def schedule_workflow(name: str, payload: WorkflowScheduleRequest) -> dict[str, Any]:
+    if name not in WORKFLOW_TEMPLATES:
+        raise HTTPException(status_code=404, detail=f"Workflow '{name}' not found")
+    tenant_id = _workflow_tenant_ref()
+    safe_inputs = {key: value for key, value in payload.inputs.items() if key != "tenant_id"}
+    try:
+        result = await workflow_executor.schedule(
+            template_name=name,
+            inputs=safe_inputs,
+            scheduled_at=payload.scheduled_at,
+            tenant_id=tenant_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "workflow": name,
+        "execution_id": result.id,
+        "session_id": result.session_id,
+        "status": result.status,
+        "scheduled_at": payload.scheduled_at.isoformat(),
+    }
+
+
 @router.get("/executions/{execution_id}", summary="Get a workflow execution snapshot")
 async def get_workflow_execution(
     execution_id: uuid.UUID,
@@ -451,6 +482,7 @@ async def get_workflow_execution(
         "execution_id": str(record.id),
         "session_id": str(record.session_id),
         "status": record.status,
+        "scheduled_at": record.scheduled_at.isoformat() if record.scheduled_at else None,
         "snapshot": json.loads(record.graph_data),
         "updated_at": record.updated_at.isoformat() if record.updated_at else "",
     }

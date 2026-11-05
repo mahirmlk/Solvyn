@@ -11,6 +11,7 @@ schema used by ``/docs`` and ``/redoc``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -37,6 +38,7 @@ from solvyn.multi_tenant.middleware import tenant_middleware
 from solvyn.observability.analytics_api import router as observability_router
 from solvyn.observability.metrics import MetricsMiddleware
 from solvyn.observability.opentelemetry import init_opentelemetry
+from solvyn.workflows.scheduler import run_scheduled_workflows
 
 setup_logging(settings.log_level, settings.json_logging)
 logger = logging.getLogger(__name__)
@@ -58,10 +60,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.critical("SECURITY: %s", exc)
         raise
     await message_bus.connect()
+    scheduler_task = asyncio.create_task(run_scheduled_workflows(), name="workflow-scheduler")
     logger.info("Solvyn started")
     yield
     # Shutdown
     logger.info("Shutting down — draining connections...")
+    scheduler_task.cancel()
+    await asyncio.gather(scheduler_task, return_exceptions=True)
     await message_bus.disconnect()
     from solvyn.llm.router import llm_router
 
