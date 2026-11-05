@@ -22,9 +22,13 @@ class _Session:
     def __init__(self, granted: set[str]) -> None:
         self.granted = granted
         self.records = []
+        self.interrupt_before_completion = False
 
     async def execute(self, statement):
         sql = str(statement)
+        if "UPDATE verification_runs" in sql and self.interrupt_before_completion:
+            self.records[1].status = "interrupted"
+            return _Result(None)
         if "teammate_permissions" in sql:
             parameters = statement.compile().params
             values = [
@@ -40,12 +44,17 @@ class _Session:
         return _Result(uuid.uuid4())
 
     def add(self, record) -> None:
+        if getattr(record, "id", None) is None:
+            record.id = uuid.uuid4()
         self.records.append(record)
 
     async def commit(self) -> None:
         return None
 
     async def refresh(self, _record) -> None:
+        return None
+
+    async def rollback(self) -> None:
         return None
 
 
@@ -178,3 +187,106 @@ async def test_tool_loop_returns_model_result_after_audited_file_write(tmp_path:
     assert session.records[0].status == "succeeded"
     assert requests[0][2]["use_cache"] is False
     assert requests[1][2]["messages"][-1]["role"] == "tool"
+
+
+@pytest.mark.asyncio
+async def test_verification_tool_uses_fixed_profile_and_persists_evidence(tmp_path: Path, monkeypatch) -> None:
+    from solvyn.agents import workspace_tools
+    from solvyn.sandbox.runtime import SandboxResult
+
+    runtime, session, _manager, workspace = _runtime(tmp_path, {"EXECUTE_COMMANDS"})
+
+    class _Runner:
+        async def run(self, received_workspace, command):
+            assert received_workspace.id == workspace.id
+            assert tuple(command) == ("pytest", "-q")
+            return SandboxResult(
+                run_id=uuid.uuid4(),
+                command=("pytest", "-q"),
+                exit_code=0,
+                timed_out=False,
+                stdout="2 passed",
+                stderr="",
+                output_truncated=False,
+                duration_seconds=0.5,
+            )
+
+    monkeypatch.setattr(workspace_tools, "create_sandbox_runner", lambda _manager: _Runner())
+
+    result = await runtime._invoke(
+        {
+            "id": "call-5",
+            "function": {
+                "name": "workspace_run_verification",
+                "arguments": '{"kind":"test"}',
+            },
+        }
+    )
+
+    assert result["kind"] == "test"
+    assert result["status"] == "passed"
+    assert result["stdout"] == "2 passed"
+    assert session.records[0].status == "succeeded"
+    verification = session.records[1]
+    assert verification.status == "passed"
+    assert verification.command == '["pytest", "-q"]'
+    assert verification.source_digest is not None
+
+
+@pytest.mark.asyncio
+async def test_verification_tool_requires_execute_commands_grant(tmp_path: Path) -> None:
+    runtime, session, _manager, _workspace = _runtime(tmp_path, {"READ_ONLY"})
+
+    result = await runtime._invoke(
+        {
+            "id": "call-6",
+            "function": {
+                "name": "workspace_run_verification",
+                "arguments": '{"kind":"test"}',
+            },
+        }
+    )
+
+    assert result == {"error": "permission_denied"}
+    assert len(session.records) == 1
+    assert session.records[0].status == "denied"
+    available = {tool["function"]["name"] for tool in runtime._tool_definitions({"READ_ONLY"})}
+    assert "workspace_run_verification" not in available
+
+
+@pytest.mark.asyncio
+async def test_late_verification_result_does_not_overwrite_interrupted_run(tmp_path: Path, monkeypatch) -> None:
+    from solvyn.agents import workspace_tools
+    from solvyn.sandbox.runtime import SandboxResult
+
+    runtime, session, _manager, workspace = _runtime(tmp_path, {"EXECUTE_COMMANDS"})
+    session.interrupt_before_completion = True
+
+    class _Runner:
+        async def run(self, _received_workspace, command):
+            return SandboxResult(
+                run_id=uuid.uuid4(),
+                command=tuple(command),
+                exit_code=0,
+                timed_out=False,
+                stdout="late result",
+                stderr="",
+                output_truncated=False,
+                duration_seconds=1.0,
+            )
+
+    monkeypatch.setattr(workspace_tools, "create_sandbox_runner", lambda _manager: _Runner())
+
+    result = await runtime._invoke(
+        {
+            "id": "call-7",
+            "function": {
+                "name": "workspace_run_verification",
+                "arguments": '{"kind":"test"}',
+            },
+        }
+    )
+
+    assert result["status"] == "interrupted"
+    assert result["error_code"] == "verification_run_already_terminal"
+    assert session.records[1].status == "interrupted"

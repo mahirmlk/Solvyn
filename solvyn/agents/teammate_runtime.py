@@ -96,8 +96,8 @@ def build_teammate_system_context(
         sections.append("Persistent teammate memory for this project:")
         sections.extend(f"- {row.key}: {row.value[:2_000]}" for row in memory)
     sections.append(
-        "Granted teammate permissions (the task workspace tool runtime enforces READ_ONLY and MODIFY_FILES; "
-        "other permission types do not expose tools in this runtime): "
+        "Granted teammate permissions (the task workspace tool runtime enforces READ_ONLY, MODIFY_FILES, "
+        "and fixed-profile EXECUTE_COMMANDS; other permission types do not expose tools in this runtime): "
         + (", ".join(sorted(permissions)) if permissions else "none")
     )
     return "\n".join(sections)[:_MAX_CONTEXT_CHARS]
@@ -241,7 +241,7 @@ async def run_teammate(
         )
         workspace_record = workspace_result.scalar_one_or_none()
         if handoff_id is not None and workspace_record is not None and (
-            "READ_ONLY" in permissions or "MODIFY_FILES" in permissions
+            "READ_ONLY" in permissions or "MODIFY_FILES" in permissions or "EXECUTE_COMMANDS" in permissions
         ):
             agent_tool_runtime = TeammateWorkspaceToolRuntime(
                 db,

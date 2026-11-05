@@ -32,6 +32,7 @@ from solvyn.db.session import get_session
 from solvyn.multi_tenant.middleware import SHARED_SECRET_PRINCIPAL_ID, tenant_context
 from solvyn.repositories.github import GitHubRepositoryError
 from solvyn.repositories.providers import get_repository_provider
+from solvyn.sandbox.factory import create_sandbox_runner
 from solvyn.sandbox.remote import RemoteSandboxResult, RemoteSandboxRunner
 from solvyn.sandbox.runtime import DockerSandboxRunner, SandboxResult, SandboxRuntimeError
 from solvyn.sandbox.workspaces import WorkspaceError, WorkspaceManager, safe_relative_path
@@ -79,16 +80,7 @@ def _workspace_manager() -> WorkspaceManager:
 
 
 def _sandbox_runner() -> DockerSandboxRunner | RemoteSandboxRunner:
-    manager = _workspace_manager()
-    if settings.sandbox_runtime_url:
-        if not settings.sandbox_runtime_token:
-            raise SandboxRuntimeError("Remote sandbox runtime is missing its service credential")
-        return RemoteSandboxRunner(
-            manager,
-            base_url=settings.sandbox_runtime_url,
-            token=settings.sandbox_runtime_token,
-        )
-    return DockerSandboxRunner(manager, image=settings.sandbox_image)
+    return create_sandbox_runner(_workspace_manager())
 
 
 def _tenant_ref() -> str:
