@@ -13,14 +13,10 @@ from solvyn.repositories.github import GitHubRepositoryError
 from solvyn.sandbox.workspaces import WorkspaceManager
 
 
-class _LazyVerificationApi:
-    def __getattr__(self, name: str) -> Any:
-        from solvyn.api.v1 import verification
+def _verification_api() -> Any:
+    from solvyn.api.v1 import verification
 
-        return getattr(verification, name)
-
-
-verification_api = _LazyVerificationApi()
+    return verification
 
 
 class FakeGitHub:
@@ -107,6 +103,7 @@ def _delivery_fixture(tmp_path: Any) -> tuple[Any, ...]:
 
 @pytest.mark.asyncio
 async def test_delivery_preview_is_bounded_and_digest_binds_workspace_contents(tmp_path: Any) -> None:
+    verification_api = _verification_api()
     manager = WorkspaceManager(tmp_path / "workspaces")
     workspace = manager.create()
     manager.write_file(workspace, "src/main.py", b"print('after')\n")
@@ -129,6 +126,7 @@ async def test_delivery_preview_is_bounded_and_digest_binds_workspace_contents(t
 
 @pytest.mark.asyncio
 async def test_delivery_preview_blocks_missing_source_files_instead_of_implying_deletion(tmp_path: Any) -> None:
+    verification_api = _verification_api()
     manager = WorkspaceManager(tmp_path / "workspaces")
     workspace = manager.create()
     record = SimpleNamespace(source_commit_sha="a" * 40)
@@ -144,6 +142,7 @@ async def test_delivery_preview_blocks_missing_source_files_instead_of_implying_
 
 @pytest.mark.asyncio
 async def test_delivery_preview_blocks_changed_executable_source_files(tmp_path: Any) -> None:
+    verification_api = _verification_api()
     manager = WorkspaceManager(tmp_path / "workspaces")
     workspace = manager.create()
     manager.write_file(workspace, "src/main.py", b"print('after')\n")
@@ -188,6 +187,7 @@ async def test_delivery_preview_blocks_changed_executable_source_files(tmp_path:
 async def test_delivery_preview_rejects_source_file_directory_prefix_collisions(
     tmp_path: Any, added_path: str, source_entries: list[dict[str, Any]]
 ) -> None:
+    verification_api = _verification_api()
     manager = WorkspaceManager(tmp_path / "workspaces")
     workspace = manager.create()
     manager.write_file(workspace, "src/main.py", b"print('after')\n")
@@ -213,6 +213,7 @@ async def test_delivery_preview_rejects_source_file_directory_prefix_collisions(
 async def test_delivery_rejects_stale_preview_before_creating_remote_branch(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    verification_api = _verification_api()
     context = _delivery_fixture(tmp_path)
     github = FakeDeliveryGitHub()
 
@@ -244,6 +245,7 @@ async def test_delivery_rejects_stale_preview_before_creating_remote_branch(
 async def test_delivery_creates_pinned_branch_commit_and_draft_pr(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    verification_api = _verification_api()
     context = _delivery_fixture(tmp_path)
     github = FakeDeliveryGitHub()
     preview = await verification_api._build_delivery_preview(
@@ -277,6 +279,7 @@ async def test_delivery_creates_pinned_branch_commit_and_draft_pr(
 async def test_ambiguous_pull_request_failure_reports_unknown_outcome(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    verification_api = _verification_api()
     context = _delivery_fixture(tmp_path)
     github = AmbiguousPullRequestGitHub()
     preview = await verification_api._build_delivery_preview(
