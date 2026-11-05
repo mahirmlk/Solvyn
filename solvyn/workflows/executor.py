@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import uuid
-from collections.abc import Awaitable
+from collections.abc import Coroutine
 from datetime import timedelta
 from typing import Any
 
@@ -304,10 +304,10 @@ class WorkflowExecutor:
         execution_id: str,
         lease_id: uuid.UUID,
         tenant_id: uuid.UUID,
-        execution: Awaitable[ExecutionGraph],
+        execution: Coroutine[Any, Any, ExecutionGraph],
     ) -> ExecutionGraph:
-        execution_task = asyncio.create_task(execution)
-        heartbeat_task = asyncio.create_task(self._heartbeat(execution_id, lease_id, tenant_id))
+        execution_task: asyncio.Task[ExecutionGraph] = asyncio.create_task(execution)
+        heartbeat_task: asyncio.Task[bool] = asyncio.create_task(self._heartbeat(execution_id, lease_id, tenant_id))
         try:
             done, _ = await asyncio.wait({execution_task, heartbeat_task}, return_when=asyncio.FIRST_COMPLETED)
             if execution_task in done:
@@ -337,9 +337,10 @@ class WorkflowExecutor:
                         ExecutionGraphModel.session_id.in_(select(Session.id).where(Session.tenant_id == tenant_id)),
                     )
                     .values(lease_expires_at=func.now() + _LEASE_DURATION)
+                    .returning(ExecutionGraphModel.id)
                 )
                 await db.commit()
-                if renewed.rowcount != 1:
+                if renewed.scalar_one_or_none() != uuid.UUID(execution_id):
                     return False
 
     async def _mark_failed(self, execution_id: str, lease_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
