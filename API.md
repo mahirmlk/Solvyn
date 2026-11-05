@@ -672,6 +672,18 @@ List verified CI failure and security alert events for organization members. Eac
 
 Mark a proactive event acknowledged. Requires an organization owner or admin.
 
+### `POST /api/v1/organizations/{organization_id}/maintenance-schedules`
+
+Create an owner/admin-configured recurring trigger for code quality, dependency review, or documentation review. The project must belong to the organization. Intervals are limited to 1–30 days, and each project can have at most 10 enabled schedules. Due triggers add a reviewable proactive event; they do not automatically run an agent workflow.
+
+### `GET /api/v1/organizations/{organization_id}/maintenance-schedules`
+
+List an organization's maintenance schedules. Any organization member may read them.
+
+### `PATCH /api/v1/organizations/{organization_id}/maintenance-schedules/{schedule_id}`
+
+Enable or pause a schedule. Requires an organization owner or admin. Re-enabling starts a fresh interval.
+
 ---
 
 ## Observability
