@@ -146,10 +146,21 @@ async def approve(approval_id: uuid.UUID, payload: DecisionIn, db: AsyncSession 
         if resumed_task.scalar_one_or_none() is None:
             await db.rollback()
             raise HTTPException(status_code=409, detail="Task handoff is no longer waiting for approval")
-    approval.status = "approved"
-    approval.decided_by = tenant_context.user_id
-    approval.decision_note = payload.note
-    db.add(approval)
+    decision = await db.execute(
+        update(Approval)
+        .where(Approval.id == approval_id, Approval.status == "pending")
+        .values(
+            status="approved",
+            decided_by=tenant_context.user_id,
+            decided_at=func.now(),
+            decision_note=payload.note,
+            updated_at=func.now(),
+        )
+        .returning(Approval.id)
+    )
+    if decision.scalar_one_or_none() is None:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="Approval is no longer pending")
     await db.commit()
     await db.refresh(approval)
     return _approval_dict(approval)
@@ -188,10 +199,21 @@ async def reject(approval_id: uuid.UUID, payload: DecisionIn, db: AsyncSession =
         if rejected_task.scalar_one_or_none() is None:
             await db.rollback()
             raise HTTPException(status_code=409, detail="Task handoff is no longer waiting for approval")
-    approval.status = "rejected"
-    approval.decided_by = tenant_context.user_id
-    approval.decision_note = payload.note
-    db.add(approval)
+    decision = await db.execute(
+        update(Approval)
+        .where(Approval.id == approval_id, Approval.status == "pending")
+        .values(
+            status="rejected",
+            decided_by=tenant_context.user_id,
+            decided_at=func.now(),
+            decision_note=payload.note,
+            updated_at=func.now(),
+        )
+        .returning(Approval.id)
+    )
+    if decision.scalar_one_or_none() is None:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="Approval is no longer pending")
     await db.commit()
     await db.refresh(approval)
     return _approval_dict(approval)

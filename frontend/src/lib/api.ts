@@ -167,6 +167,23 @@ export interface TeammateInfo {
   updated_at: string;
 }
 
+export interface ApprovalInfo {
+  id: string;
+  organization_id: string;
+  project_id: string | null;
+  teammate_id: string | null;
+  task_handoff_id: string | null;
+  kind: string;
+  summary: string;
+  status: string;
+  requested_by: string;
+  decided_by: string | null;
+  decided_at: string | null;
+  decision_note: string;
+  created_at: string;
+  updated_at: string;
+}
+
 // Admin panel types -----------------------------------------------------
 
 export interface AdminTenant {
@@ -237,6 +254,12 @@ export const api = {
 
   updateTeammate: (teammateId: string, input: { is_enabled: boolean }) =>
     request<TeammateInfo>(`/teammates/${teammateId}`, { method: "PATCH", body: JSON.stringify(input) }),
+
+  listApprovals: (status: "pending" | "approved" | "rejected" = "pending") =>
+    request<{ approvals: ApprovalInfo[]; count: number }>(`/approvals?status=${status}`),
+
+  decideApproval: (approvalId: string, decision: "approve" | "reject", note: string) =>
+    request<ApprovalInfo>(`/approvals/${approvalId}/${decision}`, { method: "POST", body: JSON.stringify({ note }) }),
 
   listAgents: () => request<{ agents: AgentInfo[] }>("/workflows/agents"),
 
