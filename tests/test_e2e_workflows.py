@@ -572,6 +572,58 @@ async def test_feature_workflow_runs_to_completion(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_only_one_concurrent_approval_decision_is_recorded(client: AsyncClient) -> None:
+    from sqlalchemy import select
+
+    from solvyn.db.models import Organization, OrganizationMembership, Tenant, User
+    from solvyn.db.session import async_session_factory
+    from solvyn.identity.security import create_access_token
+
+    user_id = uuid.uuid4()
+    organization_id = uuid.uuid4()
+    async with async_session_factory() as db:
+        tenant = (await db.execute(select(Tenant).where(Tenant.slug == "test-tenant"))).scalar_one()
+        organization = Organization(
+            id=organization_id,
+            name="Approval Race Review",
+            slug=f"approval-race-{uuid.uuid4().hex[:10]}",
+            tenant_id=tenant.id,
+        )
+        db.add_all(
+            [
+                organization,
+                User(id=user_id, email=f"approval-race-{uuid.uuid4().hex[:12]}@example.com", password_hash="test-hash"),
+            ]
+        )
+        await db.flush()
+        db.add(OrganizationMembership(user_id=user_id, organization_id=organization.id, role="owner"))
+        await db.commit()
+
+    client.headers["Authorization"] = f"Bearer {create_access_token(subject=str(user_id))}"
+    client.headers["X-Tenant-Slug"] = "test-tenant"
+    created = await client.post(
+        "/api/v1/approvals",
+        json={"organization_id": str(organization_id), "kind": "command", "summary": "Run the deployment check"},
+    )
+    assert created.status_code == 201
+    approval_id = created.json()["id"]
+
+    approved, rejected = await asyncio.gather(
+        client.post(f"/api/v1/approvals/{approval_id}/approve", json={"note": "Approved"}),
+        client.post(f"/api/v1/approvals/{approval_id}/reject", json={"note": "Rejected"}),
+    )
+    decision_statuses = sorted([approved.status_code, rejected.status_code])
+    assert decision_statuses[0] == 200
+    assert decision_statuses[1] in (400, 409)
+
+    final = await client.get(f"/api/v1/approvals/{approval_id}")
+    assert final.status_code == 200
+    assert final.json()["status"] in {"approved", "rejected"}
+    assert final.json()["decided_by"] == str(user_id)
+    assert final.json()["decided_at"] is not None
+
+
+@pytest.mark.asyncio
 async def test_cancel_abandoned_workflow_execution(client: AsyncClient) -> None:
     """Abandoned and active executions cancel without allowing stale checkpoint writes."""
     import json
