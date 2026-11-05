@@ -100,6 +100,14 @@ class DockerSandboxRunner:
         self.limits = limits or SandboxLimits()
         self.cli_timeout_seconds = cli_timeout_seconds
 
+    async def check_ready(self) -> bool:
+        """Check that the configured engine and prebuilt execution image are available."""
+        engine = await self._cli(["info"], timeout=self.cli_timeout_seconds)
+        if engine.returncode != 0 or engine.timed_out:
+            return False
+        image = await self._cli(["image", "inspect", self.image], timeout=self.cli_timeout_seconds)
+        return image.returncode == 0 and not image.timed_out
+
     async def run(self, workspace: ManagedWorkspace, command: Sequence[str]) -> SandboxResult:
         argv = self._validate_command(command)
         size = self.workspaces.validate_tree(workspace)

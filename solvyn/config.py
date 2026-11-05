@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     sandbox_workspace_root: str = ".solvyn/workspaces"
     sandbox_image: str = "solvyn-sandbox:local"
+    sandbox_runtime_url: str = ""
+    sandbox_runtime_token: str = ""
     enable_workflow_scheduler: bool = True
 
     openrouter_api_key: str = ""
@@ -96,6 +98,8 @@ def enforce_prod_secrets() -> None:
         missing.append("API_KEY_SECRET")
     if not settings.jwt_secret:
         missing.append("JWT_SECRET")
+    if settings.sandbox_runtime_url and not settings.sandbox_runtime_token:
+        missing.append("SANDBOX_RUNTIME_TOKEN")
     if missing:
         raise RuntimeError(
             f"Refusing to start: missing required secrets {', '.join(missing)}. "

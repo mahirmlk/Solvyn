@@ -5,11 +5,12 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-RUN groupadd --system solvyn && useradd --system --gid solvyn --create-home solvyn
+RUN groupadd --system --gid 10001 solvyn && useradd --system --uid 10001 --gid solvyn --create-home solvyn
 
 COPY pyproject.toml ./
 COPY solvyn/ ./solvyn/
 COPY alembic.ini ./alembic.ini
+RUN mkdir -p /app/.solvyn/workspaces && chown -R solvyn:solvyn /app/.solvyn
 RUN pip install --no-cache-dir . && pip cache purge
 
 RUN chown -R solvyn:solvyn /app
