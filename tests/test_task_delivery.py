@@ -9,10 +9,18 @@ from typing import Any
 import pytest
 from fastapi import HTTPException
 
-from solvyn.api.v1 import verification as verification_api
-from solvyn.api.v1.verification import TaskDeliveryRequest, _build_delivery_preview
 from solvyn.repositories.github import GitHubRepositoryError
 from solvyn.sandbox.workspaces import WorkspaceManager
+
+
+class _LazyVerificationApi:
+    def __getattr__(self, name: str) -> Any:
+        from solvyn.api.v1 import verification
+
+        return getattr(verification, name)
+
+
+verification_api = _LazyVerificationApi()
 
 
 class FakeGitHub:
@@ -106,10 +114,10 @@ async def test_delivery_preview_is_bounded_and_digest_binds_workspace_contents(t
     record = SimpleNamespace(source_commit_sha="a" * 40)
     repository = SimpleNamespace(id="repo-id", full_name="octo/repo")
 
-    first = await _build_delivery_preview(
+    first = await verification_api._build_delivery_preview(
         repository, record, ["src/main.py"], manager, workspace, FakeGitHub()  # type: ignore[arg-type]
     )
-    second = await _build_delivery_preview(
+    second = await verification_api._build_delivery_preview(
         repository, record, ["src/main.py"], manager, workspace, FakeGitHub()  # type: ignore[arg-type]
     )
 
@@ -126,7 +134,7 @@ async def test_delivery_preview_blocks_missing_source_files_instead_of_implying_
     record = SimpleNamespace(source_commit_sha="a" * 40)
     repository = SimpleNamespace(id="repo-id", full_name="octo/repo")
 
-    preview = await _build_delivery_preview(
+    preview = await verification_api._build_delivery_preview(
         repository, record, ["src/main.py"], manager, workspace, FakeGitHub()  # type: ignore[arg-type]
     )
 
@@ -143,7 +151,7 @@ async def test_delivery_preview_blocks_changed_executable_source_files(tmp_path:
     repository = SimpleNamespace(id="repo-id", full_name="octo/repo")
 
     with pytest.raises(HTTPException) as error:
-        await _build_delivery_preview(
+        await verification_api._build_delivery_preview(
             repository,
             record,
             ["src/main.py"],
@@ -188,7 +196,7 @@ async def test_delivery_preview_rejects_source_file_directory_prefix_collisions(
     repository = SimpleNamespace(id="repo-id", full_name="octo/repo")
 
     with pytest.raises(HTTPException) as error:
-        await _build_delivery_preview(
+        await verification_api._build_delivery_preview(
             repository,
             record,
             ["src/main.py"],
@@ -213,7 +221,7 @@ async def test_delivery_rejects_stale_preview_before_creating_remote_branch(
 
     monkeypatch.setattr(verification_api, "_task_delivery_context", load_context)
     monkeypatch.setattr(verification_api, "GitHubClient", lambda **_kwargs: github)
-    payload = TaskDeliveryRequest(
+    payload = verification_api.TaskDeliveryRequest(
         expected_diff_digest="0" * 64,
         branch_name="solvyn/task-12",
         commit_message="Update source",
@@ -238,7 +246,7 @@ async def test_delivery_creates_pinned_branch_commit_and_draft_pr(
 ) -> None:
     context = _delivery_fixture(tmp_path)
     github = FakeDeliveryGitHub()
-    preview = await _build_delivery_preview(
+    preview = await verification_api._build_delivery_preview(
         context[2], context[1], context[4], context[5], context[6], FakeGitHub()  # type: ignore[arg-type]
     )
 
@@ -250,7 +258,7 @@ async def test_delivery_creates_pinned_branch_commit_and_draft_pr(
     result = await verification_api.deliver_task_workspace(
         execution_id=uuid.uuid4(),
         task_id=uuid.uuid4(),
-        payload=TaskDeliveryRequest(
+        payload=verification_api.TaskDeliveryRequest(
             expected_diff_digest=preview["diff_digest"],
             branch_name="solvyn/task-12",
             commit_message="Update source",
@@ -271,7 +279,7 @@ async def test_ambiguous_pull_request_failure_reports_unknown_outcome(
 ) -> None:
     context = _delivery_fixture(tmp_path)
     github = AmbiguousPullRequestGitHub()
-    preview = await _build_delivery_preview(
+    preview = await verification_api._build_delivery_preview(
         context[2], context[1], context[4], context[5], context[6], FakeGitHub()  # type: ignore[arg-type]
     )
 
@@ -284,7 +292,7 @@ async def test_ambiguous_pull_request_failure_reports_unknown_outcome(
         await verification_api.deliver_task_workspace(
             execution_id=uuid.uuid4(),
             task_id=uuid.uuid4(),
-            payload=TaskDeliveryRequest(
+            payload=verification_api.TaskDeliveryRequest(
                 expected_diff_digest=preview["diff_digest"],
                 branch_name="solvyn/task-12",
                 commit_message="Update source",
