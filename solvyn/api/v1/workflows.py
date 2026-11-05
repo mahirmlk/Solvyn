@@ -26,9 +26,7 @@ from solvyn.agents.registry import agent_registry
 from solvyn.api_metadata import COMMON_RESPONSES
 from solvyn.config import settings
 from solvyn.db.models import (
-    ExecutionGraph as ExecutionGraphModel,
-)
-from solvyn.db.models import (
+    Approval,
     Project,
     Session,
     Task,
@@ -36,6 +34,9 @@ from solvyn.db.models import (
     TaskHandoff,
     TeammateProfile,
     TeammateProjectAssignment,
+)
+from solvyn.db.models import (
+    ExecutionGraph as ExecutionGraphModel,
 )
 from solvyn.db.session import async_session_factory, get_session
 from solvyn.workflows.executor import workflow_executor
@@ -299,6 +300,7 @@ class TaskHandoffRequest(BaseModel):
     project_id: uuid.UUID
     reason: str = Field(min_length=1, max_length=2000)
     input_data: dict[str, Any] = Field(default_factory=dict)
+    requires_approval: bool = False
 
 
 @router.get(
@@ -538,6 +540,7 @@ async def list_workflow_execution_tasks(
             .all()
         )
     handoffs: list[TaskHandoff] = []
+    approvals_by_handoff: dict[uuid.UUID, Approval] = {}
     if task_ids:
         handoffs = list(
             (
@@ -553,6 +556,13 @@ async def list_workflow_execution_tasks(
             .scalars()
             .all()
         )
+        if handoffs:
+            approvals = (
+                await db.execute(
+                    select(Approval).where(Approval.task_handoff_id.in_([handoff.id for handoff in handoffs]))
+                )
+            ).scalars().all()
+            approvals_by_handoff = {approval.task_handoff_id: approval for approval in approvals if approval.task_handoff_id}
     depends_on: dict[uuid.UUID, list[str]] = {}
     for dependency in dependencies:
         depends_on.setdefault(dependency.task_id, []).append(str(dependency.depends_on_task_id))
@@ -586,6 +596,9 @@ async def list_workflow_execution_tasks(
                 "child_task_id": str(handoff.child_task_id),
                 "teammate_id": str(handoff.teammate_id),
                 "project_id": str(handoff.project_id),
+                "requires_approval": handoff.requires_approval,
+                "approval_id": str(approvals_by_handoff[handoff.id].id) if handoff.id in approvals_by_handoff else None,
+                "approval_status": approvals_by_handoff[handoff.id].status if handoff.id in approvals_by_handoff else None,
                 "delegated_from": handoff.delegated_from,
                 "delegated_to": handoff.delegated_to,
                 "reason": handoff.reason,
@@ -652,6 +665,7 @@ async def create_task_handoff(
         or handoff.project_id != payload.project_id
         or handoff.reason != payload.reason
         or handoff.input_data != input_json
+        or handoff.requires_approval != payload.requires_approval
     ):
         raise HTTPException(status_code=409, detail="Idempotency key was already used for a different handoff")
     if handoff is not None and handoff.status == "completed":
@@ -664,6 +678,19 @@ async def create_task_handoff(
             "status": "completed",
             "output": json.loads(handoff.output_data) if handoff.output_data else None,
         }
+    if handoff is not None and handoff.status == "waiting_approval":
+        approval = (
+            await db.execute(select(Approval).where(Approval.task_handoff_id == handoff.id))
+        ).scalar_one_or_none()
+        return {
+            "handoff_id": str(handoff.id),
+            "task_id": str(handoff.child_task_id),
+            "status": "waiting_approval",
+            "approval_id": str(approval.id) if approval else None,
+            "approval_status": approval.status if approval else "pending",
+        }
+    if handoff is not None and handoff.status == "rejected":
+        return {"handoff_id": str(handoff.id), "task_id": str(handoff.child_task_id), "status": "rejected"}
 
     depth = 0
     ancestor = parent
@@ -715,7 +742,7 @@ async def create_task_handoff(
             title=f"Delegated to {teammate.name}: {parent.title}",
             description=input_json,
             assigned_agent=teammate.agent_type,
-            status="pending",
+            status="waiting_approval" if payload.requires_approval else "pending",
             priority=parent.priority,
             parent_task_id=parent.id,
         )
@@ -731,10 +758,35 @@ async def create_task_handoff(
             delegated_to=teammate.agent_type,
             reason=payload.reason,
             input_data=input_json,
-            status="pending",
+            status="waiting_approval" if payload.requires_approval else "pending",
+            requires_approval=payload.requires_approval,
         )
         db.add_all([child, handoff])
         try:
+            if payload.requires_approval:
+                await db.flush()
+                project = await db.get(Project, payload.project_id)
+                if project is None or project.tenant_id != tenant_id:
+                    raise HTTPException(status_code=404, detail="Assigned project not found")
+                db.add(
+                    Approval(
+                        organization_id=project.organization_id,
+                        project_id=project.id,
+                        teammate_id=teammate.id,
+                        task_handoff_id=handoff.id,
+                        kind="plan",
+                        summary=payload.reason,
+                        payload=json.dumps(
+                            {
+                                "task_id": str(child.id),
+                                "handoff_id": str(handoff.id),
+                                "delegated_to": teammate.agent_type,
+                                "input": payload.input_data,
+                            }
+                        ),
+                        requested_by=parent.assigned_agent or "workflow",
+                    )
+                )
             await db.commit()
         except IntegrityError:
             await db.rollback()
@@ -754,6 +806,7 @@ async def create_task_handoff(
                 or handoff.project_id != payload.project_id
                 or handoff.reason != payload.reason
                 or handoff.input_data != input_json
+                or handoff.requires_approval != payload.requires_approval
             ):
                 raise HTTPException(status_code=409, detail="Idempotency key was already used for a different handoff")
             teammate = (
@@ -767,10 +820,25 @@ async def create_task_handoff(
             ).scalar_one_or_none()
             if teammate is None:
                 raise HTTPException(status_code=409, detail="Assigned teammate is disabled")
+            child = (
+                await db.execute(select(Task).where(Task.id == handoff.child_task_id, Task.tenant_id == tenant_id))
+            ).scalar_one()
     else:
         child = (
             await db.execute(select(Task).where(Task.id == handoff.child_task_id, Task.tenant_id == tenant_id))
         ).scalar_one()
+
+    if handoff.status == "waiting_approval":
+        approval = (
+            await db.execute(select(Approval).where(Approval.task_handoff_id == handoff.id))
+        ).scalar_one_or_none()
+        return {
+            "handoff_id": str(handoff.id),
+            "task_id": str(child.id),
+            "status": "waiting_approval",
+            "approval_id": str(approval.id) if approval else None,
+            "approval_status": approval.status if approval else "pending",
+        }
 
     try:
         return await _execute_task_handoff(

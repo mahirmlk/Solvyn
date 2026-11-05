@@ -188,16 +188,19 @@ async def test_feature_workflow_runs_to_completion(client: AsyncClient) -> None:
 
     from solvyn.db.models import (
         Organization,
+        OrganizationMembership,
         Project,
         TeammateProfile,
         TeammateProjectAssignment,
         TeammateStatus,
         Tenant,
+        User,
     )
     from solvyn.db.session import async_session_factory
 
     project_id = uuid.uuid4()
     teammate_id = uuid.uuid4()
+    user_id = uuid.uuid4()
     async with async_session_factory() as db:
         tenant = (await db.execute(select(Tenant).where(Tenant.slug == "test-tenant"))).scalar_one()
         organization = Organization(
@@ -228,6 +231,8 @@ async def test_feature_workflow_runs_to_completion(client: AsyncClient) -> None:
                 project,
                 teammate,
                 TeammateProjectAssignment(teammate_id=teammate_id, project_id=project_id),
+                User(id=user_id, email=f"handoff-{uuid.uuid4().hex[:12]}@example.com", password_hash="test-hash"),
+                OrganizationMembership(user_id=user_id, organization_id=organization.id, role="owner"),
             ]
         )
         await db.commit()
@@ -240,13 +245,47 @@ async def test_feature_workflow_runs_to_completion(client: AsyncClient) -> None:
             "project_id": str(project_id),
             "reason": "Implement the assigned backend follow-up",
             "input_data": {"task": "Implement the assigned backend follow-up"},
+            "requires_approval": True,
         },
     )
-    assert handoff_response.status_code == 409
+    assert handoff_response.status_code == 200
+    assert handoff_response.json()["status"] == "waiting_approval"
 
     pending_tasks = await client.get(f"/api/v1/workflows/executions/{data['execution_id']}/tasks")
     pending_handoff = pending_tasks.json()["handoffs"][0]
-    assert pending_handoff["status"] == "pending"
+    assert pending_handoff["status"] == "waiting_approval"
+    assert pending_handoff["approval_status"] == "pending"
+    approval_replay = await client.post(
+        f"/api/v1/workflows/executions/{data['execution_id']}/tasks/{tasks[0]['task_id']}/handoffs",
+        json={
+            "idempotency_key": pending_handoff["idempotency_key"],
+            "target_teammate_id": str(teammate_id),
+            "project_id": str(project_id),
+            "reason": "Implement the assigned backend follow-up",
+            "input_data": {"task": "Implement the assigned backend follow-up"},
+            "requires_approval": True,
+        },
+    )
+    assert approval_replay.status_code == 200
+    assert approval_replay.json()["approval_id"] == pending_handoff["approval_id"]
+
+    from solvyn.identity.security import create_access_token
+
+    client.headers["Authorization"] = f"Bearer {create_access_token(subject=str(user_id))}"
+    client.headers["X-Tenant-Slug"] = "test-tenant"
+    inbox = await client.get("/api/v1/approvals")
+    assert inbox.status_code == 200
+    approval = next(item for item in inbox.json()["approvals"] if item["task_handoff_id"] == pending_handoff["handoff_id"])
+    approved = await client.post(f"/api/v1/approvals/{approval['id']}/approve", json={"note": "Approved for execution"})
+    assert approved.status_code == 200
+    assert approved.json()["status"] == "approved"
+
+    handoff_response = await client.post(
+        f"/api/v1/workflows/executions/{data['execution_id']}/tasks/{tasks[0]['task_id']}/handoffs/{pending_handoff['handoff_id']}/resume"
+    )
+    assert handoff_response.status_code == 409
+    assert handoff_response.json()["detail"] == "Teammate is already running; retry this handoff"
+
     async with async_session_factory() as db:
         await db.execute(
             update(TeammateProfile)
@@ -277,11 +316,49 @@ async def test_feature_workflow_runs_to_completion(client: AsyncClient) -> None:
             "project_id": str(project_id),
             "reason": "Implement the assigned backend follow-up",
             "input_data": {"task": "Implement the assigned backend follow-up"},
+            "requires_approval": True,
         },
     )
     assert repeated_handoff.status_code == 200
     assert repeated_handoff.json()["handoff_id"] == handoffs[0]["handoff_id"]
     assert len((await client.get(f"/api/v1/workflows/executions/{data['execution_id']}/tasks")).json()["tasks"]) == 10
+
+    rejected_request = await client.post(
+        f"/api/v1/workflows/executions/{data['execution_id']}/tasks/{tasks[0]['task_id']}/handoffs",
+        json={
+            "idempotency_key": str(uuid.uuid4()),
+            "target_teammate_id": str(teammate_id),
+            "project_id": str(project_id),
+            "reason": "Prepare a second backend follow-up",
+            "input_data": {"task": "Prepare a second backend follow-up"},
+            "requires_approval": True,
+        },
+    )
+    assert rejected_request.status_code == 200
+    assert rejected_request.json()["status"] == "waiting_approval"
+    approval_inbox = await client.get("/api/v1/approvals")
+    second_approval = next(
+        item
+        for item in approval_inbox.json()["approvals"]
+        if item["task_handoff_id"] == rejected_request.json()["handoff_id"]
+    )
+    rejected = await client.post(
+        f"/api/v1/approvals/{second_approval['id']}/reject",
+        json={"note": "Needs a clearer scope"},
+    )
+    assert rejected.status_code == 200
+    assert rejected.json()["status"] == "rejected"
+    rejected_tasks = await client.get(f"/api/v1/workflows/executions/{data['execution_id']}/tasks")
+    rejected_handoff = next(
+        handoff
+        for handoff in rejected_tasks.json()["handoffs"]
+        if handoff["handoff_id"] == rejected_request.json()["handoff_id"]
+    )
+    assert rejected_handoff["status"] == "rejected"
+    rejected_child = next(
+        task for task in rejected_tasks.json()["tasks"] if task["task_id"] == rejected_handoff["child_task_id"]
+    )
+    assert rejected_child["status"] == "failed"
 
     agent_types = {n["agent_type"] for n in data["nodes"]}
     expected = {

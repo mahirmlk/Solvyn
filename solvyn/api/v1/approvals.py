@@ -2,7 +2,7 @@
 
 Agents request approval for plan / command / file-change / pull-request /
 merge / deploy actions. A human approves or rejects; the decision is
-audited and the agent execution resumes (Phase 5 wires resume).
+audited, and linked teammate handoffs become resumable after approval.
 """
 
 from __future__ import annotations
@@ -11,11 +11,11 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.api.v1._rbac import ANY_ROLE, OWNER_ADMIN, require_org_membership, require_tenant
-from solvyn.db.models import Approval, Organization, OrganizationMembership, Project, TeammateProfile
+from solvyn.db.models import Approval, Organization, OrganizationMembership, Project, Task, TaskHandoff, TeammateProfile
 from solvyn.db.session import get_session
 from solvyn.multi_tenant.middleware import tenant_context
 
@@ -28,6 +28,7 @@ def _approval_dict(a: Approval) -> dict[str, object]:
         "organization_id": str(a.organization_id),
         "project_id": str(a.project_id) if a.project_id else None,
         "teammate_id": str(a.teammate_id) if a.teammate_id else None,
+        "task_handoff_id": str(a.task_handoff_id) if a.task_handoff_id else None,
         "kind": a.kind,
         "summary": a.summary,
         "status": a.status,
@@ -120,6 +121,31 @@ async def approve(approval_id: uuid.UUID, payload: DecisionIn, db: AsyncSession 
     await require_org_membership(db, approval.organization_id, roles=OWNER_ADMIN)
     if approval.status != "pending":
         raise HTTPException(status_code=400, detail=f"Approval is already {approval.status}")
+    if approval.task_handoff_id is not None:
+        tenant_id = require_tenant()
+        resumed = await db.execute(
+            update(TaskHandoff)
+            .where(
+                TaskHandoff.id == approval.task_handoff_id,
+                TaskHandoff.tenant_id == tenant_id,
+                TaskHandoff.status == "waiting_approval",
+            )
+            .values(status="pending", error=None)
+            .returning(TaskHandoff.child_task_id)
+        )
+        child_task_id = resumed.scalar_one_or_none()
+        if child_task_id is None:
+            await db.rollback()
+            raise HTTPException(status_code=409, detail="Task handoff is no longer waiting for approval")
+        resumed_task = await db.execute(
+            update(Task)
+            .where(Task.id == child_task_id, Task.tenant_id == tenant_id, Task.status == "waiting_approval")
+            .values(status="pending", error=None)
+            .returning(Task.id)
+        )
+        if resumed_task.scalar_one_or_none() is None:
+            await db.rollback()
+            raise HTTPException(status_code=409, detail="Task handoff is no longer waiting for approval")
     approval.status = "approved"
     approval.decided_by = tenant_context.user_id
     approval.decision_note = payload.note
@@ -137,6 +163,31 @@ async def reject(approval_id: uuid.UUID, payload: DecisionIn, db: AsyncSession =
     await require_org_membership(db, approval.organization_id, roles=OWNER_ADMIN)
     if approval.status != "pending":
         raise HTTPException(status_code=400, detail=f"Approval is already {approval.status}")
+    if approval.task_handoff_id is not None:
+        tenant_id = require_tenant()
+        rejected = await db.execute(
+            update(TaskHandoff)
+            .where(
+                TaskHandoff.id == approval.task_handoff_id,
+                TaskHandoff.tenant_id == tenant_id,
+                TaskHandoff.status == "waiting_approval",
+            )
+            .values(status="rejected", error=payload.note or "Task handoff was rejected")
+            .returning(TaskHandoff.child_task_id)
+        )
+        child_task_id = rejected.scalar_one_or_none()
+        if child_task_id is None:
+            await db.rollback()
+            raise HTTPException(status_code=409, detail="Task handoff is no longer waiting for approval")
+        rejected_task = await db.execute(
+            update(Task)
+            .where(Task.id == child_task_id, Task.tenant_id == tenant_id, Task.status == "waiting_approval")
+            .values(status="failed", error=payload.note or "Task handoff was rejected", completed_at=func.now())
+            .returning(Task.id)
+        )
+        if rejected_task.scalar_one_or_none() is None:
+            await db.rollback()
+            raise HTTPException(status_code=409, detail="Task handoff is no longer waiting for approval")
     approval.status = "rejected"
     approval.decided_by = tenant_context.user_id
     approval.decision_note = payload.note

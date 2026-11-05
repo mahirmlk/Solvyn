@@ -403,7 +403,7 @@ Workflow snapshots are saved as nodes start and finish. Workers renew a 60-secon
 
 Each workflow node also has a durable task record. The task endpoint exposes its assigned agent, dependency task IDs, execution status, attempt count, timestamps, inputs, outputs, and errors. Recovery attempts are currently uncapped; `max_attempts` is null until a retry budget is configured.
 
-Task handoffs require a caller-provided `idempotency_key`; repeating the same request reuses its durable child task instead of creating duplicate work. Each handoff records the source and target teammate, project, reason, input, output, and status. Delegation is limited to three levels and only runs teammates assigned to the requested project in the caller's tenant.
+Task handoffs require a caller-provided `idempotency_key`; repeating the same request reuses its durable child task instead of creating duplicate work. Each handoff records the source and target teammate, project, reason, input, output, and status. Delegation is limited to three levels and only runs teammates assigned to the requested project in the caller's tenant. Set `requires_approval` to `true` to persist a human approval checkpoint before the teammate runs. Organization owners or admins can approve or reject it through the approval inbox; an approved handoff is resumed through its task handoff resume route.
 
 ### Observability
 
