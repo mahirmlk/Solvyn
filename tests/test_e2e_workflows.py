@@ -359,6 +359,27 @@ async def test_acceptance_criteria_require_an_owner_admin_decision(client: Async
 
 
 @pytest.mark.asyncio
+async def test_task_inbox_lists_durable_tenant_tasks_with_filters(client: AsyncClient) -> None:
+    workflow = await client.post("/api/v1/workflows/feature/run", json={"requirement": "Build the task inbox"})
+    assert workflow.status_code == 200
+    execution_id = workflow.json()["execution_id"]
+    history = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
+    expected_ids = {item["task_id"] for item in history.json()["tasks"]}
+
+    inbox = await client.get("/api/v1/workflows/tasks?limit=100")
+    assert inbox.status_code == 200
+    listed = [task for task in inbox.json()["tasks"] if task["execution_id"] == execution_id]
+    assert {task["task_id"] for task in listed} == expected_ids
+    assert all(task["title"] and task["status"] and task["assigned_agent"] for task in listed)
+
+    completed = await client.get("/api/v1/workflows/tasks?status=completed&limit=100")
+    assert completed.status_code == 200
+    assert all(task["status"] == "completed" for task in completed.json()["tasks"])
+    invalid_limit = await client.get("/api/v1/workflows/tasks?limit=0")
+    assert invalid_limit.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_feature_workflow_runs_to_completion(client: AsyncClient) -> None:
     """POST /workflows/feature/run completes synchronously with all 9 nodes."""
     response = await client.post(

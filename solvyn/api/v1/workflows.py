@@ -16,7 +16,7 @@ from collections.abc import Coroutine
 from datetime import datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -344,6 +344,52 @@ async def list_agents() -> dict[str, Any]:
         "agents": [
             {"type": at, "name": m.name, "description": m.description, "capabilities": [c.value for c in m.capabilities]} for at, m in agents_data.items()
         ]
+    }
+
+
+@router.get("/tasks", summary="List recent tenant-scoped workflow tasks")
+async def list_recent_workflow_tasks(
+    limit: int = Query(default=50, ge=1, le=100),
+    status: str | None = Query(default=None, min_length=1, max_length=50),
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    tenant_ref = _workflow_tenant_ref()
+    try:
+        tenant_id = await workflow_executor._resolve_tenant_uuid(tenant_ref)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Workflow tenant is not configured") from exc
+
+    query = (
+        select(Task)
+        .join(ExecutionGraphModel, ExecutionGraphModel.id == Task.execution_id)
+        .join(Session, Session.id == ExecutionGraphModel.session_id)
+        .where(Task.tenant_id == tenant_id, Session.tenant_id == tenant_id)
+    )
+    if status is not None:
+        query = query.where(Task.status == status)
+    result = await db.execute(query.order_by(Task.created_at.desc(), Task.id).limit(limit))
+    tasks = result.scalars().all()
+    return {
+        "tasks": [
+            {
+                "task_id": str(task.id),
+                "execution_id": str(task.execution_id),
+                "session_id": str(task.session_id) if task.session_id else None,
+                "title": task.title,
+                "description": task.description[:4_000] if task.description else "",
+                "assigned_agent": task.assigned_agent,
+                "status": task.status,
+                "priority": task.priority,
+                "attempt_count": task.attempt_count,
+                "max_attempts": task.max_attempts,
+                "error": task.error[:4_000] if task.error else None,
+                "created_at": task.created_at.isoformat() if task.created_at else "",
+                "updated_at": task.updated_at.isoformat() if task.updated_at else "",
+                "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+            }
+            for task in tasks
+        ],
+        "count": len(tasks),
     }
 
 

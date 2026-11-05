@@ -184,6 +184,23 @@ export interface ApprovalInfo {
   updated_at: string;
 }
 
+export interface WorkflowTaskInfo {
+  task_id: string;
+  execution_id: string;
+  session_id: string | null;
+  title: string;
+  description: string;
+  assigned_agent: string | null;
+  status: string;
+  priority: number;
+  attempt_count: number;
+  max_attempts: number | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
 // Admin panel types -----------------------------------------------------
 
 export interface AdminTenant {
@@ -260,6 +277,13 @@ export const api = {
 
   decideApproval: (approvalId: string, decision: "approve" | "reject", note: string) =>
     request<ApprovalInfo>(`/approvals/${approvalId}/${decision}`, { method: "POST", body: JSON.stringify({ note }) }),
+
+  listWorkflowTasks: (params?: { limit?: number; status?: string }) => {
+    const query = new URLSearchParams();
+    if (params?.limit) query.set("limit", String(params.limit));
+    if (params?.status) query.set("status", params.status);
+    return request<{ tasks: WorkflowTaskInfo[]; count: number }>(`/workflows/tasks?${query}`);
+  },
 
   listAgents: () => request<{ agents: AgentInfo[] }>("/workflows/agents"),
 
