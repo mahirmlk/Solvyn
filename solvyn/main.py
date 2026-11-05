@@ -26,6 +26,7 @@ from solvyn.api.v1 import health, sessions, verification, workflows
 from solvyn.api.v1.admin import router as admin_router
 from solvyn.api.v1.approvals import router as approvals_router
 from solvyn.api.v1.auth import router as auth_router
+from solvyn.api.v1.integrations import router as integrations_router
 from solvyn.api.v1.organizations import router as organizations_router
 from solvyn.api.v1.repositories import router as repositories_router
 from solvyn.api.v1.teammates import router as teammates_router
@@ -175,6 +176,7 @@ def create_app() -> FastAPI:
     solvyn_app.include_router(admin_router, prefix="/api/v1")
     solvyn_app.include_router(auth_router, prefix="/api/v1")
     solvyn_app.include_router(organizations_router, prefix="/api/v1")
+    solvyn_app.include_router(integrations_router, prefix="/api/v1")
     solvyn_app.include_router(repositories_router, prefix="/api/v1")
     solvyn_app.include_router(teammates_router, prefix="/api/v1")
     solvyn_app.include_router(approvals_router, prefix="/api/v1")

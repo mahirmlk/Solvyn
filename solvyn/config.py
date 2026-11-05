@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     refresh_token_ttl_days: int = 30
     allow_public_registration: bool = False
     bootstrap_token: str = ""
+    # Comma-separated Fernet keys; first key encrypts new credentials and all listed keys can decrypt.
+    integration_encryption_keys: str = ""
     # Local dev only: allows booting without real secrets.
     # Must remain False in any networked deployment.
     allow_insecure_dev: bool = False

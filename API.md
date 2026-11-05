@@ -587,6 +587,20 @@ These endpoints require a user JWT in `Authorization: Bearer <access-token>` and
 
 The GitHub provider currently supports public repositories. Inspection is read-only: it does not clone repositories, execute repository code, or change remote branches. Repository text and metadata are untrusted input.
 
+### `GET /api/v1/organizations/{organization_id}/integrations/github`
+
+Read the GitHub credential connection status. Requires organization membership. The response reports the GitHub account login and last update time; it never returns a credential.
+
+### `PUT /api/v1/organizations/{organization_id}/integrations/github`
+
+Connect or replace an organization GitHub token. Requires owner or admin membership. Solvyn validates the token with GitHub, encrypts it with `INTEGRATION_ENCRYPTION_KEYS`, and returns only the connected account. If no encryption key is configured, this endpoint returns `503` without contacting GitHub or storing the token.
+
+### `DELETE /api/v1/organizations/{organization_id}/integrations/github`
+
+Disconnect the organization GitHub token. Requires owner or admin membership and deletes the encrypted credential.
+
+Generate a Fernet key with the command in `.env.example`. For key rotation, configure the new key first and retain the previous keys in the comma-separated list; reconnect each organization integration so its token is encrypted with the new key before removing old keys. A fine-grained GitHub token scoped to the required repositories is recommended; never send tokens through query parameters.
+
 ### `POST /api/v1/projects/{project_id}/repositories`
 
 Connect a public GitHub repository to a project. Requires an organization owner or admin.

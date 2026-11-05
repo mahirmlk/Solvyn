@@ -82,17 +82,23 @@ def validate_full_name(full_name: str) -> tuple[str, str]:
 class GitHubClient(RepositoryProvider):
     """Small GitHub REST client; supports httpx transport injection for tests."""
 
-    def __init__(self, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(self, client: httpx.AsyncClient | None = None, *, token: str | None = None) -> None:
         self._owns_client = client is None
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "Solvyn-Repository-Inspector/1.0",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         self.http = client or httpx.AsyncClient(
             base_url="https://api.github.com",
             timeout=httpx.Timeout(15.0, connect=5.0),
-            headers={
-                "Accept": "application/vnd.github+json",
-                "User-Agent": "Solvyn-Repository-Inspector/1.0",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
+            headers=headers,
         )
+        # Inject credentials per request when the caller owns the client. This
+        # avoids leaving an organization token on a shared AsyncClient.
+        self._request_headers = {"Authorization": f"Bearer {token}"} if token and client is not None else None
 
     async def __aenter__(self) -> GitHubClient:
         return self
@@ -105,7 +111,7 @@ class GitHubClient(RepositoryProvider):
         self, path: str, *, params: dict[str, str] | None = None
     ) -> Any:
         try:
-            response = await self.http.get(path, params=params)
+            response = await self.http.get(path, params=params, headers=self._request_headers)
         except httpx.TimeoutException as exc:
             raise GitHubRepositoryError(504, "GitHub request timed out") from exc
         except httpx.HTTPError as exc:
@@ -117,6 +123,8 @@ class GitHubClient(RepositoryProvider):
             raise GitHubRepositoryError(429, "GitHub rate limit reached")
         if response.status_code == 403:
             raise GitHubRepositoryError(429, "GitHub rate limit or access restriction reached")
+        if response.status_code == 401:
+            raise GitHubRepositoryError(401, "GitHub rejected the credential")
         if response.status_code >= 500:
             raise GitHubRepositoryError(502, "GitHub is temporarily unavailable")
         if not response.is_success:
@@ -135,7 +143,10 @@ class GitHubClient(RepositoryProvider):
 
     async def _get_text(self, path: str, *, accept: str, max_bytes: int) -> str:
         try:
-            async with self.http.stream("GET", path, headers={"Accept": accept}) as response:
+            headers = {"Accept": accept}
+            if self._request_headers:
+                headers.update(self._request_headers)
+            async with self.http.stream("GET", path, headers=headers) as response:
                 if response.status_code == 404:
                     raise GitHubRepositoryError(404, "Public GitHub repository or resource not found")
                 if response.status_code == 429:
@@ -184,6 +195,16 @@ class GitHubClient(RepositoryProvider):
             "url": str(data.get("html_url") or f"https://github.com/{canonical_name}")[:512],
             "private": bool(data.get("private", False)),
         }
+
+    async def authenticated_identity(self) -> dict[str, str]:
+        """Validate the configured token without returning or logging it."""
+        data = await self._get_json("/user")
+        try:
+            login = str(data["login"])
+            account_id = str(int(data["id"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise GitHubRepositoryError(502, "GitHub returned incomplete account information") from exc
+        return {"login": login[:255], "account_id": account_id}
 
     async def repository_tree(self, full_name: str, branch: str) -> tuple[str, list[dict[str, Any]]]:
         owner, repo = validate_full_name(full_name)

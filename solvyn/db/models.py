@@ -3,7 +3,7 @@ from datetime import datetime
 from enum import StrEnum
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func, text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, LargeBinary, Numeric, String, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -486,7 +486,7 @@ class ProjectMembership(Base):
 
 
 class Integration(Base):
-    """External integration connection (GitHub in Phase 2). Secrets never here."""
+    """External integration connection; sensitive credentials live separately."""
 
     __tablename__ = "integrations"
 
@@ -502,8 +502,24 @@ class Integration(Base):
     __table_args__ = (UniqueConstraint("organization_id", "provider", "external_id"),)
 
 
+class IntegrationCredential(Base):
+    """Encrypted integration credentials; plaintext is only present in process memory."""
+
+    __tablename__ = "integration_credentials"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    integration_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("integrations.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    account_login: Mapped[str] = mapped_column(String(255), nullable=False)
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class Repository(Base):
-    """A connected git repository. Token storage lives in encrypted vault (Phase 2), never here."""
+    """A connected git repository; tokens live in encrypted integration storage."""
 
     __tablename__ = "repositories"
 
