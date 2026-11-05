@@ -228,10 +228,11 @@ async def test_task_verification_is_sandboxed_and_durable(
     monkeypatch.setattr(DockerSandboxRunner, "run", fake_run)
     verification = await client.post(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs",
-        json={"kind": "test", "command": ["pytest", "-q"]},
+        json={"kind": "test"},
     )
     assert verification.status_code == 200
     assert verification.json()["status"] == "passed"
+    assert verification.json()["command"] == ["pytest", "-q"]
     assert verification.json()["stdout"] == "1 passed"
 
     history = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
