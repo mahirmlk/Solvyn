@@ -1,4 +1,4 @@
-"""Repository connections and read-only codebase intelligence."""
+"""Repository connections, intelligence, and bounded GitHub writes."""
 
 from __future__ import annotations
 
@@ -14,7 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from solvyn.api.v1._rbac import ANY_ROLE, OWNER_ADMIN, require_org_membership, require_tenant
 from solvyn.db.models import Integration, Project, Repository
 from solvyn.db.session import get_session
-from solvyn.repositories.github import GitHubRepositoryError
+from solvyn.repositories.credentials import (
+    CredentialEncryptionUnavailableError,
+    GitHubCredentialNotFoundError,
+    load_organization_github_token,
+)
+from solvyn.repositories.github import GitHubClient, GitHubRepositoryError
 from solvyn.repositories.providers import get_repository_provider
 
 router = APIRouter(tags=["repositories", "repository intelligence"])
@@ -22,6 +27,29 @@ router = APIRouter(tags=["repositories", "repository intelligence"])
 
 class RepositoryConnect(BaseModel):
     full_name: str = Field(..., min_length=3, max_length=255, description="GitHub owner/repository")
+
+
+class BranchCreate(BaseModel):
+    branch_name: str = Field(..., min_length=8, max_length=240)
+    from_branch: str | None = Field(default=None, max_length=255)
+
+
+class CommitFileInput(BaseModel):
+    path: str = Field(..., min_length=1, max_length=512)
+    content: str = Field(..., max_length=500_000)
+
+
+class CommitCreate(BaseModel):
+    branch: str = Field(..., min_length=8, max_length=240)
+    expected_head_sha: str = Field(..., min_length=1, max_length=64)
+    message: str = Field(..., min_length=1, max_length=2000)
+    files: list[CommitFileInput] = Field(..., min_length=1, max_length=50)
+
+
+class PullRequestCreate(BaseModel):
+    head: str = Field(..., min_length=8, max_length=240)
+    title: str = Field(..., min_length=1, max_length=256)
+    body: str = Field(default="", max_length=20_000)
 
 
 def _repository_dict(repository: Repository) -> dict[str, object]:
@@ -53,6 +81,21 @@ async def _load_authorized_repository(
         raise HTTPException(status_code=404, detail="Repository not found")
     await require_org_membership(db, project.organization_id, roles=roles)
     return repository, project
+
+
+async def _load_github_write_context(
+    repository_id: uuid.UUID, db: AsyncSession
+) -> tuple[Repository, Project, str]:
+    repository, project = await _load_authorized_repository(repository_id, db, roles=OWNER_ADMIN)
+    if repository.provider != "github":
+        raise HTTPException(status_code=422, detail="Repository provider does not support GitHub writes")
+    try:
+        token = await load_organization_github_token(db, project.organization_id)
+    except GitHubCredentialNotFoundError as exc:
+        raise HTTPException(status_code=409, detail="Connect a GitHub organization token before writing") from exc
+    except CredentialEncryptionUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="GitHub credential cannot be decrypted with current configuration") from exc
+    return repository, project, token
 
 
 def _provider_error(exc: GitHubRepositoryError) -> HTTPException:
@@ -206,6 +249,65 @@ async def list_repository_branches(repository_id: uuid.UUID, db: AsyncSession = 
     except GitHubRepositoryError as exc:
         raise _provider_error(exc) from exc
     return {"branches": branches, "count": len(branches), "possibly_truncated": len(branches) == 100}
+
+
+@router.post("/repositories/{repository_id}/branches", status_code=201, summary="Create a Solvyn work branch")
+async def create_repository_branch(
+    repository_id: uuid.UUID,
+    payload: BranchCreate,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    repository, _, token = await _load_github_write_context(repository_id, db)
+    source = payload.from_branch or repository.default_branch
+    try:
+        async with GitHubClient(token=token) as github:
+            branch = await github.create_branch(repository.full_name, payload.branch_name, source)
+    except GitHubRepositoryError as exc:
+        raise _provider_error(exc) from exc
+    return {"name": branch["name"], "sha": branch["sha"]}
+
+
+@router.post("/repositories/{repository_id}/commits", status_code=201, summary="Commit bounded text changes")
+async def create_repository_commit(
+    repository_id: uuid.UUID,
+    payload: CommitCreate,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    repository, _, token = await _load_github_write_context(repository_id, db)
+    files = [{"path": item.path, "content": item.content} for item in payload.files]
+    try:
+        async with GitHubClient(token=token) as github:
+            commit = await github.commit_files(
+                repository.full_name,
+                payload.branch,
+                expected_head_sha=payload.expected_head_sha,
+                message=payload.message,
+                files=files,
+            )
+    except GitHubRepositoryError as exc:
+        raise _provider_error(exc) from exc
+    return {"branch": commit["branch"], "sha": commit["sha"]}
+
+
+@router.post("/repositories/{repository_id}/pull-requests", status_code=201, summary="Open a draft pull request")
+async def create_repository_pull_request(
+    repository_id: uuid.UUID,
+    payload: PullRequestCreate,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    repository, _, token = await _load_github_write_context(repository_id, db)
+    try:
+        async with GitHubClient(token=token) as github:
+            result = await github.create_pull_request(
+                repository.full_name,
+                title=payload.title,
+                body=payload.body,
+                head=payload.head,
+                base=repository.default_branch,
+            )
+    except GitHubRepositoryError as exc:
+        raise _provider_error(exc) from exc
+    return result
 
 
 @router.get("/repositories/{repository_id}/pull-requests", summary="Synchronize public pull requests")

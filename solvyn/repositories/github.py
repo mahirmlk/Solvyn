@@ -57,6 +57,9 @@ _EXTENSIONS = {
 _MAX_TREE_ENTRIES = 20_000
 _MAX_TEXT_FILE_BYTES = 64_000
 _MAX_DIFF_BYTES = 1_000_000
+_MAX_COMMIT_FILES = 50
+_MAX_COMMIT_BYTES = 500_000
+_BRANCH_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,239}$")
 _MAX_REVIEW_PAGES = 10
 _REVIEWS_PER_PAGE = 100
 _MAX_MANIFESTS = 6
@@ -69,6 +72,25 @@ class GitHubRepositoryError(Exception):
         super().__init__(message)
         self.status_code = status_code
         self.message = message
+
+
+def _validate_git_branch(branch: str) -> None:
+    segments = branch.split("/")
+    if (
+        not _BRANCH_NAME_RE.fullmatch(branch)
+        or ".." in branch
+        or "//" in branch
+        or "@{" in branch
+        or branch.endswith(("/", "."))
+        or any(segment.startswith(".") or segment.endswith(".lock") for segment in segments)
+    ):
+        raise GitHubRepositoryError(422, "Branch name is invalid")
+
+
+def _validate_solvyn_branch(branch: str) -> None:
+    _validate_git_branch(branch)
+    if not branch.startswith("solvyn/"):
+        raise GitHubRepositoryError(422, "Only Solvyn branches can receive generated changes")
 
 
 def validate_full_name(full_name: str) -> tuple[str, str]:
@@ -140,6 +162,166 @@ class GitHubClient(RepositoryProvider):
         if not isinstance(payload, dict):
             raise GitHubRepositoryError(502, "GitHub returned an unexpected response")
         return payload
+
+    async def _write_json(self, method: str, path: str, *, body: dict[str, Any]) -> dict[str, Any]:
+        """Make a bounded GitHub JSON write request with safe error messages."""
+        try:
+            response = await self.http.request(method, path, json=body, headers=self._request_headers)
+        except httpx.TimeoutException as exc:
+            raise GitHubRepositoryError(504, "GitHub request timed out") from exc
+        except httpx.HTTPError as exc:
+            raise GitHubRepositoryError(502, "GitHub request failed") from exc
+        if response.status_code == 401:
+            raise GitHubRepositoryError(401, "GitHub rejected the credential")
+        if response.status_code == 403:
+            raise GitHubRepositoryError(403, "GitHub denied the requested repository write")
+        if response.status_code == 404:
+            raise GitHubRepositoryError(404, "GitHub repository or reference not found")
+        if response.status_code in {409, 422}:
+            raise GitHubRepositoryError(response.status_code, "GitHub rejected the repository write")
+        if response.status_code == 429:
+            raise GitHubRepositoryError(429, "GitHub rate limit reached")
+        if response.status_code >= 500:
+            raise GitHubRepositoryError(502, "GitHub is temporarily unavailable")
+        if not response.is_success:
+            raise GitHubRepositoryError(502, "GitHub rejected the repository write")
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise GitHubRepositoryError(502, "GitHub returned invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise GitHubRepositoryError(502, "GitHub returned an unexpected response")
+        return payload
+
+    async def _branch_ref(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+        encoded_branch = quote(branch, safe="/")
+        return await self._get_json(f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/git/ref/heads/{encoded_branch}")
+
+    async def create_branch(self, full_name: str, branch: str, from_branch: str) -> dict[str, str]:
+        owner, repo = validate_full_name(full_name)
+        _validate_solvyn_branch(branch)
+        if not from_branch or len(from_branch) > 255:
+            raise GitHubRepositoryError(422, "Source branch is invalid")
+        _validate_git_branch(from_branch)
+        source = await self._branch_ref(owner, repo, from_branch)
+        object_value = source.get("object")
+        source_sha = object_value.get("sha") if isinstance(object_value, dict) else None
+        if not isinstance(source_sha, str) or not source_sha:
+            raise GitHubRepositoryError(502, "GitHub returned an invalid source branch")
+        created = await self._write_json(
+            "POST",
+            f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/git/refs",
+            body={"ref": f"refs/heads/{branch}", "sha": source_sha},
+        )
+        object_created = created.get("object")
+        branch_sha = object_created.get("sha") if isinstance(object_created, dict) else source_sha
+        return {"name": branch, "sha": str(branch_sha)}
+
+    @staticmethod
+    def _validate_commit_files(files: list[dict[str, str]]) -> None:
+        if not 1 <= len(files) <= _MAX_COMMIT_FILES:
+            raise GitHubRepositoryError(422, "A commit must include between 1 and 50 files")
+        total_bytes = 0
+        seen: set[str] = set()
+        for item in files:
+            path, content = item.get("path", ""), item.get("content", "")
+            segments = path.split("/")
+            if (
+                not path
+                or path.startswith("/")
+                or "\\" in path
+                or any(segment in {"", ".", ".."} for segment in segments)
+                or any(segment.casefold() == ".git" for segment in segments)
+                or any(ord(character) < 32 or ord(character) == 127 for character in path)
+                or len(path) > 512
+                or path in seen
+            ):
+                raise GitHubRepositoryError(422, "Commit contains an invalid or duplicate file path")
+            seen.add(path)
+            try:
+                total_bytes += len(content.encode("utf-8"))
+            except UnicodeEncodeError as exc:
+                raise GitHubRepositoryError(422, "Commit content must be valid UTF-8 text") from exc
+        if total_bytes > _MAX_COMMIT_BYTES:
+            raise GitHubRepositoryError(413, "Commit content exceeds the 500 KB limit")
+
+    async def commit_files(
+        self,
+        full_name: str,
+        branch: str,
+        *,
+        expected_head_sha: str,
+        message: str,
+        files: list[dict[str, str]],
+    ) -> dict[str, str]:
+        owner, repo = validate_full_name(full_name)
+        _validate_solvyn_branch(branch)
+        if not expected_head_sha or len(expected_head_sha) > 64:
+            raise GitHubRepositoryError(422, "Expected branch head is invalid")
+        if not message.strip() or len(message) > 2000:
+            raise GitHubRepositoryError(422, "Commit message must contain 1 to 2000 characters")
+        self._validate_commit_files(files)
+        current_ref = await self._branch_ref(owner, repo, branch)
+        current_object = current_ref.get("object")
+        current_sha = current_object.get("sha") if isinstance(current_object, dict) else None
+        if current_sha != expected_head_sha:
+            raise GitHubRepositoryError(409, "Branch head changed; fetch the latest head before committing")
+        current_commit = await self._get_json(
+            f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/git/commits/{quote(expected_head_sha, safe='')}"
+        )
+        tree_value = current_commit.get("tree")
+        base_tree = tree_value.get("sha") if isinstance(tree_value, dict) else None
+        if not isinstance(base_tree, str):
+            raise GitHubRepositoryError(502, "GitHub returned an invalid base tree")
+
+        tree_items = [
+            {"path": item["path"], "mode": "100644", "type": "blob", "content": item["content"]}
+            for item in files
+        ]
+        tree = await self._write_json(
+            "POST",
+            f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/git/trees",
+            body={"base_tree": base_tree, "tree": tree_items},
+        )
+        tree_sha = tree.get("sha")
+        if not isinstance(tree_sha, str):
+            raise GitHubRepositoryError(502, "GitHub returned an invalid commit tree")
+        commit = await self._write_json(
+            "POST",
+            f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/git/commits",
+            body={"message": message, "tree": tree_sha, "parents": [expected_head_sha]},
+        )
+        commit_sha = commit.get("sha")
+        if not isinstance(commit_sha, str):
+            raise GitHubRepositoryError(502, "GitHub returned an invalid commit")
+        await self._write_json(
+            "PATCH",
+            f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/git/refs/heads/{quote(branch, safe='/')}",
+            body={"sha": commit_sha, "force": False},
+        )
+        return {"branch": branch, "sha": commit_sha}
+
+    async def create_pull_request(
+        self, full_name: str, *, title: str, body: str, head: str, base: str
+    ) -> dict[str, Any]:
+        owner, repo = validate_full_name(full_name)
+        _validate_solvyn_branch(head)
+        if head == base:
+            raise GitHubRepositoryError(422, "Pull requests must come from a Solvyn branch")
+        if not title.strip() or len(title) > 256 or len(body) > 20_000:
+            raise GitHubRepositoryError(422, "Pull request title or description is outside supported bounds")
+        result = await self._write_json(
+            "POST",
+            f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/pulls",
+            body={"title": title, "body": body, "head": head, "base": base, "draft": True},
+        )
+        return {
+            "number": result.get("number"),
+            "title": str(result.get("title") or "")[:512],
+            "url": str(result.get("html_url") or "")[:512],
+            "state": str(result.get("state") or "unknown"),
+            "draft": bool(result.get("draft", True)),
+        }
 
     async def _get_text(self, path: str, *, accept: str, max_bytes: int) -> str:
         try:
