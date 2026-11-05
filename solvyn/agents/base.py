@@ -28,6 +28,9 @@ class BaseAgent(ABC):
         self.execution_node: ExecutionNode | None = None
         self._llm_provider: str | None = None
         self._llm_model: str | None = None
+        self._teammate_system_context: str = ""
+        self._max_tokens_per_run: int | None = None
+        self._llm_completion_tokens_used = 0
 
     @property
     @abstractmethod
@@ -64,13 +67,42 @@ class BaseAgent(ABC):
         system_prompt: str | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        return await llm_router.generate(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            provider=self._llm_provider,
-            model=self._llm_model,
-            **kwargs,
-        )
+        effective_system_prompt = system_prompt
+        if self._teammate_system_context:
+            effective_system_prompt = "\n\n".join(
+                part for part in (system_prompt, self._teammate_system_context) if part
+            )
+        if self._max_tokens_per_run is None:
+            return await llm_router.generate(
+                prompt=prompt,
+                system_prompt=effective_system_prompt,
+                provider=self._llm_provider,
+                model=self._llm_model,
+                **kwargs,
+            )
+
+        remaining = self._max_tokens_per_run - self._llm_completion_tokens_used
+        if remaining <= 0:
+            raise RuntimeError("Teammate run exhausted its completion token budget")
+        requested_max_tokens = kwargs.get("max_tokens") or remaining
+        reserved_tokens = min(requested_max_tokens, remaining)
+        kwargs["max_tokens"] = reserved_tokens
+        # Reserve before awaiting so concurrent model calls share one budget.
+        self._llm_completion_tokens_used += reserved_tokens
+        try:
+            response = await llm_router.generate(
+                prompt=prompt,
+                system_prompt=effective_system_prompt,
+                provider=self._llm_provider,
+                model=self._llm_model,
+                **kwargs,
+            )
+        except BaseException:
+            self._llm_completion_tokens_used -= reserved_tokens
+            raise
+        if response.completion_tokens > 0:
+            self._llm_completion_tokens_used += response.completion_tokens - reserved_tokens
+        return response
 
     async def request_approval(
         self,
@@ -114,3 +146,4 @@ class BaseAgent(ABC):
         self.status = AgentStatus.IDLE
         self.state = {}
         self.execution_node = None
+        self._llm_completion_tokens_used = 0
