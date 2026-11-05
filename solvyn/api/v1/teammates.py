@@ -11,7 +11,7 @@ import re
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -121,7 +121,25 @@ class TeammateUpdate(BaseModel):
 class TeammateRun(BaseModel):
     project_id: uuid.UUID
     repository_id: uuid.UUID | None = None
+    repository_paths: list[str] = Field(default_factory=list, max_length=4)
     input_data: dict[str, object] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_repository_paths(self) -> TeammateRun:
+        if self.repository_paths and self.repository_id is None:
+            raise ValueError("repository_id is required when repository_paths are provided")
+        for path in self.repository_paths:
+            if (
+                not path
+                or len(path) > 512
+                or "\x00" in path
+                or path.startswith(("/", "\\"))
+                or "\\" in path
+                or ".." in path.split("/")
+                or any(segment in {"", "."} for segment in path.split("/"))
+            ):
+                raise ValueError("repository_paths must contain safe, relative repository file paths")
+        return self
 
 
 class TeammateMemoryIn(BaseModel):
@@ -306,6 +324,7 @@ async def execute_teammate(
             project_id=payload.project_id,
             input_data=payload.input_data,
             repository_id=payload.repository_id,
+            repository_paths=payload.repository_paths,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

@@ -20,9 +20,9 @@ Repository discovery beyond a caller-supplied GitHub name, content search, and b
 
 ## Teammate repository context
 
-`POST /api/v1/teammates/{teammate_id}/run` accepts an optional `repository_id` alongside `project_id` and `input_data`. When supplied, the repository must be active and connected to the same project assigned to the teammate. Solvyn fetches the public repository's bounded inspection summary and manifests, then places up to 6,000 characters of repository context in the user-level prompt. A fixed system instruction says repository content is untrusted data and must not be followed as instructions. Omitting `repository_id` does not trigger a remote fetch.
+`POST /api/v1/teammates/{teammate_id}/run` accepts an optional `repository_id` alongside `project_id` and `input_data`, plus up to four optional relative `repository_paths`. When supplied, the repository must be active and connected to the same project assigned to the teammate. Solvyn fetches the public repository's bounded inspection summary and only the explicitly selected text files (up to 1,500 characters each), then places up to 12,000 characters of repository context in the user-level prompt. A fixed system instruction says repository content is untrusted data and must not be followed as instructions. Omitting `repository_id` does not trigger a remote fetch.
 
-This supports repository-aware investigation only. It does not provide source-file retrieval, a clone/worktree, code edits, sandbox dispatch, private repository access, or automatic verification.
+This supports repository-aware investigation with caller-selected source snippets only. It does not provide a clone/worktree, code edits, sandbox dispatch, private repository access, or automatic verification.
 
 ## Proactive engineering
 

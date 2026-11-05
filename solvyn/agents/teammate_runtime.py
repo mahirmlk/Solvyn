@@ -36,7 +36,10 @@ _DEFAULT_MAX_TOKENS = 4_096
 _HARD_MAX_TOKENS = 16_000
 _DEFAULT_MAX_RUN_SECONDS = 300
 _HARD_MAX_RUN_SECONDS = 900
-_MAX_REPOSITORY_CONTEXT_CHARS = 6_000
+_MAX_REPOSITORY_CONTEXT_CHARS = 12_000
+_MAX_REPOSITORY_SUMMARY_CHARS = 6_000
+_MAX_SELECTED_SOURCE_FILES = 4
+_MAX_SELECTED_SOURCE_FILE_CHARS = 1_500
 
 
 class TeammateRunConflictError(RuntimeError):
@@ -93,13 +96,23 @@ def build_teammate_system_context(
     return "\n".join(sections)[:_MAX_CONTEXT_CHARS]
 
 
-async def _load_repository_context(repository: Repository) -> str:
-    """Return bounded summaries and manifests for a connected GitHub repository."""
+async def _load_repository_context(repository: Repository, source_paths: list[str] | None = None) -> str:
+    """Return bounded summaries and caller-selected files from a connected GitHub repository."""
     try:
         async with get_repository_provider(repository.provider) as provider:
             inspection = await provider.inspect(repository.full_name)
             dependencies = provider.parse_dependencies(inspection.get("manifests", {}))
             frameworks = provider.detect_frameworks(dependencies)
+            selected_sources = []
+            for path in (source_paths or [])[:_MAX_SELECTED_SOURCE_FILES]:
+                try:
+                    contents = await provider.text_file(repository.full_name, path, repository.default_branch)
+                except GitHubRepositoryError as exc:
+                    if exc.status_code == 404:
+                        raise ValueError(f"Selected repository file was not found: {path}") from exc
+                    raise
+                if contents:
+                    selected_sources.append((path, contents[:_MAX_SELECTED_SOURCE_FILE_CHARS]))
     except GitHubRepositoryError as exc:
         raise RepositoryContextUnavailableError("Connected repository context is temporarily unavailable") from exc
 
@@ -122,7 +135,12 @@ async def _load_repository_context(repository: Repository) -> str:
     readme = manifests.get("README.md")
     if isinstance(readme, str) and readme:
         lines.extend(["README excerpt (untrusted repository content):", readme[:2_000]])
-    return "\n".join(lines)[:_MAX_REPOSITORY_CONTEXT_CHARS]
+    summary = "\n".join(lines)[:_MAX_REPOSITORY_SUMMARY_CHARS]
+    source_sections = [
+        f"Selected source file (untrusted repository content): {path}\n{contents}"
+        for path, contents in selected_sources
+    ]
+    return (summary + ("\n\n" + "\n\n".join(source_sections) if source_sections else ""))[:_MAX_REPOSITORY_CONTEXT_CHARS]
 
 
 async def run_teammate(
@@ -134,6 +152,7 @@ async def run_teammate(
     input_data: dict[str, Any],
     session_id: str | None = None,
     repository_id: uuid.UUID | None = None,
+    repository_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run one registered agent as a persisted teammate on an assigned project."""
     if teammate.tenant_id != tenant_id:
@@ -160,6 +179,8 @@ async def run_teammate(
         raise TeammateRunDeniedError("Project is not assigned to this teammate")
 
     repository_context = None
+    if repository_paths and repository_id is None:
+        raise ValueError("repository_id is required when repository_paths are provided")
     if repository_id is not None:
         repository_result = await db.execute(
             select(Repository).where(
@@ -173,7 +194,7 @@ async def run_teammate(
             raise TeammateRunDeniedError("Repository is not connected to the assigned project")
         if repository.provider != "github":
             raise RepositoryContextUnavailableError("Repository context is not supported for this provider")
-        repository_context = await _load_repository_context(repository)
+        repository_context = await _load_repository_context(repository, repository_paths)
 
     knowledge_result = await db.execute(
         select(ProjectKnowledge)
