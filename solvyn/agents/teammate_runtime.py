@@ -148,8 +148,9 @@ async def run_teammate(
             TeammateProfile.status.in_([TeammateStatus.IDLE, TeammateStatus.ACTIVE]),
         )
         .values(status=TeammateStatus.BUSY)
+        .returning(TeammateProfile.id)
     )
-    if claimed.rowcount != 1:
+    if claimed.scalar_one_or_none() != teammate.id:
         await db.rollback()
         raise TeammateRunConflictError("Teammate is disabled or already running")
     teammate.status = TeammateStatus.BUSY
