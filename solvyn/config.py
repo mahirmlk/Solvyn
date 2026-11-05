@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     sandbox_workspace_root: str = ".solvyn/workspaces"
     sandbox_image: str = "solvyn-sandbox:local"
+    enable_workflow_scheduler: bool = True
 
     openrouter_api_key: str = ""
     groq_api_key: str = ""
