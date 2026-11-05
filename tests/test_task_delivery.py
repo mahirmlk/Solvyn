@@ -39,6 +39,14 @@ class ExecutableSourceGitHub(FakeGitHub):
         return "tree-sha", [{"path": "src/main.py", "type": "blob", "mode": "100755"}]
 
 
+class CollidingSourceTreeGitHub(FakeGitHub):
+    def __init__(self, entries: list[dict[str, Any]]) -> None:
+        self.entries = entries
+
+    async def repository_tree(self, _full_name: str, _revision: str) -> tuple[str, list[dict[str, Any]]]:
+        return "tree-sha", self.entries
+
+
 class FakeDeliveryGitHub(FakeGitHub):
     def __init__(self) -> None:
         self.writes: list[str] = []
@@ -146,6 +154,51 @@ async def test_delivery_preview_blocks_changed_executable_source_files(tmp_path:
 
     assert error.value.status_code == 409
     assert "executable mode" in error.value.detail
+
+
+@pytest.mark.parametrize(
+    ("added_path", "source_entries"),
+    [
+        (
+            "docs",
+            [
+                {"path": "docs", "type": "tree"},
+                {"path": "docs/guide.md", "type": "blob"},
+                {"path": "src/main.py", "type": "blob", "mode": "100644"},
+            ],
+        ),
+        (
+            "docs/new.md",
+            [
+                {"path": "docs", "type": "blob", "mode": "100644"},
+                {"path": "src/main.py", "type": "blob", "mode": "100644"},
+            ],
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_delivery_preview_rejects_source_file_directory_prefix_collisions(
+    tmp_path: Any, added_path: str, source_entries: list[dict[str, Any]]
+) -> None:
+    manager = WorkspaceManager(tmp_path / "workspaces")
+    workspace = manager.create()
+    manager.write_file(workspace, "src/main.py", b"print('after')\n")
+    manager.write_file(workspace, added_path, b"new workspace file\n")
+    record = SimpleNamespace(source_commit_sha="a" * 40)
+    repository = SimpleNamespace(id="repo-id", full_name="octo/repo")
+
+    with pytest.raises(HTTPException) as error:
+        await _build_delivery_preview(
+            repository,
+            record,
+            ["src/main.py"],
+            manager,
+            workspace,
+            CollidingSourceTreeGitHub(source_entries),  # type: ignore[arg-type]
+        )
+
+    assert error.value.status_code == 409
+    assert "conflicts" in error.value.detail
 
 
 @pytest.mark.asyncio

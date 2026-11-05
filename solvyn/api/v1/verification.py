@@ -213,11 +213,14 @@ async def _build_delivery_preview(
     except GitHubRepositoryError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
     source_tree_entries = {
-        entry.get("path"): entry for entry in source_tree if entry.get("type") == "blob"
+        entry.get("path"): entry
+        for entry in source_tree
+        if isinstance(entry.get("path"), str) and isinstance(entry.get("type"), str)
+    }
+    source_tree_blob_entries = {
+        path: entry for path, entry in source_tree_entries.items() if entry.get("type") == "blob"
     }
     source_tree_paths = set(source_tree_entries)
-    source_tree_paths_casefold = {path.casefold() for path in source_tree_paths if isinstance(path, str)}
-
     files: list[dict[str, str]] = []
     diffs: list[dict[str, str]] = []
     total_content_bytes = 0
@@ -237,15 +240,26 @@ async def _build_delivery_preview(
             if baseline is None:
                 raise HTTPException(status_code=409, detail=f"Source file is no longer readable as text: {path}")
         else:
-            if path.casefold() in source_tree_paths_casefold:
+            path_casefold = path.casefold()
+            has_tree_collision = any(
+                existing_path == path_casefold
+                or existing_path.startswith(f"{path_casefold}/")
+                or (
+                    source_tree_entries[existing_original_path].get("type") == "blob"
+                    and path_casefold.startswith(f"{existing_path}/")
+                )
+                for existing_original_path in source_tree_paths
+                if (existing_path := existing_original_path.casefold())
+            )
+            if has_tree_collision:
                 raise HTTPException(
                     status_code=409,
-                    detail=f"Workspace added an unselected path that already exists at the source revision: {path}",
+                    detail=f"Workspace path conflicts with an unselected source file or directory: {path}",
                 )
             baseline = ""
         if content == baseline:
             continue
-        if path in source_paths and source_tree_entries.get(path, {}).get("mode") == "100755":
+        if path in source_paths and source_tree_blob_entries.get(path, {}).get("mode") == "100755":
             raise HTTPException(
                 status_code=409,
                 detail=f"Delivery cannot preserve the executable mode of a changed source file: {path}",
