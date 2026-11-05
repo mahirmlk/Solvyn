@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -205,3 +206,43 @@ async def list_repository_branches(repository_id: uuid.UUID, db: AsyncSession = 
     except GitHubRepositoryError as exc:
         raise _provider_error(exc) from exc
     return {"branches": branches, "count": len(branches), "possibly_truncated": len(branches) == 100}
+
+
+@router.get("/repositories/{repository_id}/pull-requests", summary="Synchronize public pull requests")
+async def list_repository_pull_requests(
+    repository_id: uuid.UUID,
+    state: Literal["open", "closed", "all"] = "open",
+    limit: int = Query(default=50, ge=1, le=100),
+    page: int = Query(default=1, ge=1, le=100),
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    repository, _ = await _load_authorized_repository(repository_id, db)
+    try:
+        async with get_repository_provider(repository.provider) as provider:
+            pull_requests = await provider.pull_requests(repository.full_name, state=state, limit=limit, page=page)
+    except GitHubRepositoryError as exc:
+        raise _provider_error(exc) from exc
+    return {
+        "pull_requests": pull_requests,
+        "count": len(pull_requests),
+        "state": state,
+        "page": page,
+        "limit": limit,
+        "synchronization": "live_github_snapshot",
+        "content_trust": "untrusted_repository_data",
+    }
+
+
+@router.get("/repositories/{repository_id}/pull-requests/{number}", summary="Inspect a pull request diff and review status")
+async def inspect_repository_pull_request(
+    repository_id: uuid.UUID,
+    number: int,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    repository, _ = await _load_authorized_repository(repository_id, db)
+    try:
+        async with get_repository_provider(repository.provider) as provider:
+            pull_request = await provider.pull_request_detail(repository.full_name, number)
+    except GitHubRepositoryError as exc:
+        raise _provider_error(exc) from exc
+    return pull_request

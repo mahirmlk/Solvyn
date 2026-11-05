@@ -1,6 +1,6 @@
 # Repository Intelligence — current scope
 
-Repository intelligence is an early Phase 2 workstream. It adds a provider boundary and a read-only GitHub implementation that can connect a public repository to an authorized project, inspect its default-branch tree and common manifests, summarize direct dependencies and likely frameworks, list branches, and search file paths.
+Repository intelligence is an early workstream. It adds a provider boundary and a read-only GitHub implementation that can connect a public repository to an authorized project, inspect its default-branch tree and common manifests, summarize direct dependencies and likely frameworks, list branches, search file paths, and inspect pull requests.
 
 ## API
 
@@ -14,5 +14,6 @@ See the [Repository Intelligence section in API.md](../API.md#repository-intelli
 - Repository contents and metadata are marked untrusted. They are not passed to an agent or interpreted as instructions by this feature.
 - File search matches path names only. This slice does not search file contents, clone repositories, execute code, create branches, write files, or create pull requests.
 - Branch listing returns at most 100 results. `possibly_truncated` signals that more results may exist.
+- Pull request listing is a paginated live snapshot from GitHub, not a persisted local synchronization. Detail inspection returns the latest review decision per reviewer (scanning up to 1,100 reviews and probing for more), plus a unified diff capped at 1 MB. Pull request data and diffs remain untrusted input.
 
-This is a limited first slice of Phase 2. Repository discovery beyond a caller-supplied GitHub name, content search, Git operations, and branch/worktree management remain future work. Private-repository access can be added after credential storage, repository permission mapping, and isolated workspaces are designed.
+Repository discovery beyond a caller-supplied GitHub name, content search, Git writes, and branch/worktree management remain future work. Creating branches or pull requests requires encrypted credential storage, repository permission mapping, and isolated workspaces. Private-repository access remains unsupported until those boundaries are designed.

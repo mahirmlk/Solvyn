@@ -611,6 +611,14 @@ Search file paths case-insensitively. This endpoint searches paths only; it does
 
 List up to the first 100 branches and their commit SHAs. When `possibly_truncated` is true, the repository has at least 100 branches and the response may omit later branches.
 
+### `GET /api/v1/repositories/{repository_id}/pull-requests?state=open&limit=50&page=1`
+
+Fetch a live, paginated public GitHub pull request snapshot. `state` accepts `open`, `closed`, or `all`; `limit` is 1–100 and `page` is 1–100. The response is a point-in-time snapshot and does not persist GitHub records locally.
+
+### `GET /api/v1/repositories/{repository_id}/pull-requests/{number}`
+
+Inspect pull request metadata, the latest review decision per reviewer, requested reviewers, and a bounded unified diff (maximum 1 MB). The review summary scans up to 1,100 reviews and probes the next page; `history_truncated` is true and `state` is `incomplete_history` only when that probe finds additional reviews. Diff and metadata fields are marked `untrusted_repository_data`. These routes do not create, modify, approve, or merge pull requests.
+
 GitHub 404 responses map to not found, rate limits to 429, and provider/network failures to 502 or 504. Large or truncated trees return 413.
 
 ---
