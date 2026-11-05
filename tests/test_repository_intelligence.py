@@ -116,6 +116,215 @@ async def test_branches_accepts_github_array_response() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pull_requests_lists_bounded_live_metadata() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/repos/octo/example/pulls"
+        assert dict(request.url.params) == {
+            "state": "open",
+            "per_page": "25",
+            "page": "2",
+            "sort": "updated",
+            "direction": "desc",
+        }
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "number": 42,
+                    "title": "Reviewable change",
+                    "state": "open",
+                    "draft": False,
+                    "merged_at": None,
+                    "html_url": "https://github.com/octo/example/pull/42",
+                    "user": {"login": "octocat"},
+                    "head": {"ref": "feature", "sha": "abc123"},
+                    "base": {"ref": "main"},
+                    "created_at": "2026-11-05T12:00:00Z",
+                    "updated_at": "2026-11-05T13:00:00Z",
+                }
+            ],
+        )
+
+    http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    async with GitHubClient(http) as github:
+        pull_requests = await github.pull_requests("octo/example", limit=25, page=2)
+    await http.aclose()
+
+    assert pull_requests == [
+        {
+            "number": 42,
+            "title": "Reviewable change",
+            "state": "open",
+            "draft": False,
+            "merged": False,
+            "url": "https://github.com/octo/example/pull/42",
+            "author": "octocat",
+            "head_ref": "feature",
+            "head_sha": "abc123",
+            "base_ref": "main",
+            "created_at": "2026-11-05T12:00:00Z",
+            "updated_at": "2026-11-05T13:00:00Z",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pull_request_detail_returns_bounded_diff_and_latest_review_state() -> None:
+    diff = "diff --git a/app.py b/app.py\n+print('change')\n"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/octo/example/pulls/42":
+            if request.headers.get("accept") == "application/vnd.github.diff":
+                return httpx.Response(200, text=diff)
+            return httpx.Response(
+                200,
+                json={
+                    "number": 42,
+                    "title": "Reviewable change",
+                    "body": "Please review.",
+                    "state": "open",
+                    "draft": False,
+                    "merged_at": None,
+                    "html_url": "https://github.com/octo/example/pull/42",
+                    "head": {"ref": "feature", "sha": "abc123"},
+                    "base": {"ref": "main"},
+                    "requested_reviewers": [{"login": "reviewer-three"}],
+                },
+            )
+        if request.url.path == "/repos/octo/example/pulls/42/reviews":
+            page = request.url.params.get("page")
+            if page == "1":
+                return httpx.Response(
+                    200,
+                    json=[
+                        {"user": {"login": "reviewer-one"}, "state": "APPROVED", "submitted_at": "2026-11-05T12:00:00Z"},
+                        *[
+                            {
+                                "user": {"login": f"commenter-{index}"},
+                                "state": "COMMENTED",
+                                "submitted_at": "2026-11-05T12:30:00Z",
+                            }
+                            for index in range(99)
+                        ],
+                    ],
+                )
+            return httpx.Response(
+                200,
+                json=[
+                    {"user": {"login": "reviewer-one"}, "state": "CHANGES_REQUESTED", "submitted_at": "2026-11-05T13:00:00Z"},
+                    {"user": {"login": "reviewer-two"}, "state": "APPROVED", "submitted_at": "2026-11-05T13:05:00Z"},
+                ],
+            )
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    async with GitHubClient(http) as github:
+        result = await github.pull_request_detail("octo/example", 42)
+    await http.aclose()
+
+    assert result["diff"] == diff
+    assert result["content_trust"] == "untrusted_repository_data"
+    review_status = result["review_status"]
+    assert review_status == {
+        "state": "changes_requested",
+        "approvals": 1,
+        "changes_requested": 1,
+        "requested_reviewers": ["reviewer-three"],
+        "reviewer_decisions": review_status["reviewer_decisions"],
+        "history_truncated": False,
+    }
+    decisions = {review["login"]: review for review in review_status["reviewer_decisions"]}
+    assert len(decisions) == 101
+    assert decisions["reviewer-one"]["state"] == "CHANGES_REQUESTED"
+    assert decisions["reviewer-two"]["state"] == "APPROVED"
+
+
+@pytest.mark.asyncio
+async def test_pull_request_diff_rejects_oversized_responses() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/reviews"):
+            return httpx.Response(200, json=[])
+        if request.url.path.endswith("/pulls/42") and request.headers.get("accept") == "application/vnd.github.diff":
+            return httpx.Response(200, content=b"x" * 1_000_001)
+        return httpx.Response(
+            200,
+            json={"number": 42, "head": {}, "base": {}, "requested_reviewers": []},
+        )
+
+    http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    async with GitHubClient(http) as github:
+        with pytest.raises(GitHubRepositoryError) as exc:
+            await github.pull_request_detail("octo/example", 42)
+    await http.aclose()
+
+    assert exc.value.status_code == 413
+
+
+@pytest.mark.asyncio
+async def test_pull_request_review_history_reports_when_bounded_scan_is_incomplete() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/reviews"):
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "user": {"login": f"reviewer-{index}"},
+                        "state": "APPROVED",
+                        "submitted_at": "2026-11-05T12:00:00Z",
+                    }
+                    for index in range(100)
+                ],
+            )
+        if request.headers.get("accept") == "application/vnd.github.diff":
+            return httpx.Response(200, text="diff")
+        return httpx.Response(
+            200,
+            json={"number": 42, "head": {}, "base": {}, "requested_reviewers": []},
+        )
+
+    http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    async with GitHubClient(http) as github:
+        result = await github.pull_request_detail("octo/example", 42)
+    await http.aclose()
+
+    assert result["review_status"]["state"] == "incomplete_history"
+    assert result["review_status"]["history_truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_pull_request_review_history_accepts_exact_page_cap() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/reviews"):
+            if request.url.params.get("page") == "12":
+                return httpx.Response(200, json=[])
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "user": {"login": f"reviewer-{index}"},
+                        "state": "APPROVED",
+                        "submitted_at": "2026-11-05T12:00:00Z",
+                    }
+                    for index in range(100)
+                ],
+            )
+        if request.headers.get("accept") == "application/vnd.github.diff":
+            return httpx.Response(200, text="diff")
+        return httpx.Response(
+            200,
+            json={"number": 42, "head": {}, "base": {}, "requested_reviewers": []},
+        )
+
+    http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    async with GitHubClient(http) as github:
+        result = await github.pull_request_detail("octo/example", 42)
+    await http.aclose()
+
+    assert result["review_status"]["state"] == "approved"
+    assert result["review_status"]["history_truncated"] is False
+
+
+@pytest.mark.asyncio
 async def test_provider_maps_explicit_rate_limit_response() -> None:
     async def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(429, json={"message": "untrusted upstream details"})

@@ -56,6 +56,9 @@ _EXTENSIONS = {
 }
 _MAX_TREE_ENTRIES = 20_000
 _MAX_TEXT_FILE_BYTES = 64_000
+_MAX_DIFF_BYTES = 1_000_000
+_MAX_REVIEW_PAGES = 10
+_REVIEWS_PER_PAGE = 100
 _MAX_MANIFESTS = 6
 
 
@@ -129,6 +132,40 @@ class GitHubClient(RepositoryProvider):
         if not isinstance(payload, dict):
             raise GitHubRepositoryError(502, "GitHub returned an unexpected response")
         return payload
+
+    async def _get_text(self, path: str, *, accept: str, max_bytes: int) -> str:
+        try:
+            async with self.http.stream("GET", path, headers={"Accept": accept}) as response:
+                if response.status_code == 404:
+                    raise GitHubRepositoryError(404, "Public GitHub repository or resource not found")
+                if response.status_code == 429:
+                    raise GitHubRepositoryError(429, "GitHub rate limit reached")
+                if response.status_code == 403:
+                    raise GitHubRepositoryError(429, "GitHub rate limit or access restriction reached")
+                if response.status_code >= 500:
+                    raise GitHubRepositoryError(502, "GitHub is temporarily unavailable")
+                if not response.is_success:
+                    raise GitHubRepositoryError(502, "GitHub rejected the repository request")
+                content_length = response.headers.get("content-length")
+                if content_length and int(content_length) > max_bytes:
+                    raise GitHubRepositoryError(413, "Pull request diff is too large to inspect safely")
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) > max_bytes:
+                        raise GitHubRepositoryError(413, "Pull request diff is too large to inspect safely")
+        except GitHubRepositoryError:
+            raise
+        except httpx.TimeoutException as exc:
+            raise GitHubRepositoryError(504, "GitHub request timed out") from exc
+        except httpx.HTTPError as exc:
+            raise GitHubRepositoryError(502, "GitHub request failed") from exc
+        except ValueError as exc:
+            raise GitHubRepositoryError(502, "GitHub returned an invalid diff response") from exc
+        try:
+            return body.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise GitHubRepositoryError(502, "GitHub returned a non-text pull request diff") from exc
 
     async def repository_metadata(self, full_name: str) -> dict[str, Any]:
         owner, repo = validate_full_name(full_name)
@@ -251,6 +288,149 @@ class GitHubClient(RepositoryProvider):
                 }
             )
         return branches
+
+    async def pull_requests(
+        self,
+        full_name: str,
+        *,
+        state: str = "open",
+        limit: int = 50,
+        page: int = 1,
+    ) -> list[dict[str, Any]]:
+        owner, repo = validate_full_name(full_name)
+        if state not in {"open", "closed", "all"}:
+            raise GitHubRepositoryError(422, "Pull request state must be open, closed, or all")
+        if not 1 <= limit <= 100 or not 1 <= page <= 100:
+            raise GitHubRepositoryError(422, "Pull request pagination is outside supported bounds")
+        payload = await self._get_json_payload(
+            f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/pulls",
+            params={"state": state, "per_page": str(limit), "page": str(page), "sort": "updated", "direction": "desc"},
+        )
+        if not isinstance(payload, list):
+            raise GitHubRepositoryError(502, "GitHub returned an invalid pull request list")
+
+        items: list[dict[str, Any]] = []
+        for item in payload[:limit]:
+            if not isinstance(item, dict):
+                continue
+            head_value = item.get("head")
+            base_value = item.get("base")
+            user_value = item.get("user")
+            head: dict[str, Any] = head_value if isinstance(head_value, dict) else {}
+            base: dict[str, Any] = base_value if isinstance(base_value, dict) else {}
+            user: dict[str, Any] = user_value if isinstance(user_value, dict) else {}
+            items.append(
+                {
+                    "number": item.get("number"),
+                    "title": str(item.get("title") or "")[:512],
+                    "state": str(item.get("state") or "unknown"),
+                    "draft": bool(item.get("draft", False)),
+                    "merged": bool(item.get("merged_at")),
+                    "url": str(item.get("html_url") or "")[:512],
+                    "author": str(user.get("login") or "")[:255],
+                    "head_ref": str(head.get("ref") or "")[:255],
+                    "head_sha": str(head.get("sha") or "")[:64],
+                    "base_ref": str(base.get("ref") or "")[:255],
+                    "created_at": item.get("created_at"),
+                    "updated_at": item.get("updated_at"),
+                }
+            )
+        return items
+
+    async def pull_request_detail(self, full_name: str, number: int) -> dict[str, Any]:
+        owner, repo = validate_full_name(full_name)
+        if number < 1:
+            raise GitHubRepositoryError(422, "Pull request number must be positive")
+        prefix = f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/pulls/{number}"
+        metadata = await self._get_json(prefix)
+        raw_reviews: list[Any] = []
+        review_history_truncated = False
+        for page in range(1, _MAX_REVIEW_PAGES + 2):
+            page_reviews = await self._get_json_payload(
+                f"{prefix}/reviews",
+                params={"per_page": str(_REVIEWS_PER_PAGE), "page": str(page)},
+            )
+            if not isinstance(page_reviews, list):
+                raise GitHubRepositoryError(502, "GitHub returned an invalid pull request review list")
+            raw_reviews.extend(page_reviews[:_REVIEWS_PER_PAGE])
+            if len(page_reviews) < _REVIEWS_PER_PAGE:
+                break
+            if page > _MAX_REVIEW_PAGES:
+                next_page = await self._get_json_payload(
+                    f"{prefix}/reviews",
+                    params={"per_page": str(_REVIEWS_PER_PAGE), "page": str(page + 1)},
+                )
+                if not isinstance(next_page, list):
+                    raise GitHubRepositoryError(502, "GitHub returned an invalid pull request review list")
+                review_history_truncated = bool(next_page)
+                break
+
+        latest_by_reviewer: dict[str, tuple[str, str]] = {}
+        for review in raw_reviews:
+            if not isinstance(review, dict):
+                continue
+            user_value = review.get("user")
+            user: dict[str, Any] = user_value if isinstance(user_value, dict) else {}
+            login = str(user.get("login") or "")
+            state = str(review.get("state") or "").upper()
+            if not login or state == "PENDING":
+                continue
+            submitted = str(review.get("submitted_at") or review.get("created_at") or "")
+            previous = latest_by_reviewer.get(login)
+            if previous is None or submitted >= previous[0]:
+                latest_by_reviewer[login] = (submitted, state)
+
+        latest_states = [state for _, state in latest_by_reviewer.values()]
+        reviewer_decisions = [
+            {"login": login, "state": state, "submitted_at": submitted_at or None}
+            for login, (submitted_at, state) in sorted(latest_by_reviewer.items())
+        ]
+        requested = metadata.get("requested_reviewers")
+        requested_reviewers = [
+            str(reviewer.get("login") or "")[:255]
+            for reviewer in requested[:100]
+            if isinstance(reviewer, dict) and reviewer.get("login")
+        ] if isinstance(requested, list) else []
+        if review_history_truncated:
+            review_state = "incomplete_history"
+        elif "CHANGES_REQUESTED" in latest_states:
+            review_state = "changes_requested"
+        elif "APPROVED" in latest_states:
+            review_state = "approved"
+        elif requested_reviewers:
+            review_state = "review_required"
+        elif latest_states:
+            review_state = "reviewed_without_approval"
+        else:
+            review_state = "no_reviews"
+
+        diff = await self._get_text(prefix, accept="application/vnd.github.diff", max_bytes=_MAX_DIFF_BYTES)
+        head_value = metadata.get("head")
+        base_value = metadata.get("base")
+        head: dict[str, Any] = head_value if isinstance(head_value, dict) else {}
+        base: dict[str, Any] = base_value if isinstance(base_value, dict) else {}
+        return {
+            "number": metadata.get("number"),
+            "title": str(metadata.get("title") or "")[:512],
+            "body": str(metadata.get("body") or "")[:20_000],
+            "state": str(metadata.get("state") or "unknown"),
+            "draft": bool(metadata.get("draft", False)),
+            "merged": bool(metadata.get("merged_at")),
+            "url": str(metadata.get("html_url") or "")[:512],
+            "head_ref": str(head.get("ref") or "")[:255],
+            "head_sha": str(head.get("sha") or "")[:64],
+            "base_ref": str(base.get("ref") or "")[:255],
+            "review_status": {
+                "state": review_state,
+                "approvals": latest_states.count("APPROVED"),
+                "changes_requested": latest_states.count("CHANGES_REQUESTED"),
+                "requested_reviewers": requested_reviewers,
+                "reviewer_decisions": reviewer_decisions,
+                "history_truncated": review_history_truncated,
+            },
+            "diff": diff,
+            "content_trust": "untrusted_repository_data",
+        }
 
     @staticmethod
     def parse_dependencies(manifests: dict[str, str]) -> dict[str, list[str]]:
