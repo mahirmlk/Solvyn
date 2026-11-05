@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any, cast
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,13 +20,7 @@ _MAX_READ_BYTES = 64 * 1024
 _MAX_WRITE_BYTES = 256 * 1024
 _MAX_LIST_FILES = 200
 
-class GenerateOnce(Protocol):
-    def __call__(
-        self,
-        prompt: str,
-        system_prompt: str | None,
-        **kwargs: Any,
-    ) -> Awaitable[LLMResponse]: ...
+GenerateOnce = Callable[..., Awaitable[Any]]
 
 
 class TeammateWorkspaceToolRuntime:
@@ -61,7 +55,7 @@ class TeammateWorkspaceToolRuntime:
         granted = await self._granted_permissions()
         tools = self._tool_definitions(granted)
         if not tools:
-            return await generate_once(prompt, system_prompt, **options)
+            return cast(LLMResponse, await generate_once(prompt, system_prompt, **options))
 
         system_content = system_prompt or ""
         system_content += (
