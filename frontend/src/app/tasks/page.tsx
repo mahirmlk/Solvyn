@@ -68,7 +68,7 @@ export default function TasksPage() {
                   <span className={`status-pill ${STATUS_CLASS[task.status] || ""}`}>{task.status.replaceAll("_", " ")}</span>
                   <span className={`mono ${styles.slug}`}>{task.assigned_agent || "Unassigned"}</span>
                 </div>
-                <h2>{task.title}</h2>
+                <h2><Link href={`/tasks/${task.execution_id}/${task.task_id}`}>{task.title}</Link></h2>
                 {task.description && <p>{task.description}</p>}
                 {task.error && <p className={styles.taskError}>{task.error}</p>}
                 <dl className={styles.taskMeta}>
@@ -76,6 +76,7 @@ export default function TasksPage() {
                   <div><dt>Attempts</dt><dd>{task.attempt_count}{task.max_attempts ? ` / ${task.max_attempts}` : ""}</dd></div>
                   <div><dt>Updated</dt><dd>{task.updated_at ? new Date(task.updated_at).toLocaleString() : "—"}</dd></div>
                 </dl>
+                <Link className="action-button secondary" href={`/tasks/${task.execution_id}/${task.task_id}`}>Open task review</Link>
               </article>
             ))}
           </div>

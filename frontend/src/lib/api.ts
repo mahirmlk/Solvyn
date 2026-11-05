@@ -21,8 +21,17 @@ async function performRequest<T>(path: string, options?: RequestInit): Promise<T
     cache: "no-store",
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => null) as { detail?: string; error?: string } | null;
-    throw new Error(`API ${res.status}: ${body?.detail || body?.error || res.statusText}`);
+    const body = await res.json().catch(() => null) as { detail?: unknown; error?: string } | null;
+    const detail = body?.detail;
+    const message = typeof detail === "string"
+      ? detail
+      : detail && typeof detail === "object" && "message" in detail && typeof detail.message === "string"
+        ? detail.message
+        : body?.error || res.statusText;
+    const recovery = detail && typeof detail === "object" && "recovery" in detail && typeof detail.recovery === "string"
+      ? ` ${detail.recovery}`
+      : "";
+    throw new Error(`API ${res.status}: ${message}${recovery}`);
   }
   return res.json();
 }
@@ -203,6 +212,25 @@ export interface WorkflowTaskInfo {
   completed_at: string | null;
 }
 
+export interface TaskDeliveryDiff {
+  repository_id: string;
+  source_commit_sha: string;
+  base_branch: string;
+  files: { path: string; content: string }[];
+  diffs: { path: string; diff: string }[];
+  unsupported_missing_source_paths: string[];
+  diff_digest: string;
+  can_deliver: boolean;
+}
+
+export interface TaskDeliveryResult {
+  branch: string;
+  commit_sha: string;
+  pull_request: { number: number; title: string; url: string; state: string; draft: boolean };
+  merged: false;
+  approved_diff_digest: string;
+}
+
 // Admin panel types -----------------------------------------------------
 
 export interface AdminTenant {
@@ -292,6 +320,24 @@ export const api = {
     if (params?.status) query.set("status", params.status);
     return request<{ tasks: WorkflowTaskInfo[]; count: number }>(`/workflows/tasks?${query}`);
   },
+
+  getTaskDeliveryPreview: (executionId: string, taskId: string) =>
+    request<TaskDeliveryDiff>(`/workflows/executions/${executionId}/tasks/${taskId}/delivery-preview`),
+
+  deliverTaskWorkspace: (
+    executionId: string,
+    taskId: string,
+    input: {
+      expected_diff_digest: string;
+      branch_name: string;
+      commit_message: string;
+      pull_request_title: string;
+      pull_request_body: string;
+    },
+  ) => request<TaskDeliveryResult>(`/workflows/executions/${executionId}/tasks/${taskId}/deliver`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  }),
 
   listAgents: () => request<{ agents: AgentInfo[] }>("/workflows/agents"),
 
