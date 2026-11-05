@@ -10,7 +10,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
-from solvyn.db.models import ApiKey, Tenant
+from solvyn.db.models import ApiKey, Organization, OrganizationMembership, Tenant, TenantRole
 from solvyn.db.session import async_session_factory
 from solvyn.multi_tenant.middleware import tenant_context
 from solvyn.multi_tenant.rate_limiter import redis_rate_limiter
@@ -98,6 +98,54 @@ async def _validate_tenant_api_key(api_key: str, expected_tenant_id: uuid.UUID |
 
 
 # ---------------------------------------------------------------------------
+# JWT ↔ tenant binding
+# ---------------------------------------------------------------------------
+
+_ORG_ROLE_TO_TENANT_ROLE = {
+    # Organization ownership is scoped to that organization. Global admin
+    # endpoints use TenantRole.ADMIN and must only be reachable via an
+    # explicitly provisioned tenant API key, never an ordinary user JWT.
+    "owner": TenantRole.USER,
+    "admin": TenantRole.USER,
+    "member": TenantRole.USER,
+    "viewer": TenantRole.VIEWER,
+}
+
+# Sentinel for backward-compatible single-tenant shared-secret deployments:
+# requests authenticated with the shared secret are granted admin scope on
+# never-allocated nil UUID so tenant-scoped queries stay empty and safe.
+SHARED_SECRET_TENANT_ID = uuid.UUID(int=0)
+
+
+async def _membership_for_tenant(user_id: uuid.UUID, tenant_id: uuid.UUID) -> tuple[str, str] | None:
+    """Return (organization slug, role) when the user is a member of the tenant."""
+    async with async_session_factory() as session:
+        result = await session.execute(
+            select(Organization.slug, OrganizationMembership.role)
+            .join(OrganizationMembership, OrganizationMembership.organization_id == Organization.id)
+            .where(OrganizationMembership.user_id == user_id, Organization.tenant_id == tenant_id, Organization.is_active == True)  # noqa: E712
+            .order_by(OrganizationMembership.created_at)
+            .limit(1)
+        )
+        row = result.first()
+        return (row[0], row[1]) if row is not None else None
+
+
+async def _first_membership(user_id: uuid.UUID) -> tuple[uuid.UUID, str, str] | None:
+    """Return (tenant_id, organization slug, role) for the user's first org (deterministic)."""
+    async with async_session_factory() as session:
+        result = await session.execute(
+            select(Organization.tenant_id, Organization.slug, OrganizationMembership.role)
+            .join(OrganizationMembership, OrganizationMembership.organization_id == Organization.id)
+            .where(OrganizationMembership.user_id == user_id, Organization.is_active == True)  # noqa: E712
+            .order_by(OrganizationMembership.created_at, Organization.created_at)
+            .limit(1)
+        )
+        row = result.first()
+        return (row[0], row[1], row[2]) if row else None
+
+
+# ---------------------------------------------------------------------------
 # Role-based access control
 # ---------------------------------------------------------------------------
 
@@ -120,6 +168,8 @@ class RequireRole:
             raise HTTPException(status_code=401, detail="Authentication required")
         if tenant_context.tenant_id is None:
             raise HTTPException(status_code=401, detail="No tenant context")
+        if tenant_context.authenticated_tenant_id != tenant_context.tenant_id:
+            raise HTTPException(status_code=401, detail="Tenant context does not match the credential")
         if tenant_context.tenant_role not in self.allowed_roles:
             raise HTTPException(
                 status_code=403,
@@ -162,13 +212,27 @@ async def auth_middleware(request: Request, call_next: Any) -> Any:
                 user = await db_session.get(User, user_uuid)
             if user is None or not user.is_active:
                 return JSONResponse(status_code=401, content={"error": "Invalid or expired token"})
-            tenant_context.set_authenticated(tenant_context.tenant_id, user_id=user_uuid)
-            # Bind user; tenant comes from slug header or membership (resolved below).
-            if tenant_context.tenant_id is None:
-                tenant_context.set_authenticated(user_uuid, user_id=user_uuid)
+
+            header_tenant_id = tenant_context.tenant_id
+            header_slug = tenant_context.tenant_slug
+            if header_tenant_id is not None:
+                membership = await _membership_for_tenant(user_uuid, header_tenant_id)
+                if membership is None:
+                    tenant_context.set_authenticated(None, user_id=user_uuid)
+                    return JSONResponse(status_code=403, content={"error": "Not a member of the requested tenant"})
+                role = _ORG_ROLE_TO_TENANT_ROLE.get(membership[1], TenantRole.VIEWER)
+                tenant_context.authenticate(header_tenant_id, header_slug or "", role, user_id=user_uuid)
             else:
-                tenant_context.set_authenticated(tenant_context.tenant_id, user_id=user_uuid)
-        except Exception:
+                first = await _first_membership(user_uuid)
+                if first is not None:
+                    tenant_id, slug, org_role = first
+                    role = _ORG_ROLE_TO_TENANT_ROLE.get(org_role, TenantRole.VIEWER)
+                    tenant_context.authenticate(tenant_id, slug, role, user_id=user_uuid)
+                else:
+                    # authenticated user with no tenant scope: allows /auth/* only.
+                    tenant_context.set_authenticated(None, user_id=user_uuid)
+        except Exception as exc:
+            logger.exception("JWT authorization failed: %s", exc)
             return JSONResponse(status_code=401, content={"error": "Invalid or expired token"})
         try:
             return await call_next(request)
@@ -188,7 +252,7 @@ async def auth_middleware(request: Request, call_next: Any) -> Any:
         tenant = await _validate_tenant_api_key(api_key, expected_tenant_id=tenant_context.tenant_id)
         if tenant is None:
             return JSONResponse(status_code=401, content={"error": "Invalid X-API-Key for the requested tenant"})
-        tenant_context.set_authenticated(tenant.id)
+        tenant_context.authenticate(tenant.id, tenant.slug, tenant.role or TenantRole.USER, user_id=None)
     else:
         # Shared-secret mode (backward compatible single-tenant deployments).
         from solvyn.config import settings
@@ -197,6 +261,8 @@ async def auth_middleware(request: Request, call_next: Any) -> Any:
             return JSONResponse(status_code=500, content={"error": "Server not configured: API_KEY_SECRET is empty"})
         if not verify_api_key(api_key, settings.api_key_secret):
             return JSONResponse(status_code=401, content={"error": "Invalid X-API-Key"})
+        # Explicit, fail-closed tenant scope for deployments without per-tenant contexts.
+        tenant_context.authenticate(SHARED_SECRET_TENANT_ID, "shared", TenantRole.ADMIN, user_id=None)
 
     try:
         response = await call_next(request)

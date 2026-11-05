@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_ttl_minutes: int = 15
     refresh_token_ttl_days: int = 30
+    allow_public_registration: bool = False
+    bootstrap_token: str = ""
     # Local dev only: allows booting without real secrets.
     # Must remain False in any networked deployment.
     allow_insecure_dev: bool = False

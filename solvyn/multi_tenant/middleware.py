@@ -58,12 +58,17 @@ class TenantContext:
         authenticated_tenant_id: uuid.UUID | None = None,
         user_id: uuid.UUID | None = None,
     ) -> None:
+        # NB: setting a slug NEVER implies authentication. Call `authenticate`
+        # after the credential itself is verified (API key or JWT + membership).
         self._tenant_id.set(tenant_id)
         self._tenant_slug.set(slug)
         self._tenant_role.set(role)
-        self._authenticated_tenant_id.set(authenticated_tenant_id if authenticated_tenant_id is not None else tenant_id)
+        self._authenticated_tenant_id.set(authenticated_tenant_id)
         if user_id is not None:
             self._user_id.set(user_id)
+
+    def authenticate(self, tenant_id: uuid.UUID, slug: str, role: str, *, user_id: uuid.UUID | None = None) -> None:
+        self.set(tenant_id, slug, role, authenticated_tenant_id=tenant_id, user_id=user_id)
 
     def set_authenticated(self, tenant_id: uuid.UUID | None, user_id: uuid.UUID | None = None) -> None:
         if tenant_id is not None:
@@ -92,6 +97,7 @@ async def resolve_tenant(request: Request) -> Tenant | None:
         result = await session.execute(select(Tenant).where(Tenant.slug == tenant_slug))
         tenant = result.scalar_one_or_none()
         if tenant and tenant.is_active:
+            # resolved slug == hint only; auth_middleware decides authorization.
             tenant_context.set(tenant.id, tenant.slug, tenant.role or TenantRole.USER)
             return tenant
     return None

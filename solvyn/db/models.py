@@ -160,6 +160,8 @@ class ApiKey(Base):
     """
 
     __tablename__ = "api_keys"
+    # P0-003 (now db-enforced): key lookups hit the unique index instead of a full-table scan.
+    __table_args__ = (UniqueConstraint("key_hash", name="uq_api_keys_key_hash"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)

@@ -1,18 +1,21 @@
-"""baseline + phase1 product foundation
+"""
+Squashed baseline: the original 0001_api_keys migration referenced
+tenants(id) before tenants existed, so a fresh `alembic upgrade head`
+failed on an empty database. 0001 is now a no-op (see
+0001_api_keys.py) and ALL schema — including api_keys — is created here,
+in dependency order, so upgrade-from-zero works. Existing deployments with
+tables created outside Alembic must verify their schema and stamp this revision
+instead of replaying the baseline DDL:
+
+    # Make sure required tables already exist, then stamp:
+    alembic stamp 0002_phase1_product_foundation
+
+pgvector: memory.embedding uses Vector(1536) on Postgres so the
+embeddings path works; on SQLite test paths the type degrades to Text.
 
 Revision ID: 0002_phase1_product_foundation
 Revises: 0001_api_keys
 Create Date: 2026-11-04 00:00:00.000000
-
-Baseline creates the 9 tables that existed in models.py before migrations
-were introduced (tenants, sessions, messages, agent_instances, memory,
-artifacts, tasks, execution_graphs, token_usage) — migration 0001 only
-created api_keys, so a fresh `alembic upgrade head` could never reproduce
-the deployed schema (Phase 0 audit R1). Phase 1 tables (users,
-refresh_tokens, organizations, organization_memberships, workspaces,
-projects, project_memberships, integrations, repositories,
-teammate_profiles, teammate_permissions, teammate_project_assignments,
-project_knowledge, approvals) are created in dependency order.
 """
 
 from collections.abc import Sequence
@@ -45,6 +48,22 @@ def upgrade() -> None:
         _ts("created_at"), _ts("updated_at"),
     )
     op.create_index("ix_tenants_slug", "tenants", ["slug"])
+
+    # The old 0001 migration attempted this before its tenants foreign key
+    # existed. Create it here, after tenants, so a clean database can upgrade.
+    op.create_table(
+        "api_keys",
+        sa.Column("id", UUID(as_uuid=True), primary_key=True),
+        sa.Column("tenant_id", UUID(as_uuid=True), sa.ForeignKey("tenants.id"), nullable=False),
+        sa.Column("name", sa.String(255), nullable=False),
+        sa.Column("key_hash", sa.String(255), nullable=False),
+        sa.Column("key_prefix", sa.String(12), nullable=False),
+        _ts("created_at"),
+        sa.Column("last_used_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
+        sa.UniqueConstraint("key_hash", name="uq_api_keys_key_hash"),
+    )
+    op.create_index("ix_api_keys_tenant_id", "api_keys", ["tenant_id"])
 
     op.create_table(
         "sessions",
@@ -348,7 +367,7 @@ def downgrade() -> None:
         "approvals", "project_knowledge", "teammate_project_assignments", "teammate_permissions",
         "teammate_profiles", "repositories", "integrations", "project_memberships", "projects",
         "workspaces", "organization_memberships", "organizations", "refresh_tokens", "users",
-        "token_usage", "execution_graphs", "tasks", "artifacts", "memory", "agent_instances",
+        "api_keys", "token_usage", "execution_graphs", "tasks", "artifacts", "memory", "agent_instances",
         "messages", "sessions", "tenants",
     ]:
         op.drop_table(table)

@@ -111,6 +111,15 @@ def test_permission_defaults_are_least_privilege() -> None:
     assert _DEFAULT_PERMISSIONS["Security Engineer"] == [PermissionLevel.READ_ONLY.value]
 
 
+def test_org_owner_is_not_a_platform_admin() -> None:
+    """Organization roles must not grant access to global admin endpoints."""
+    from solvyn.db.models import TenantRole
+    from solvyn.multi_tenant.auth import _ORG_ROLE_TO_TENANT_ROLE
+
+    assert _ORG_ROLE_TO_TENANT_ROLE["owner"] == TenantRole.USER
+    assert _ORG_ROLE_TO_TENANT_ROLE["admin"] == TenantRole.USER
+
+
 def test_knowledge_secret_screen_rejects() -> None:
     from solvyn.api.v1.teammates import _looks_like_secret
 

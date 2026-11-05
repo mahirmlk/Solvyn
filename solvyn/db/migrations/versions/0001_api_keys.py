@@ -1,15 +1,22 @@
-"""add api_keys table
+"""
+Superseded shim: this migration used to create api_keys with a foreign
+key to tenants(id) before tenants was created, so `alembic upgrade head`
+failed on an empty database. All schema — including api_keys — now
+lives in 0002_phase1_product_foundation.py.
+
+For legacy deployments already at 0001 (the tables exist, thanks to
+`create_all` or this revision having run against a manually created
+tenants table), run:
+
+    alembic stamp 0002_phase1_product_foundation
+
+and verify with `alembic check` before considering any other path.
 
 Revision ID: 0001_api_keys
 Revises:
 Create Date: 2026-06-14 00:00:00.000000
-
 """
 from collections.abc import Sequence
-
-import sqlalchemy as sa
-from alembic import op
-from sqlalchemy.dialects.postgresql import UUID
 
 revision: str = "0001_api_keys"
 down_revision: str | None = None
@@ -18,22 +25,12 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.create_table(
-        "api_keys",
-        sa.Column("id", UUID(as_uuid=True), primary_key=True),
-        sa.Column("tenant_id", UUID(as_uuid=True), sa.ForeignKey("tenants.id"), nullable=False),
-        sa.Column("name", sa.String(length=255), nullable=False),
-        sa.Column("key_hash", sa.String(length=255), nullable=False),
-        sa.Column("key_prefix", sa.String(length=12), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("last_used_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
-    )
-    op.create_index("ix_api_keys_tenant_id", "api_keys", ["tenant_id"])
-    op.create_index("ix_api_keys_key_hash", "api_keys", ["key_hash"])
+    # The original implementation referenced tenants before that table was
+    # created, making a clean `alembic upgrade head` fail. The complete schema
+    # is now created by 0002 in dependency order.
+    pass
 
 
 def downgrade() -> None:
-    op.drop_index("ix_api_keys_key_hash", table_name="api_keys")
-    op.drop_index("ix_api_keys_tenant_id", table_name="api_keys")
-    op.drop_table("api_keys")
+    # This shim owns no schema; 0002 owns and removes api_keys.
+    pass

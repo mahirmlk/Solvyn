@@ -8,6 +8,7 @@ never by system prompts alone (see Phase 3 sandbox-execution).
 
 from __future__ import annotations
 
+import re
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -15,8 +16,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from solvyn.api.v1._rbac import ANY_ROLE, OWNER_ADMIN, require_org_membership, require_tenant
 from solvyn.db.models import (
-    Organization,
     PermissionLevel,
     Project,
     ProjectKnowledge,
@@ -51,14 +52,6 @@ _DEFAULT_PERMISSIONS: dict[str, list[str]] = {
 _VALID_PERMISSIONS = {p.value for p in PermissionLevel}
 
 
-def _require_tenant() -> uuid.UUID:
-    if not tenant_context.is_authenticated:
-        raise HTTPException(status_code=401, detail="Authentication required")
-    if tenant_context.tenant_id is None:
-        raise HTTPException(status_code=401, detail="No tenant context")
-    return tenant_context.tenant_id
-
-
 async def _load_teammate(db: AsyncSession, teammate_id: uuid.UUID, tenant_id: uuid.UUID) -> TeammateProfile:
     teammate = await db.get(TeammateProfile, teammate_id)
     if teammate is None or teammate.tenant_id != tenant_id:
@@ -87,7 +80,7 @@ def _teammate_dict(t: TeammateProfile) -> dict[str, object]:
 
 
 class TeammateCreate(BaseModel):
-    organization_id: str
+    organization_id: uuid.UUID
     name: str = Field(..., min_length=1, max_length=255)
     role: str = Field(..., min_length=1, max_length=100)
     description: str = ""
@@ -99,7 +92,7 @@ class TeammateCreate(BaseModel):
     max_tokens_per_run: int | None = Field(default=None, ge=1)
     max_run_seconds: int | None = Field(default=None, ge=1)
     permissions: list[str] | None = None
-    project_ids: list[str] | None = None
+    project_ids: list[uuid.UUID] | None = None
 
 
 class TeammateUpdate(BaseModel):
@@ -113,15 +106,12 @@ class TeammateUpdate(BaseModel):
     max_tokens_per_run: int | None = None
     max_run_seconds: int | None = None
     permissions: list[str] | None = None
-    project_ids: list[str] | None = None
+    project_ids: list[uuid.UUID] | None = None
 
 
 @router.get("/organizations/{org_id}/teammates", summary="List teammates in an organization")
 async def list_teammates(org_id: uuid.UUID, db: AsyncSession = Depends(get_session)) -> dict[str, object]:
-    tenant_id = _require_tenant()
-    org = await db.get(Organization, org_id)
-    if org is None or org.tenant_id != tenant_id:
-        raise HTTPException(status_code=404, detail="Organization not found")
+    await require_org_membership(db, org_id, roles=ANY_ROLE)
     result = await db.execute(select(TeammateProfile).where(TeammateProfile.organization_id == org_id).order_by(TeammateProfile.name))
     items = [_teammate_dict(t) for t in result.scalars().all()]
     return {"teammates": items, "count": len(items)}
@@ -129,11 +119,10 @@ async def list_teammates(org_id: uuid.UUID, db: AsyncSession = Depends(get_sessi
 
 @router.post("/teammates", status_code=201, summary="Create a persistent teammate")
 async def create_teammate(payload: TeammateCreate, db: AsyncSession = Depends(get_session)) -> dict[str, object]:
-    tenant_id = _require_tenant()
-    org_id = uuid.UUID(payload.organization_id)
-    org = await db.get(Organization, org_id)
-    if org is None or org.tenant_id != tenant_id:
-        raise HTTPException(status_code=404, detail="Organization not found")
+    tenant_id = require_tenant()
+    await require_org_membership(db, payload.organization_id, roles=OWNER_ADMIN)
+    org_id = payload.organization_id
+
     duplicate = (
         await db.execute(
             select(TeammateProfile).where(TeammateProfile.organization_id == org_id, TeammateProfile.name == payload.name)
@@ -141,6 +130,19 @@ async def create_teammate(payload: TeammateCreate, db: AsyncSession = Depends(ge
     ).scalar_one_or_none()
     if duplicate is not None:
         raise HTTPException(status_code=409, detail=f"Teammate '{payload.name}' already exists in this organization")
+
+    granted = payload.permissions if payload.permissions is not None else _DEFAULT_PERMISSIONS.get(payload.role, [PermissionLevel.READ_ONLY.value])
+    unknown = [p for p in granted if p not in _VALID_PERMISSIONS]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown permission: {', '.join(unknown)}")
+
+    # Verify project visibility before persisting anything.
+    project_rows = []
+    for project_id in payload.project_ids or []:
+        project = await db.get(Project, project_id)
+        if project is None or project.tenant_id != tenant_id or project.organization_id != org_id:
+            raise HTTPException(status_code=400, detail=f"Project {project_id} is not visible to this tenant")
+        project_rows.append(project)
 
     teammate = TeammateProfile(
         organization_id=org_id,
@@ -159,16 +161,9 @@ async def create_teammate(payload: TeammateCreate, db: AsyncSession = Depends(ge
     db.add(teammate)
     await db.flush()
 
-    granted = payload.permissions if payload.permissions is not None else _DEFAULT_PERMISSIONS.get(payload.role, [PermissionLevel.READ_ONLY.value])
     for perm in granted:
-        if perm not in _VALID_PERMISSIONS:
-            raise HTTPException(status_code=400, detail=f"Unknown permission: {perm}")
         db.add(TeammatePermission(teammate_id=teammate.id, permission=perm, granted=True))
-
-    for project_id_str in payload.project_ids or []:
-        project = await db.get(Project, uuid.UUID(project_id_str))
-        if project is None or project.tenant_id != tenant_id:
-            raise HTTPException(status_code=400, detail=f"Project {project_id_str} is not visible to this tenant")
+    for project in project_rows:
         db.add(TeammateProjectAssignment(teammate_id=teammate.id, project_id=project.id))
 
     await db.commit()
@@ -178,8 +173,9 @@ async def create_teammate(payload: TeammateCreate, db: AsyncSession = Depends(ge
 
 @router.get("/teammates/{teammate_id}", summary="Get a teammate with permissions")
 async def get_teammate(teammate_id: uuid.UUID, db: AsyncSession = Depends(get_session)) -> dict[str, object]:
-    tenant_id = _require_tenant()
+    tenant_id = require_tenant()
     teammate = await _load_teammate(db, teammate_id, tenant_id)
+    await require_org_membership(db, teammate.organization_id, roles=ANY_ROLE)
     perms = (await db.execute(select(TeammatePermission).where(TeammatePermission.teammate_id == teammate_id))).scalars().all()
     out = _teammate_dict(teammate)
     out["permissions"] = [p.permission for p in perms if p.granted]
@@ -188,8 +184,21 @@ async def get_teammate(teammate_id: uuid.UUID, db: AsyncSession = Depends(get_se
 
 @router.patch("/teammates/{teammate_id}", summary="Update a teammate")
 async def update_teammate(teammate_id: uuid.UUID, payload: TeammateUpdate, db: AsyncSession = Depends(get_session)) -> dict[str, object]:
-    tenant_id = _require_tenant()
+    tenant_id = require_tenant()
     teammate = await _load_teammate(db, teammate_id, tenant_id)
+    await require_org_membership(db, teammate.organization_id, roles=OWNER_ADMIN)
+
+    if payload.permissions is not None:
+        unknown = [p for p in payload.permissions if p not in _VALID_PERMISSIONS]
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"Unknown permission: {', '.join(unknown)}")
+    project_rows: list[Project] = []
+    for project_id in payload.project_ids or []:
+        project = await db.get(Project, project_id)
+        if project is None or project.tenant_id != tenant_id or project.organization_id != teammate.organization_id:
+            raise HTTPException(status_code=400, detail=f"Project {project_id} is not visible to this tenant")
+        project_rows.append(project)
+
     data = payload.model_dump(exclude_unset=True, exclude={"permissions", "project_ids"})
     for field_name, value in data.items():
         if value is not None:
@@ -199,17 +208,12 @@ async def update_teammate(teammate_id: uuid.UUID, payload: TeammateUpdate, db: A
         for permission_row in existing_permissions:
             await db.delete(permission_row)
         for perm in payload.permissions:
-            if perm not in _VALID_PERMISSIONS:
-                raise HTTPException(status_code=400, detail=f"Unknown permission: {perm}")
             db.add(TeammatePermission(teammate_id=teammate.id, permission=perm, granted=True))
     if payload.project_ids is not None:
         existing_assignments = (await db.execute(select(TeammateProjectAssignment).where(TeammateProjectAssignment.teammate_id == teammate_id))).scalars().all()
         for assignment_row in existing_assignments:
             await db.delete(assignment_row)
-        for project_id_str in payload.project_ids:
-            project = await db.get(Project, uuid.UUID(project_id_str))
-            if project is None or project.tenant_id != tenant_id:
-                raise HTTPException(status_code=400, detail=f"Project {project_id_str} is not visible to this tenant")
+        for project in project_rows:
             db.add(TeammateProjectAssignment(teammate_id=teammate.id, project_id=project.id))
     db.add(teammate)
     await db.commit()
@@ -219,8 +223,9 @@ async def update_teammate(teammate_id: uuid.UUID, payload: TeammateUpdate, db: A
 
 @router.delete("/teammates/{teammate_id}", summary="Disable a teammate (soft delete)")
 async def disable_teammate(teammate_id: uuid.UUID, db: AsyncSession = Depends(get_session)) -> dict[str, object]:
-    tenant_id = _require_tenant()
+    tenant_id = require_tenant()
     teammate = await _load_teammate(db, teammate_id, tenant_id)
+    await require_org_membership(db, teammate.organization_id, roles=OWNER_ADMIN)
     teammate.is_enabled = False
     db.add(teammate)
     await db.commit()
@@ -238,23 +243,31 @@ class KnowledgeIn(BaseModel):
     value: str = Field(..., min_length=1)
 
 
-_SECRET_PATTERNS = ("sk-", "xox", "AKIA", "BEGIN PRIVATE KEY", "password =", "api_key =", "secret =", "ghp_")
+_SECRET_PATTERNS = (
+    re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+    re.compile(r"ghp_[A-Za-z0-9]{20,}"),
+    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"(?:password|api_key|secret|client_secret)\s*[:=]\s*\S+", re.I),
+)
 
 
 def _looks_like_secret(value: str) -> str | None:
-    lowered = value.lower()
-    for pat in _SECRET_PATTERNS:
-        if pat.lower() in lowered:
-            return pat
+    for pattern in _SECRET_PATTERNS:
+        match = pattern.search(value)
+        if match is not None:
+            return match.group(0)
     return None
 
 
 @router.get("/projects/{project_id}/knowledge", summary="List project knowledge")
 async def list_knowledge(project_id: uuid.UUID, db: AsyncSession = Depends(get_session)) -> dict[str, object]:
-    tenant_id = _require_tenant()
+    tenant_id = require_tenant()
     project = await db.get(Project, project_id)
     if project is None or project.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Project not found")
+    await require_org_membership(db, project.organization_id, roles=ANY_ROLE)
     result = await db.execute(
         select(ProjectKnowledge)
         .where(ProjectKnowledge.project_id == project_id)
@@ -269,10 +282,11 @@ async def list_knowledge(project_id: uuid.UUID, db: AsyncSession = Depends(get_s
 
 @router.put("/projects/{project_id}/knowledge", summary="Upsert a project knowledge entry")
 async def upsert_knowledge(project_id: uuid.UUID, payload: KnowledgeIn, db: AsyncSession = Depends(get_session)) -> dict[str, object]:
-    tenant_id = _require_tenant()
+    tenant_id = require_tenant()
     project = await db.get(Project, project_id)
     if project is None or project.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Project not found")
+    await require_org_membership(db, project.organization_id, roles=OWNER_ADMIN)
     hit = _looks_like_secret(payload.value)
     if hit:
         raise HTTPException(

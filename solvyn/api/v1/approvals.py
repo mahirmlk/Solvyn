@@ -14,19 +14,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from solvyn.db.models import Approval, Organization
+from solvyn.api.v1._rbac import ANY_ROLE, OWNER_ADMIN, require_org_membership, require_tenant
+from solvyn.db.models import Approval, Organization, OrganizationMembership, Project, TeammateProfile
 from solvyn.db.session import get_session
 from solvyn.multi_tenant.middleware import tenant_context
 
 router = APIRouter(tags=["approvals"])
-
-
-def _require_tenant() -> uuid.UUID:
-    if not tenant_context.is_authenticated:
-        raise HTTPException(status_code=401, detail="Authentication required")
-    if tenant_context.tenant_id is None:
-        raise HTTPException(status_code=401, detail="No tenant context")
-    return tenant_context.tenant_id
 
 
 def _approval_dict(a: Approval) -> dict[str, object]:
@@ -48,9 +41,9 @@ def _approval_dict(a: Approval) -> dict[str, object]:
 
 
 class ApprovalCreate(BaseModel):
-    organization_id: str
-    project_id: str | None = None
-    teammate_id: str | None = None
+    organization_id: uuid.UUID
+    project_id: uuid.UUID | None = None
+    teammate_id: uuid.UUID | None = None
     kind: str = Field(..., min_length=1, max_length=50)
     summary: str = Field(..., min_length=1)
     payload: str | None = None
@@ -63,11 +56,20 @@ class DecisionIn(BaseModel):
 
 @router.get("/approvals", summary="List pending approvals (inbox)")
 async def list_approvals(status: str = "pending", db: AsyncSession = Depends(get_session)) -> dict[str, object]:
-    tenant_id = _require_tenant()
+    tenant_id = require_tenant()
+    user_id = tenant_context.user_id
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
     result = await db.execute(
         select(Approval)
         .join(Organization, Approval.organization_id == Organization.id)
-        .where(Organization.tenant_id == tenant_id, Approval.status == status)
+        .join(
+            OrganizationMembership,
+            (OrganizationMembership.organization_id == Organization.id)
+            & (OrganizationMembership.user_id == user_id)
+            & OrganizationMembership.role.in_(ANY_ROLE),
+        )
+        .where(Organization.tenant_id == tenant_id, Organization.is_active == True, Approval.status == status)  # noqa: E712
         .order_by(Approval.created_at.desc())
     )
     items = [_approval_dict(a) for a in result.scalars().all()]
@@ -76,15 +78,19 @@ async def list_approvals(status: str = "pending", db: AsyncSession = Depends(get
 
 @router.post("/approvals", status_code=201, summary="Request approval (agent-facing)")
 async def create_approval(payload: ApprovalCreate, db: AsyncSession = Depends(get_session)) -> dict[str, object]:
-    tenant_id = _require_tenant()
-    org_id = uuid.UUID(payload.organization_id)
-    org = await db.get(Organization, org_id)
-    if org is None or org.tenant_id != tenant_id:
-        raise HTTPException(status_code=404, detail="Organization not found")
+    await require_org_membership(db, payload.organization_id, roles=("owner", "admin", "member"))
+    if payload.project_id is not None:
+        project = await db.get(Project, payload.project_id)
+        if project is None or project.organization_id != payload.organization_id:
+            raise HTTPException(status_code=404, detail="Project not found")
+    if payload.teammate_id is not None:
+        teammate = await db.get(TeammateProfile, payload.teammate_id)
+        if teammate is None or teammate.organization_id != payload.organization_id:
+            raise HTTPException(status_code=404, detail="Teammate not found")
     approval = Approval(
-        organization_id=org_id,
-        project_id=uuid.UUID(payload.project_id) if payload.project_id else None,
-        teammate_id=uuid.UUID(payload.teammate_id) if payload.teammate_id else None,
+        organization_id=payload.organization_id,
+        project_id=payload.project_id,
+        teammate_id=payload.teammate_id,
         kind=payload.kind,
         summary=payload.summary,
         payload=payload.payload,
@@ -98,25 +104,20 @@ async def create_approval(payload: ApprovalCreate, db: AsyncSession = Depends(ge
 
 @router.get("/approvals/{approval_id}", summary="Get an approval")
 async def get_approval(approval_id: uuid.UUID, db: AsyncSession = Depends(get_session)) -> dict[str, object]:
-    tenant_id = _require_tenant()
     approval = await db.get(Approval, approval_id)
     if approval is None:
         raise HTTPException(status_code=404, detail="Approval not found")
-    org = await db.get(Organization, approval.organization_id)
-    if org is None or org.tenant_id != tenant_id:
-        raise HTTPException(status_code=404, detail="Approval not found")
+    await require_org_membership(db, approval.organization_id, roles=ANY_ROLE)
     return _approval_dict(approval)
 
 
 @router.post("/approvals/{approval_id}/approve", summary="Approve a pending request")
 async def approve(approval_id: uuid.UUID, payload: DecisionIn, db: AsyncSession = Depends(get_session)) -> dict[str, object]:
-    tenant_id = _require_tenant()
     approval = await db.get(Approval, approval_id)
     if approval is None:
         raise HTTPException(status_code=404, detail="Approval not found")
-    org = await db.get(Organization, approval.organization_id)
-    if org is None or org.tenant_id != tenant_id:
-        raise HTTPException(status_code=404, detail="Approval not found")
+    # Merge/deploy approvals are a human authorization boundary: only org owners/admins.
+    await require_org_membership(db, approval.organization_id, roles=OWNER_ADMIN)
     if approval.status != "pending":
         raise HTTPException(status_code=400, detail=f"Approval is already {approval.status}")
     approval.status = "approved"
@@ -130,13 +131,10 @@ async def approve(approval_id: uuid.UUID, payload: DecisionIn, db: AsyncSession 
 
 @router.post("/approvals/{approval_id}/reject", summary="Reject a pending request")
 async def reject(approval_id: uuid.UUID, payload: DecisionIn, db: AsyncSession = Depends(get_session)) -> dict[str, object]:
-    tenant_id = _require_tenant()
     approval = await db.get(Approval, approval_id)
     if approval is None:
         raise HTTPException(status_code=404, detail="Approval not found")
-    org = await db.get(Organization, approval.organization_id)
-    if org is None or org.tenant_id != tenant_id:
-        raise HTTPException(status_code=404, detail="Approval not found")
+    await require_org_membership(db, approval.organization_id, roles=OWNER_ADMIN)
     if approval.status != "pending":
         raise HTTPException(status_code=400, detail=f"Approval is already {approval.status}")
     approval.status = "rejected"
