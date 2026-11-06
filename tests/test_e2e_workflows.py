@@ -292,20 +292,23 @@ async def test_task_verification_is_sandboxed_and_durable(
                 parent_task,
                 User(id=user_id, email=f"verification-{uuid.uuid4().hex[:12]}@example.com", password_hash="test-hash"),
                 OrganizationMembership(user_id=user_id, organization_id=organization_id, role="owner"),
-                TaskHandoff(
-                    tenant_id=tenant.id,
-                    parent_task_id=parent_task_id,
-                    child_task_id=uuid.UUID(task_id),
-                    idempotency_key=uuid.uuid4(),
-                    teammate_id=teammate_id,
-                    project_id=project_id,
-                    delegated_from="Tech Lead",
-                    delegated_to="QA Engineer",
-                    reason="Verify the task output",
-                    input_data='{"task":"Verify the task output"}',
-                    status="completed",
-                ),
             ]
+        )
+        await db.flush()
+        db.add(
+            TaskHandoff(
+                tenant_id=tenant.id,
+                parent_task_id=parent_task_id,
+                child_task_id=uuid.UUID(task_id),
+                idempotency_key=uuid.uuid4(),
+                teammate_id=teammate_id,
+                project_id=project_id,
+                delegated_from="Tech Lead",
+                delegated_to="QA Engineer",
+                reason="Verify the task output",
+                input_data='{"task":"Verify the task output"}',
+                status="completed",
+            )
         )
         await db.commit()
 
