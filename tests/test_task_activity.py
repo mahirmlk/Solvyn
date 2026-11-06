@@ -27,6 +27,9 @@ class _Rows:
     def scalar_one_or_none(self) -> Any | None:
         return self.rows[0] if self.rows else None
 
+    def first(self) -> Any | None:
+        return self.rows[0] if self.rows else None
+
 
 class _ActivitySession:
     def __init__(self, results: list[list[Any]]) -> None:
@@ -45,7 +48,7 @@ async def test_task_activity_combines_durable_records_in_reverse_chronological_o
     from solvyn.api.v1 import verification
 
     task_id, tenant_id, execution_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    handoff_id, run_id, delivery_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    handoff_id, run_id, delivery_id, child_task_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     task = SimpleNamespace(
         id=task_id,
         tenant_id=tenant_id,
@@ -57,15 +60,15 @@ async def test_task_activity_combines_durable_records_in_reverse_chronological_o
         completed_at=_time(9, 1),
     )
     invocation = SimpleNamespace(
-        id=uuid.uuid4(), status="succeeded", tool_name="workspace_read_file", path="src/main.py",
+        id=uuid.uuid4(), task_id=child_task_id, status="succeeded", tool_name="workspace_read_file", path="src/main.py",
         error_code=None, started_at=_time(10, 0), completed_at=_time(10, 1),
     )
     run = SimpleNamespace(
-        id=run_id, kind="test", status="passed", exit_code=0, timed_out=False,
+        id=run_id, task_id=task_id, kind="test", status="passed", exit_code=0, timed_out=False,
         started_at=_time(9, 45), completed_at=_time(9, 50),
     )
     delivery = SimpleNamespace(
-        id=delivery_id, status="pull_request_open", updated_at=_time(9, 42), created_at=_time(9, 40),
+        id=delivery_id, task_id=task_id, status="pull_request_open", updated_at=_time(9, 42), created_at=_time(9, 40),
         pull_request_title="Implement feature", branch_name="solvyn/task-42", pull_request_number=42,
     )
     handoff = SimpleNamespace(
@@ -73,10 +76,16 @@ async def test_task_activity_combines_durable_records_in_reverse_chronological_o
         completed_at=_time(9, 30), created_at=_time(9, 20), delegated_to="software_engineer", reason="Implement feature",
     )
     approval = SimpleNamespace(
-        id=uuid.uuid4(), kind="verification", status="pending", decided_at=None,
+        id=uuid.uuid4(), verification_run_id=run_id, task_handoff_id=handoff_id,
+        kind="verification", status="pending", decided_at=None,
         updated_at=_time(9, 25), created_at=_time(9, 25), summary="Run the test profile", decision_note=None,
     )
-    session = _ActivitySession([[invocation], [run], [delivery], [handoff], [approval]])
+    task_event = SimpleNamespace(
+        id=uuid.uuid4(), task_id=child_task_id, parent_task_id=task_id, event_type="status_changed",
+        previous_status="running", status="completed", source="user_request", actor_user_id=uuid.uuid4(),
+        occurred_at=_time(9, 10),
+    )
+    session = _ActivitySession([[child_task_id], [], [invocation], [run], [delivery], [handoff], [task_event], [approval]])
     monkeypatch.setattr(verification, "_owned_task", AsyncMock(return_value=task))
     monkeypatch.setattr(
         verification,
@@ -107,12 +116,38 @@ async def test_task_activity_combines_durable_records_in_reverse_chronological_o
     assert feed["count"] == 6
     assert feed["truncated"] is False
     assert [event["type"] for event in feed["activity"]] == [
-        "tool", "verification", "delivery", "handoff", "approval", "task",
+        "tool", "verification", "delivery", "handoff", "approval", "task_lifecycle",
     ]
     delivery_event = feed["activity"][2]
     assert delivery_event["details"]["pull_request_status"]["review_status"]["state"] == "review_required"
     assert feed["activity"][4]["details"]["decision_note"] == ""
     assert feed["activity"][-1]["status"] == "completed"
+    assert str(child_task_id)[:8] in feed["activity"][-1]["summary"]
+    assert feed["activity"][-1]["details"]["task_id"] == str(child_task_id)
+
+
+@pytest.mark.asyncio
+async def test_task_activity_tree_bounds_wide_and_deep_trees() -> None:
+    from solvyn.api.v1.verification import (
+        _ACTIVITY_TASK_TREE_DEPTH_LIMIT,
+        _ACTIVITY_TASK_TREE_LIMIT,
+        _activity_task_tree_ids,
+    )
+
+    root_id, tenant_id = uuid.uuid4(), uuid.uuid4()
+    task = SimpleNamespace(id=root_id, tenant_id=tenant_id, execution_id=uuid.uuid4())
+    wide_children = [uuid.uuid4() for _ in range(_ACTIVITY_TASK_TREE_LIMIT + 1)]
+    wide_ids, wide_truncated = await _activity_task_tree_ids(_ActivitySession([wide_children]), task)  # type: ignore[arg-type]
+    assert len(wide_ids) == _ACTIVITY_TASK_TREE_LIMIT
+    assert wide_ids[0] == root_id
+    assert wide_truncated is True
+
+    deep_levels = [[uuid.uuid4()] for _ in range(_ACTIVITY_TASK_TREE_DEPTH_LIMIT + 1)]
+    deep_ids, deep_truncated = await _activity_task_tree_ids(
+        _ActivitySession(deep_levels), task  # type: ignore[arg-type]
+    )
+    assert len(deep_ids) == _ACTIVITY_TASK_TREE_DEPTH_LIMIT + 1
+    assert deep_truncated is True
 
 
 @pytest.mark.asyncio
