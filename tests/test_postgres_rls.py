@@ -14,8 +14,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from solvyn.db.models import (
     Approval,
     ExecutionGraph,
-    Memory,
+    Integration,
+    IntegrationCredential,
     MaintenanceSchedule,
+    Memory,
     ProactiveEvent,
     Session,
     Task,
@@ -59,7 +61,8 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                         "('tasks', 'task_acceptance_criteria', 'task_deliveries', 'task_workspaces', "
                         "'teammate_tool_invocations', 'task_dependencies', 'verification_runs', "
                         "'task_handoffs', 'teammate_memory', 'sessions', 'execution_graphs', 'memory', 'token_usage', "
-                        "'approvals', 'proactive_events', 'maintenance_schedules')"
+                        "'approvals', 'proactive_events', 'maintenance_schedules', 'integrations', "
+                        "'integration_credentials')"
                     )
                 )
             ).all()
@@ -80,6 +83,8 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                 "approvals",
                 "proactive_events",
                 "maintenance_schedules",
+                "integrations",
+                "integration_credentials",
             }
             assert all(row[1] and row[2] for row in protected_tables)
 
@@ -759,6 +764,144 @@ async def test_proactive_data_rls_is_tenant_and_organization_scoped() -> None:
             await connection.execute(
                 text("DELETE FROM organizations WHERE id IN (:a, :other, :b)"),
                 {"a": organization_a, "other": organization_a_other, "b": organization_b},
+            )
+            await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_integration_credentials_rls_is_tenant_scoped_and_allows_inactive_cleanup() -> None:
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url.startswith("postgresql+"):
+        pytest.skip("RLS behavior requires PostgreSQL and migrations at head")
+
+    engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+    organization_a, organization_b = uuid.uuid4(), uuid.uuid4()
+    integration_a, integration_b = uuid.uuid4(), uuid.uuid4()
+    credential_a, credential_b = uuid.uuid4(), uuid.uuid4()
+
+    try:
+        async with engine.connect() as connection:
+            protected = (
+                await connection.execute(
+                    text(
+                        "SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class "
+                        "WHERE relname IN ('integrations', 'integration_credentials')"
+                    )
+                )
+            ).all()
+            assert {row[0] for row in protected} == {"integrations", "integration_credentials"}
+            assert all(row[1] and row[2] for row in protected)
+
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'RLS integrations', :slug, '')"),
+                [{"id": tenant_a, "slug": f"rls-integration-{tenant_a}"}, {"id": tenant_b, "slug": f"rls-integration-{tenant_b}"}],
+            )
+            await connection.execute(
+                text("INSERT INTO organizations (id, name, slug, tenant_id) VALUES (:id, 'RLS integrations', :slug, :tenant_id)"),
+                [
+                    {"id": organization_a, "slug": f"rls-integration-{organization_a}", "tenant_id": tenant_a},
+                    {"id": organization_b, "slug": f"rls-integration-{organization_b}", "tenant_id": tenant_b},
+                ],
+            )
+            for tenant_id, organization_id, integration_id, credential_id, active in (
+                (tenant_a, organization_a, integration_a, credential_a, True),
+                (tenant_b, organization_b, integration_b, credential_b, False),
+            ):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO integrations (id, organization_id, provider, external_id, name, is_active) "
+                        "VALUES (:id, :organization_id, 'github', 'organization-token', 'RLS integration', :active)"
+                    ),
+                    {"id": integration_id, "organization_id": organization_id, "active": active},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO integration_credentials (id, integration_id, ciphertext, account_login) "
+                        "VALUES (:id, :integration_id, :ciphertext, :account_login)"
+                    ),
+                    {
+                        "id": credential_id,
+                        "integration_id": integration_id,
+                        "ciphertext": f"sealed-{tenant_id}".encode(),
+                        "account_login": f"account-{tenant_id}",
+                    },
+                )
+
+        tenant_context.clear()
+        async with sessions() as db:
+            assert (await db.execute(select(Integration.id))).scalars().all() == []
+            assert (await db.execute(select(IntegrationCredential.id))).scalars().all() == []
+            with pytest.raises(DBAPIError):
+                await db.execute(
+                    text(
+                        "INSERT INTO integrations (id, organization_id, provider, external_id) "
+                        "VALUES (:id, :organization_id, 'github', 'unscoped')"
+                    ),
+                    {"id": uuid.uuid4(), "organization_id": organization_a},
+                )
+            await db.rollback()
+
+        tenant_context.set(tenant_a, "rls-integration-a")
+        async with sessions() as db:
+            assert (await db.execute(select(Integration.id))).scalars().all() == [integration_a]
+            assert (await db.execute(select(IntegrationCredential.id))).scalars().all() == [credential_a]
+            hidden_integration_update = await db.execute(
+                text("UPDATE integrations SET name = 'cross-tenant' WHERE id = :id"), {"id": integration_b}
+            )
+            hidden_credential_update = await db.execute(
+                text("UPDATE integration_credentials SET account_login = 'cross-tenant' WHERE id = :id"),
+                {"id": credential_b},
+            )
+            assert hidden_integration_update.rowcount == hidden_credential_update.rowcount == 0
+            await db.rollback()
+
+        async with sessions() as db:
+            db.add(
+                IntegrationCredential(
+                    id=uuid.uuid4(),
+                    integration_id=integration_b,
+                    ciphertext=b"sealed-cross-tenant",
+                    account_login="cross-tenant",
+                )
+            )
+            with pytest.raises(DBAPIError):
+                await db.flush()
+            await db.rollback()
+
+        tenant_context.set(tenant_b, "rls-integration-b")
+        async with sessions() as db:
+            inactive = await db.execute(select(Integration).where(Integration.id == integration_b))
+            assert inactive.scalar_one().is_active is False
+            removable = await db.execute(
+                text("DELETE FROM integration_credentials WHERE id = :id"), {"id": credential_b}
+            )
+            assert removable.rowcount == 1
+            await db.commit()
+    finally:
+        tenant_context.clear()
+        async with engine.begin() as connection:
+            for tenant_id, credential_id, integration_id in (
+                (tenant_a, credential_a, integration_a),
+                (tenant_b, credential_b, integration_b),
+            ):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(
+                    text("DELETE FROM integration_credentials WHERE id = :id"), {"id": credential_id}
+                )
+                await connection.execute(text("DELETE FROM integrations WHERE id = :id"), {"id": integration_id})
+            await connection.execute(
+                text("DELETE FROM organizations WHERE id IN (:a, :b)"), {"a": organization_a, "b": organization_b}
             )
             await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
         await engine.dispose()
