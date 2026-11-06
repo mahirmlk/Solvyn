@@ -3,7 +3,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import HTTPException
 
 from solvyn.multi_tenant.middleware import tenant_context
 
@@ -53,3 +52,25 @@ async def test_create_session_assigns_current_tenant() -> None:
 
     session = db.add.call_args.args[0]
     assert session.tenant_id == tenant_id
+
+
+@pytest.mark.asyncio
+async def test_bind_tenant_scope_sets_task_event_actor_metadata() -> None:
+    from solvyn.db.session import bind_tenant_scope
+
+    tenant_id, actor_id = uuid.uuid4(), uuid.uuid4()
+    tenant_context.set(tenant_id, "tenant-a", user_id=actor_id)
+    db = AsyncMock()
+    db.get_bind = MagicMock(return_value=SimpleNamespace(dialect=SimpleNamespace(name="postgresql")))
+    try:
+        await bind_tenant_scope(db, tenant_id)
+    finally:
+        tenant_context.clear()
+
+    assert db.execute.await_count == 3
+    params = [call.args[1] for call in db.execute.await_args_list]
+    assert params == [
+        {"tenant_id": str(tenant_id)},
+        {"actor_user_id": str(actor_id)},
+        {"event_source": "user_request"},
+    ]

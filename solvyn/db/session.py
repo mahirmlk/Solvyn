@@ -42,6 +42,16 @@ def _set_postgres_tenant_context(
     if tenant_id is None:
         return
     connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_id)})
+    actor_user_id = tenant_context.user_id
+    connection.execute(
+        text("SELECT set_config('app.task_event_actor_user_id', :actor_user_id, true)"),
+        {"actor_user_id": str(actor_user_id) if actor_user_id is not None else ""},
+    )
+    event_source = "user_request" if actor_user_id is not None else "tenant_service"
+    connection.execute(
+        text("SELECT set_config('app.task_event_source', :event_source, true)"),
+        {"event_source": event_source},
+    )
 
 
 async def get_session() -> AsyncGenerator[AsyncSession]:
@@ -59,3 +69,15 @@ async def bind_tenant_scope(session: AsyncSession, tenant_id: uuid.UUID) -> None
     if session.get_bind().dialect.name != "postgresql":
         return
     await session.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_id)})
+    from solvyn.multi_tenant.middleware import tenant_context
+
+    actor_user_id = tenant_context.user_id
+    await session.execute(
+        text("SELECT set_config('app.task_event_actor_user_id', :actor_user_id, true)"),
+        {"actor_user_id": str(actor_user_id) if actor_user_id is not None else ""},
+    )
+    event_source = "user_request" if actor_user_id is not None else "tenant_service"
+    await session.execute(
+        text("SELECT set_config('app.task_event_source', :event_source, true)"),
+        {"event_source": event_source},
+    )

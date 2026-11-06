@@ -29,6 +29,7 @@ from solvyn.db.models import (
     Task,
     TaskAcceptanceCriterion,
     TaskDelivery,
+    TaskEvent,
     TaskHandoff,
     TaskWorkspace,
     TeammateToolInvocation,
@@ -60,6 +61,8 @@ _MAX_DELIVERY_BYTES = 500_000
 _MAX_DELIVERY_DIFF_BYTES = 1_000_000
 _ACTIVITY_SOURCE_LIMIT = 100
 _ACTIVITY_TOTAL_LIMIT = 200
+_ACTIVITY_TASK_TREE_LIMIT = 500
+_ACTIVITY_TASK_TREE_DEPTH_LIMIT = 32
 _MAX_LIVE_PULL_REQUESTS = 5
 VerificationKind = Literal["test", "build", "lint", "typecheck", "security"]
 
@@ -955,6 +958,50 @@ def _activity_sort_timestamp(value: str | None) -> datetime:
     return parsed.astimezone(UTC)
 
 
+async def _activity_task_tree_ids(db: AsyncSession, task: Task) -> tuple[list[uuid.UUID], bool]:
+    ids = [task.id]
+    seen = {task.id}
+    frontier = [task.id]
+    for depth in range(_ACTIVITY_TASK_TREE_DEPTH_LIMIT):
+        remaining = _ACTIVITY_TASK_TREE_LIMIT - len(ids)
+        result = await db.execute(
+            select(Task.id)
+            .where(
+                Task.tenant_id == task.tenant_id,
+                Task.execution_id == task.execution_id,
+                Task.parent_task_id.in_(frontier),
+                Task.id.not_in(seen),
+            )
+            .order_by(Task.id)
+            .limit(remaining + 1)
+        )
+        children = list(result.scalars().all())
+        truncated = len(children) > remaining
+        if truncated:
+            children = children[:remaining]
+        ids.extend(children)
+        seen.update(children)
+        if truncated:
+            return ids, True
+        frontier = children
+        if not frontier:
+            return ids, False
+
+    # Probe one additional level so an exactly-32-level tree is not reported
+    # truncated unless another descendant actually exists.
+    probe = await db.execute(
+        select(Task.id)
+        .where(
+            Task.tenant_id == task.tenant_id,
+            Task.execution_id == task.execution_id,
+            Task.parent_task_id.in_(frontier),
+            Task.id.not_in(seen),
+        )
+        .limit(1)
+    )
+    return ids, bool(probe.scalars().first())
+
+
 async def _refresh_task_pull_request_statuses(
     db: AsyncSession,
     task: Task,
@@ -1074,10 +1121,12 @@ async def list_task_activity(
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     task = await _owned_task(execution_id, task_id, db)
+    task_ids, tree_truncated = await _activity_task_tree_ids(db, task)
+
     invocations = (
         await db.execute(
             select(TeammateToolInvocation)
-            .where(TeammateToolInvocation.tenant_id == task.tenant_id, TeammateToolInvocation.task_id == task.id)
+            .where(TeammateToolInvocation.tenant_id == task.tenant_id, TeammateToolInvocation.task_id.in_(task_ids))
             .order_by(TeammateToolInvocation.started_at.desc(), TeammateToolInvocation.id.desc())
             .limit(_ACTIVITY_SOURCE_LIMIT + 1)
         )
@@ -1085,7 +1134,7 @@ async def list_task_activity(
     runs = (
         await db.execute(
             select(VerificationRun)
-            .where(VerificationRun.tenant_id == task.tenant_id, VerificationRun.task_id == task.id)
+            .where(VerificationRun.tenant_id == task.tenant_id, VerificationRun.task_id.in_(task_ids))
             .order_by(VerificationRun.started_at.desc(), VerificationRun.id.desc())
             .limit(_ACTIVITY_SOURCE_LIMIT + 1)
         )
@@ -1093,7 +1142,7 @@ async def list_task_activity(
     deliveries = (
         await db.execute(
             select(TaskDelivery)
-            .where(TaskDelivery.tenant_id == task.tenant_id, TaskDelivery.task_id == task.id)
+            .where(TaskDelivery.tenant_id == task.tenant_id, TaskDelivery.task_id.in_(task_ids))
             .order_by(TaskDelivery.created_at.desc(), TaskDelivery.id.desc())
             .limit(_ACTIVITY_SOURCE_LIMIT + 1)
         )
@@ -1103,9 +1152,17 @@ async def list_task_activity(
             select(TaskHandoff)
             .where(
                 TaskHandoff.tenant_id == task.tenant_id,
-                or_(TaskHandoff.parent_task_id == task.id, TaskHandoff.child_task_id == task.id),
+                or_(TaskHandoff.parent_task_id.in_(task_ids), TaskHandoff.child_task_id.in_(task_ids)),
             )
             .order_by(TaskHandoff.created_at.desc(), TaskHandoff.id.desc())
+            .limit(_ACTIVITY_SOURCE_LIMIT + 1)
+        )
+    ).scalars().all()
+    task_events = (
+        await db.execute(
+            select(TaskEvent)
+            .where(TaskEvent.tenant_id == task.tenant_id, TaskEvent.task_id.in_(task_ids))
+            .order_by(TaskEvent.occurred_at.desc(), TaskEvent.id.desc())
             .limit(_ACTIVITY_SOURCE_LIMIT + 1)
         )
     ).scalars().all()
@@ -1135,25 +1192,49 @@ async def list_task_activity(
 
     source_truncated = any(
         len(records) > _ACTIVITY_SOURCE_LIMIT
-        for records in (invocations, runs, deliveries, handoffs, approvals)
+        for records in (invocations, runs, deliveries, handoffs, approvals, task_events)
     )
+    source_truncated = source_truncated or tree_truncated
     invocations = invocations[:_ACTIVITY_SOURCE_LIMIT]
     runs = runs[:_ACTIVITY_SOURCE_LIMIT]
     deliveries = deliveries[:_ACTIVITY_SOURCE_LIMIT]
     handoffs = handoffs[:_ACTIVITY_SOURCE_LIMIT]
     approvals = approvals[:_ACTIVITY_SOURCE_LIMIT]
+    task_events = task_events[:_ACTIVITY_SOURCE_LIMIT]
 
-    live_pr_statuses = await _refresh_task_pull_request_statuses(db, task, list(deliveries))
-    events: list[dict[str, Any]] = [
-        {
-            "id": f"task:{task.id}",
-            "type": "task",
-            "status": task.status,
-            "timestamp": _activity_timestamp(task.updated_at or task.completed_at or task.created_at),
-            "summary": f"Task {task.status.replace('_', ' ')}",
-            "details": {"assigned_agent": task.assigned_agent},
-        }
-    ]
+    root_deliveries = [delivery for delivery in deliveries if delivery.task_id == task.id]
+    live_pr_statuses = await _refresh_task_pull_request_statuses(db, task, root_deliveries)
+
+    def task_prefix(related_task_id: uuid.UUID) -> str:
+        if related_task_id == task.id:
+            return ""
+        return f"Child task {str(related_task_id)[:8]}: "
+
+    events: list[dict[str, Any]] = []
+    for task_event in task_events:
+        prefix = task_prefix(task_event.task_id)
+        if task_event.event_type == "baseline":
+            summary = f"{prefix}History baseline: {task_event.status.replace('_', ' ')}"
+        elif task_event.event_type == "created":
+            summary = f"{prefix}Created with status {task_event.status.replace('_', ' ')}"
+        else:
+            previous = task_event.previous_status or "unknown"
+            summary = f"{prefix}Status changed from {previous.replace('_', ' ')} to {task_event.status.replace('_', ' ')}"
+        events.append(
+            {
+                "id": f"task_lifecycle:{task_event.id}",
+                "type": "task_lifecycle",
+                "status": task_event.status,
+                "timestamp": _activity_timestamp(task_event.occurred_at),
+                "summary": summary,
+                "details": {
+                    "task_id": str(task_event.task_id),
+                    "parent_task_id": str(task_event.parent_task_id) if task_event.parent_task_id else None,
+                    "source": task_event.source,
+                    "actor_user_id": str(task_event.actor_user_id) if task_event.actor_user_id else None,
+                },
+            }
+        )
     for invocation in invocations:
         events.append(
             {
@@ -1161,8 +1242,12 @@ async def list_task_activity(
                 "type": "tool",
                 "status": invocation.status,
                 "timestamp": _activity_timestamp(invocation.completed_at or invocation.started_at),
-                "summary": f"Teammate used {invocation.tool_name}",
-                "details": {"path": invocation.path, "error_code": invocation.error_code},
+                "summary": f"{task_prefix(invocation.task_id)}Teammate used {invocation.tool_name}",
+                "details": {
+                    "task_id": str(invocation.task_id),
+                    "path": invocation.path,
+                    "error_code": invocation.error_code,
+                },
             }
         )
     for run in runs:
@@ -1172,47 +1257,80 @@ async def list_task_activity(
                 "type": "verification",
                 "status": run.status,
                 "timestamp": _activity_timestamp(run.completed_at or run.started_at),
-                "summary": f"{run.kind.title()} verification {run.status.replace('_', ' ')}",
-                "details": {"exit_code": run.exit_code, "timed_out": run.timed_out},
+                "summary": f"{task_prefix(run.task_id)}{run.kind.title()} verification {run.status.replace('_', ' ')}",
+                "details": {"task_id": str(run.task_id), "exit_code": run.exit_code, "timed_out": run.timed_out},
             }
         )
     for delivery in deliveries:
         number = delivery.pull_request_number
+        delivery_summary = delivery.pull_request_title or f"GitHub delivery {delivery.status.replace('_', ' ')}"
         events.append(
             {
                 "id": f"delivery:{delivery.id}",
                 "type": "delivery",
                 "status": delivery.status,
                 "timestamp": _activity_timestamp(delivery.updated_at or delivery.created_at),
-                "summary": delivery.pull_request_title or f"GitHub delivery {delivery.status.replace('_', ' ')}",
+                "summary": f"{task_prefix(delivery.task_id)}{delivery_summary}",
                 "details": {
+                    "task_id": str(delivery.task_id),
                     "branch": delivery.branch_name,
                     "pull_request_number": number,
-                    "pull_request_status": live_pr_statuses.get(delivery.id) if number else None,
+                    "pull_request_status": (
+                        live_pr_statuses.get(delivery.id)
+                        if delivery.task_id == task.id and number
+                        else (
+                            {"availability": "unavailable", "reason": "descendant_status_not_refreshed"}
+                            if number
+                            else None
+                        )
+                    ),
                 },
             }
         )
     for handoff in handoffs:
-        direction = "received" if handoff.child_task_id == task.id else "delegated"
+        direction = "delegated" if handoff.parent_task_id in task_ids else "received"
+        related_task_id = handoff.parent_task_id if direction == "delegated" else handoff.child_task_id
         events.append(
             {
                 "id": f"handoff:{handoff.id}",
                 "type": "handoff",
                 "status": handoff.status,
                 "timestamp": _activity_timestamp(handoff.completed_at or handoff.created_at),
-                "summary": f"Task {direction} by {handoff.delegated_to}",
-                "details": {"reason": handoff.reason[:1000]},
+                "summary": f"{task_prefix(related_task_id)}Task {direction} by {handoff.delegated_to}",
+                "details": {
+                    "task_id": str(related_task_id),
+                    "parent_task_id": str(handoff.parent_task_id),
+                    "child_task_id": str(handoff.child_task_id),
+                    "reason": handoff.reason[:1000],
+                },
             }
         )
+    approval_task_ids = {run.id: run.task_id for run in runs}
+    approval_task_ids.update(
+        {
+            handoff.id: handoff.parent_task_id if handoff.parent_task_id in task_ids else handoff.child_task_id
+            for handoff in handoffs
+        }
+    )
     for approval in approvals:
+        approval_task_id = None
+        if approval.verification_run_id is not None:
+            approval_task_id = approval_task_ids.get(approval.verification_run_id)
+        if approval_task_id is None and approval.task_handoff_id is not None:
+            approval_task_id = approval_task_ids.get(approval.task_handoff_id)
+        prefix = task_prefix(approval_task_id) if approval_task_id is not None else ""
         events.append(
             {
                 "id": f"approval:{approval.id}",
                 "type": "approval",
                 "status": approval.status,
                 "timestamp": _activity_timestamp(approval.decided_at or approval.updated_at or approval.created_at),
-                "summary": f"{approval.kind.replace('_', ' ').title()} approval {approval.status.replace('_', ' ')}",
-                "details": {"summary": approval.summary[:1000], "decision_note": (approval.decision_note or "")[:1000]},
+                "summary": f"{prefix}{approval.kind.replace('_', ' ').title()} approval {approval.status.replace('_', ' ')}",
+                "details": {
+                    "task_id": str(approval_task_id) if approval_task_id is not None else None,
+                    "summary": approval.summary[:1000],
+                    "decision_note": (approval.decision_note or "")[:1000],
+                },
             }
         )
 

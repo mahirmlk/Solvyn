@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import AsyncConnection, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker, create_async_engine
 
 from solvyn.db.models import (
     ApiKey,
@@ -2764,6 +2764,201 @@ async def test_api_key_rls_preserves_unscoped_key_authentication(
                 text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b}
             )
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_task_event_history_is_atomic_immutable_and_tree_scoped() -> None:
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url.startswith("postgresql+"):
+        pytest.skip("RLS behavior requires PostgreSQL and migrations at head")
+
+    from solvyn.api.v1.verification import _activity_task_tree_ids
+
+    engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
+    tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+    root_id, child_id, foreign_task_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    actor_id = uuid.uuid4()
+    try:
+        async with engine.connect() as connection:
+            transaction = await connection.begin()
+            try:
+                protected = (
+                    await connection.execute(
+                        text(
+                            "SELECT relrowsecurity, relforcerowsecurity FROM pg_class "
+                            "WHERE relname = 'task_events'"
+                        )
+                    )
+                ).one()
+                assert protected == (True, True)
+                await connection.execute(
+                    text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'Task Events', :slug, '')"),
+                    [
+                        {"id": tenant_a, "slug": f"rls-task-events-{tenant_a}"},
+                        {"id": tenant_b, "slug": f"rls-task-events-{tenant_b}"},
+                    ],
+                )
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_a)},
+                )
+                await connection.execute(
+                    text("SELECT set_config('app.task_event_source', 'user_request', true)")
+                )
+                await connection.execute(
+                    text("SELECT set_config('app.task_event_actor_user_id', :actor_id, true)"),
+                    {"actor_id": str(actor_id)},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO tasks (id, tenant_id, title, status, execution_id) "
+                        "VALUES (:id, :tenant_id, 'History root', 'pending', NULL)"
+                    ),
+                    {"id": root_id, "tenant_id": tenant_a},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO tasks (id, tenant_id, title, status, parent_task_id, execution_id) "
+                        "VALUES (:id, :tenant_id, 'History child', 'pending', :parent_id, NULL)"
+                    ),
+                    {"id": child_id, "tenant_id": tenant_a, "parent_id": root_id},
+                )
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_b)},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO tasks (id, tenant_id, title, status, execution_id) "
+                        "VALUES (:id, :tenant_id, 'Foreign history', 'pending', NULL)"
+                    ),
+                    {"id": foreign_task_id, "tenant_id": tenant_b},
+                )
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_a)},
+                )
+                await connection.execute(
+                    text("UPDATE tasks SET status = 'running' WHERE id = :id"), {"id": root_id}
+                )
+                await connection.execute(
+                    text("UPDATE tasks SET status = 'running' WHERE id = :id"), {"id": root_id}
+                )
+                await connection.execute(
+                    text("UPDATE tasks SET status = 'completed' WHERE id = :id"), {"id": child_id}
+                )
+
+                events = (
+                    await connection.execute(
+                        text(
+                            "SELECT task_id, event_type, previous_status, status, source, actor_user_id "
+                            "FROM task_events WHERE tenant_id = :tenant_id ORDER BY occurred_at, id"
+                        ),
+                        {"tenant_id": tenant_a},
+                    )
+                ).all()
+                assert [(row.event_type, row.previous_status, row.status) for row in events] == [
+                    ("created", None, "pending"),
+                    ("created", None, "pending"),
+                    ("status_changed", "pending", "running"),
+                    ("status_changed", "pending", "completed"),
+                ]
+                assert {row.task_id for row in events} == {root_id, child_id}
+                assert all(row.source == "user_request" and row.actor_user_id == actor_id for row in events)
+
+                tenant_context.set(tenant_a, "rls-task-events-a", user_id=actor_id)
+                async with AsyncSession(bind=connection, expire_on_commit=False) as session:
+                    root = Task(id=root_id, tenant_id=tenant_a, execution_id=None, title="History root")
+                    tree_ids, truncated = await _activity_task_tree_ids(session, root)
+                    assert set(tree_ids) == {root_id, child_id}
+                    assert truncated is False
+
+                savepoint = await connection.begin_nested()
+                await connection.execute(
+                    text("UPDATE tasks SET status = 'failed' WHERE id = :id"), {"id": root_id}
+                )
+                assert (
+                    await connection.execute(
+                        text("SELECT count(*) FROM task_events WHERE tenant_id = :tenant_id"),
+                        {"tenant_id": tenant_a},
+                    )
+                ).scalar_one() == 5
+                await savepoint.rollback()
+                assert (
+                    await connection.execute(
+                        text("SELECT count(*) FROM task_events WHERE tenant_id = :tenant_id"),
+                        {"tenant_id": tenant_a},
+                    )
+                ).scalar_one() == 4
+
+                assert (
+                    await connection.execute(
+                        text("SELECT count(*) FROM task_events WHERE tenant_id = :tenant_id"),
+                        {"tenant_id": tenant_b},
+                    )
+                ).scalar_one() == 0
+                assert (
+                    await connection.execute(
+                        text("UPDATE task_events SET status = 'forged' WHERE task_id = :task_id"),
+                        {"task_id": foreign_task_id},
+                    )
+                ).rowcount == 0
+                assert (
+                    await connection.execute(
+                        text("DELETE FROM task_events WHERE task_id = :task_id"),
+                        {"task_id": foreign_task_id},
+                    )
+                ).rowcount == 0
+
+                event_task_id = events[0].task_id
+                immutable_savepoint = await connection.begin_nested()
+                with pytest.raises(DBAPIError):
+                    await connection.execute(
+                        text("UPDATE task_events SET status = 'forged' WHERE task_id = :task_id"),
+                        {"task_id": event_task_id},
+                    )
+                await immutable_savepoint.rollback()
+                immutable_savepoint = await connection.begin_nested()
+                with pytest.raises(DBAPIError):
+                    await connection.execute(
+                        text("DELETE FROM task_events WHERE task_id = :task_id"), {"task_id": event_task_id}
+                    )
+                await immutable_savepoint.rollback()
+
+                direct_insert_savepoint = await connection.begin_nested()
+                with pytest.raises(DBAPIError):
+                    await connection.execute(
+                        text(
+                            "INSERT INTO task_events (tenant_id, task_id, event_type, status, source) "
+                            "VALUES (:tenant_id, :task_id, 'forged', 'completed', 'forged_source')"
+                        ),
+                        {"tenant_id": tenant_a, "task_id": root_id},
+                    )
+                await direct_insert_savepoint.rollback()
+
+                await connection.execute(text("SELECT set_config('app.tenant_id', '', true)"))
+                tenant_context.clear()
+                assert (
+                    await connection.execute(text("SELECT count(*) FROM task_events"))
+                ).scalar_one() == 0
+                denied_savepoint = await connection.begin_nested()
+                with pytest.raises(DBAPIError):
+                    await connection.execute(
+                        text(
+                            "INSERT INTO task_events (tenant_id, task_id, event_type, status, source) "
+                            "VALUES (:tenant_id, :task_id, 'forged', 'completed', 'test')"
+                        ),
+                        {"tenant_id": tenant_a, "task_id": root_id},
+                    )
+                await denied_savepoint.rollback()
+            finally:
+                tenant_context.clear()
+                if transaction.is_active:
+                    await transaction.rollback()
+        await engine.dispose()
+    except Exception:
+        await engine.dispose()
+        raise
 
 
 @pytest.mark.asyncio

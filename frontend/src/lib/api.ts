@@ -273,12 +273,17 @@ export interface TaskActivityPullRequestStatus {
 
 export interface TaskActivityEvent {
   id: string;
-  type: "task" | "tool" | "verification" | "delivery" | "handoff" | "approval";
+  type: "task" | "task_lifecycle" | "tool" | "verification" | "delivery" | "handoff" | "approval";
   status: string;
   timestamp: string | null;
   summary: string;
   details: {
     assigned_agent?: string | null;
+    task_id?: string | null;
+    parent_task_id?: string | null;
+    child_task_id?: string | null;
+    source?: string;
+    actor_user_id?: string | null;
     path?: string | null;
     error_code?: string | null;
     exit_code?: number | null;
