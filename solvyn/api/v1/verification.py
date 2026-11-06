@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import difflib
 import hashlib
 import json
@@ -16,12 +17,14 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from solvyn.api.v1._rbac import OWNER_ADMIN
+from solvyn.api.v1._rbac import MEMBER_OR_ABOVE, OWNER_ADMIN, require_org_membership
 from solvyn.api.v1.repositories import _load_authorized_repository
 from solvyn.config import settings
 from solvyn.db.models import (
+    Approval,
     Organization,
     OrganizationMembership,
+    Project,
     Repository,
     Task,
     TaskAcceptanceCriterion,
@@ -639,7 +642,7 @@ async def create_task_workspace(
     }
 
 
-@router.post("/verification-runs", summary="Run and persist a sandbox verification check")
+@router.post("/verification-runs", status_code=202, summary="Request approval for a sandbox verification check")
 async def run_task_verification(
     execution_id: uuid.UUID,
     task_id: uuid.UUID,
@@ -652,6 +655,18 @@ async def run_task_verification(
     ).scalar_one_or_none()
     if workspace_record is None:
         raise HTTPException(status_code=409, detail="Create a task workspace before running verification")
+    handoff = (
+        await db.execute(
+            select(TaskHandoff).where(TaskHandoff.tenant_id == task.tenant_id, TaskHandoff.child_task_id == task.id)
+        )
+    ).scalar_one_or_none()
+    if handoff is None:
+        raise HTTPException(status_code=409, detail="Verification approval requires a project-assigned teammate task")
+    project = await db.get(Project, handoff.project_id)
+    if project is None or project.tenant_id != task.tenant_id:
+        raise HTTPException(status_code=404, detail="Task project not found")
+    if tenant_context.user_id is not None:
+        await require_org_membership(db, project.organization_id, roles=MEMBER_OR_ABOVE)
     command = payload.command or _DEFAULT_VERIFICATION_COMMANDS[payload.kind]
     if any(not part or "\x00" in part for part in command):
         raise HTTPException(status_code=422, detail="Command arguments must be non-empty strings without NUL bytes")
@@ -671,25 +686,133 @@ async def run_task_verification(
         workspace_id=workspace_record.id,
         kind=payload.kind,
         command=json.dumps(command),
-        status="running",
+        status="pending_approval",
         runner_version="sandbox-service/1" if settings.sandbox_runtime_url else "docker-sandbox/1",
         source_digest=source_digest,
     )
+    run_id = uuid.uuid4()
+    run.id = run_id
+    approval_payload = json.dumps(
+        {
+            "execution_id": str(execution_id),
+            "task_id": str(task.id),
+            "verification_run_id": str(run_id),
+            "workspace_id": str(workspace_record.id),
+            "kind": payload.kind,
+            "command": command,
+            "source_digest": source_digest,
+        }
+    )
+    approval = Approval(
+        organization_id=project.organization_id,
+        project_id=project.id,
+        teammate_id=handoff.teammate_id,
+        verification_run_id=run_id,
+        kind="verification_run",
+        summary=f"Run {payload.kind} verification for {task.title}",
+        payload=approval_payload,
+        requested_by=str(tenant_context.user_id or "User"),
+    )
     db.add(run)
+    await db.flush()
+    db.add(approval)
     await db.commit()
+    await db.refresh(run)
+    await db.refresh(approval)
+    return {
+        "verification_run": _verification_dict(run),
+        "approval_id": str(approval.id),
+        "approval_status": approval.status,
+    }
+
+
+async def _execute_approved_verification(
+    db: AsyncSession,
+    task: Task,
+    run: VerificationRun,
+    approval: Approval,
+) -> dict[str, Any]:
+    if run.status != "approved" or approval.status != "approved":
+        raise HTTPException(status_code=409, detail="Verification run does not have an unused approval")
+    try:
+        workspace = _workspace_manager().get(run.workspace_id)
+        current_digest = _workspace_manager().fingerprint(workspace)
+    except WorkspaceError:
+        current_digest = None
+    if current_digest != run.source_digest:
+        stale_run = await db.execute(
+            update(VerificationRun)
+            .where(VerificationRun.id == run.id, VerificationRun.status == "approved")
+            .values(
+                status="stale",
+                error="Workspace changed after this verification request was approved",
+                completed_at=datetime.now(UTC),
+            )
+            .returning(VerificationRun.id)
+        )
+        stale_approval = await db.execute(
+            update(Approval)
+            .where(Approval.id == approval.id, Approval.status == "approved")
+            .values(status="stale", updated_at=datetime.now(UTC))
+            .returning(Approval.id)
+        )
+        if stale_run.scalar_one_or_none() is None or stale_approval.scalar_one_or_none() is None:
+            await db.rollback()
+            raise HTTPException(status_code=409, detail="Verification approval has already been used")
+        await db.commit()
+        raise HTTPException(status_code=409, detail="Workspace changed after approval; request a new verification approval") from None
+
+    approval_claim = await db.execute(
+        update(Approval)
+        .where(Approval.id == approval.id, Approval.status == "approved")
+        .values(status="consumed", updated_at=datetime.now(UTC))
+        .returning(Approval.id)
+    )
+    run_claim = await db.execute(
+        update(VerificationRun)
+        .where(
+            VerificationRun.id == run.id,
+            VerificationRun.tenant_id == task.tenant_id,
+            VerificationRun.status == "approved",
+        )
+        .values(status="running")
+        .returning(VerificationRun.id)
+    )
+    if approval_claim.scalar_one_or_none() is None or run_claim.scalar_one_or_none() is None:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="Verification approval has already been used")
+    await db.commit()
+    await db.refresh(run)
+    command = json.loads(run.command)
     try:
         result: SandboxResult | RemoteSandboxResult = await _sandbox_runner().run(workspace, command)
+    except asyncio.CancelledError:
+        await _finish_run(
+            db,
+            run,
+            {
+                "status": "interrupted",
+                "error": "Sandbox verification was interrupted before completion",
+                "completed_at": datetime.now(UTC),
+            },
+        )
+        raise
     except (SandboxRuntimeError, WorkspaceError, ValueError) as exc:
+        return await _finish_run(
+            db,
+            run,
+            {"status": "failed", "error": str(exc)[:_MAX_STORED_OUTPUT_CHARS], "completed_at": datetime.now(UTC)},
+        )
+    except Exception as exc:
         return await _finish_run(
             db,
             run,
             {
                 "status": "failed",
-                "error": str(exc)[:_MAX_STORED_OUTPUT_CHARS],
+                "error": f"Sandbox execution failed unexpectedly ({type(exc).__name__})",
                 "completed_at": datetime.now(UTC),
             },
         )
-
     return await _finish_run(
         db,
         run,
@@ -704,6 +827,26 @@ async def run_task_verification(
             "completed_at": datetime.now(UTC),
         },
     )
+
+
+@router.post("/verification-runs/{verification_run_id}/execute", summary="Execute an approved sandbox verification")
+async def execute_approved_task_verification(
+    execution_id: uuid.UUID,
+    task_id: uuid.UUID,
+    verification_run_id: uuid.UUID,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    task = await _owned_task(execution_id, task_id, db)
+    run = await db.get(VerificationRun, verification_run_id)
+    if run is None or run.tenant_id != task.tenant_id or run.task_id != task.id or run.execution_id != execution_id:
+        raise HTTPException(status_code=404, detail="Verification request not found")
+    approval = (
+        await db.execute(select(Approval).where(Approval.verification_run_id == run.id))
+    ).scalar_one_or_none()
+    if approval is None:
+        raise HTTPException(status_code=409, detail="Verification request has no approval record")
+    await require_org_membership(db, approval.organization_id, roles=OWNER_ADMIN)
+    return await _execute_approved_verification(db, task, run, approval)
 
 
 @router.get("/verification-runs", summary="List task verification evidence")

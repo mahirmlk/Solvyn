@@ -22,30 +22,14 @@ class _Session:
     def __init__(self, granted: set[str]) -> None:
         self.granted = granted
         self.records = []
-        self.interrupt_before_completion = False
+        self.active_verification_approval = False
+        self.tenant_id = uuid.uuid4()
+        self.organization_id = uuid.uuid4()
 
     async def execute(self, statement):
         sql = str(statement)
-        if "UPDATE verification_runs" in sql and self.interrupt_before_completion:
-            self.records[1].status = "interrupted"
-            return _Result(None)
-        if "UPDATE verification_runs" in sql:
-            record = self.records[1]
-            parameters = statement.compile().params
-            for attribute in (
-                "status",
-                "error",
-                "completed_at",
-                "exit_code",
-                "timed_out",
-                "output_truncated",
-                "stdout",
-                "stderr",
-                "duration_seconds",
-            ):
-                if attribute in parameters:
-                    setattr(record, attribute, parameters[attribute])
-            return _Result(record.id)
+        if "verification_runs" in sql:
+            return _Result(uuid.uuid4() if self.active_verification_approval else None)
         if "teammate_permissions" in sql:
             parameters = statement.compile().params
             values = [
@@ -71,10 +55,20 @@ class _Session:
     async def commit(self) -> None:
         return None
 
+    async def flush(self) -> None:
+        return None
+
     async def refresh(self, _record) -> None:
         return None
 
     async def rollback(self) -> None:
+        return None
+
+    async def get(self, model, _record_id):
+        if model.__name__ == "TeammateProfile":
+            return SimpleNamespace(tenant_id=self.tenant_id, organization_id=self.organization_id, name="QA teammate")
+        if model.__name__ == "Project":
+            return SimpleNamespace(tenant_id=self.tenant_id, organization_id=self.organization_id, id=uuid.uuid4())
         return None
 
 
@@ -88,7 +82,7 @@ def _runtime(tmp_path: Path, granted: set[str]):
     runtime = TeammateWorkspaceToolRuntime(
         session,
         manager,
-        tenant_id=uuid.uuid4(),
+        tenant_id=session.tenant_id,
         task_id=uuid.uuid4(),
         workspace_id=workspace.id,
         teammate_id=uuid.uuid4(),
@@ -210,28 +204,9 @@ async def test_tool_loop_returns_model_result_after_audited_file_write(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_verification_tool_uses_fixed_profile_and_persists_evidence(tmp_path: Path, monkeypatch) -> None:
-    from solvyn.agents import workspace_tools
-    from solvyn.sandbox.runtime import SandboxResult
-
+async def test_verification_tool_requests_approval_without_executing(tmp_path: Path) -> None:
     runtime, session, _manager, workspace = _runtime(tmp_path, {"EXECUTE_COMMANDS"})
-
-    class _Runner:
-        async def run(self, received_workspace, command):
-            assert received_workspace.id == workspace.id
-            assert tuple(command) == ("pytest", "-q")
-            return SandboxResult(
-                run_id=uuid.uuid4(),
-                command=("pytest", "-q"),
-                exit_code=0,
-                timed_out=False,
-                stdout="2 passed",
-                stderr="",
-                output_truncated=False,
-                duration_seconds=0.5,
-            )
-
-    monkeypatch.setattr(workspace_tools, "create_sandbox_runner", lambda _manager: _Runner())
+    del workspace
 
     result = await runtime._invoke(
         {
@@ -244,13 +219,16 @@ async def test_verification_tool_uses_fixed_profile_and_persists_evidence(tmp_pa
     )
 
     assert result["kind"] == "test"
-    assert result["status"] == "passed"
-    assert result["stdout"] == "2 passed"
+    assert result["status"] == "pending_approval"
     assert session.records[0].status == "succeeded"
     verification = session.records[1]
-    assert verification.status == "passed"
+    assert verification.status == "pending_approval"
     assert verification.command == '["pytest", "-q"]'
     assert verification.source_digest is not None
+    approval = session.records[2]
+    assert approval.kind == "verification_run"
+    assert approval.verification_run_id == verification.id
+    assert '"command": ["pytest", "-q"]' in approval.payload
 
 
 @pytest.mark.asyncio
@@ -275,27 +253,8 @@ async def test_verification_tool_requires_execute_commands_grant(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_late_verification_result_does_not_overwrite_interrupted_run(tmp_path: Path, monkeypatch) -> None:
-    from solvyn.agents import workspace_tools
-    from solvyn.sandbox.runtime import SandboxResult
-
-    runtime, session, _manager, workspace = _runtime(tmp_path, {"EXECUTE_COMMANDS"})
-    session.interrupt_before_completion = True
-
-    class _Runner:
-        async def run(self, _received_workspace, command):
-            return SandboxResult(
-                run_id=uuid.uuid4(),
-                command=tuple(command),
-                exit_code=0,
-                timed_out=False,
-                stdout="late result",
-                stderr="",
-                output_truncated=False,
-                duration_seconds=1.0,
-            )
-
-    monkeypatch.setattr(workspace_tools, "create_sandbox_runner", lambda _manager: _Runner())
+async def test_verification_approval_binds_current_workspace_fingerprint(tmp_path: Path) -> None:
+    runtime, session, _manager, _workspace = _runtime(tmp_path, {"EXECUTE_COMMANDS"})
 
     result = await runtime._invoke(
         {
@@ -307,6 +266,29 @@ async def test_late_verification_result_does_not_overwrite_interrupted_run(tmp_p
         }
     )
 
-    assert result["status"] == "interrupted"
-    assert result["error_code"] == "verification_run_already_terminal"
-    assert session.records[1].status == "interrupted"
+    assert result["status"] == "pending_approval"
+    assert session.records[1].source_digest is not None
+    assert session.records[2].verification_run_id == session.records[1].id
+
+
+@pytest.mark.asyncio
+async def test_pending_verification_approval_freezes_workspace_writes(tmp_path: Path) -> None:
+    runtime, session, manager, workspace = _runtime(tmp_path, {"READ_ONLY", "MODIFY_FILES"})
+    session.active_verification_approval = True
+
+    result = await runtime._invoke(
+        {
+            "id": "call-frozen-write",
+            "function": {
+                "name": "workspace_write_file",
+                "arguments": '{"path":"src/main.py","content":"changed"}',
+            },
+        }
+    )
+
+    assert result == {"error": "verification_approval_freezes_workspace"}
+    assert session.records[0].status == "denied"
+    from solvyn.sandbox.workspaces import WorkspaceError
+
+    with pytest.raises(WorkspaceError):
+        manager.read_file(workspace, "src/main.py")

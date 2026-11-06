@@ -184,8 +184,10 @@ export interface ApprovalInfo {
   project_id: string | null;
   teammate_id: string | null;
   task_handoff_id: string | null;
+  verification_run_id: string | null;
   kind: string;
   summary: string;
+  payload: string | null;
   status: string;
   requested_by: string;
   decided_by: string | null;
@@ -327,11 +329,17 @@ export const api = {
       body: JSON.stringify({ project_id: projectId, input_data: { task } }),
     }),
 
-  listApprovals: (status: "pending" | "approved" | "rejected" = "pending") =>
+  listApprovals: (status: "pending" | "approved" | "rejected" | "consumed" | "stale" = "pending") =>
     request<{ approvals: ApprovalInfo[]; count: number }>(`/approvals?status=${status}`),
 
   decideApproval: (approvalId: string, decision: "approve" | "reject", note: string) =>
     request<ApprovalInfo>(`/approvals/${approvalId}/${decision}`, { method: "POST", body: JSON.stringify({ note }) }),
+
+  executeTaskVerification: (executionId: string, taskId: string, verificationRunId: string) =>
+    request<{ id: string; status: string; kind: string; stdout: string; stderr: string }>(
+      `/workflows/executions/${executionId}/tasks/${taskId}/verification-runs/${verificationRunId}/execute`,
+      { method: "POST" },
+    ),
 
   listWorkflowTasks: (params?: { limit?: number; status?: string }) => {
     const query = new URLSearchParams();

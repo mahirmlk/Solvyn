@@ -222,6 +222,8 @@ async def test_task_verification_is_sandboxed_and_durable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
 ) -> None:
+    from sqlalchemy import select
+
     from solvyn.config import settings
     from solvyn.sandbox.runtime import DockerSandboxRunner, SandboxResult
 
@@ -239,6 +241,90 @@ async def test_task_verification_is_sandboxed_and_durable(
     )
     assert workspace.status_code == 201
 
+    from solvyn.db.models import (
+        Organization,
+        OrganizationMembership,
+        Project,
+        Task,
+        TaskHandoff,
+        TeammateProfile,
+        TeammateStatus,
+        Tenant,
+        User,
+    )
+    from solvyn.db.session import async_session_factory
+
+    user_id = uuid.uuid4()
+    organization_id = uuid.uuid4()
+    project_id = uuid.uuid4()
+    teammate_id = uuid.uuid4()
+    parent_task_id = uuid.uuid4()
+    async with async_session_factory() as db:
+        tenant = (await db.execute(select(Tenant).where(Tenant.slug == "test-tenant"))).scalar_one()
+        organization = Organization(
+            id=organization_id,
+            name="Verification Approval",
+            slug=f"verification-approval-{uuid.uuid4().hex[:10]}",
+            tenant_id=tenant.id,
+        )
+        project = Project(
+            id=project_id,
+            organization_id=organization_id,
+            tenant_id=tenant.id,
+            name="Verification Project",
+            slug=f"verification-{uuid.uuid4().hex[:10]}",
+        )
+        teammate = TeammateProfile(
+            id=teammate_id,
+            organization_id=organization_id,
+            tenant_id=tenant.id,
+            name="Verification QA",
+            role="QA Engineer",
+            agent_type="qa-engineer",
+            status=TeammateStatus.IDLE,
+        )
+        parent_task = Task(id=parent_task_id, tenant_id=tenant.id, title="Verification parent")
+        db.add_all(
+            [
+                organization,
+                project,
+                teammate,
+                parent_task,
+                User(id=user_id, email=f"verification-{uuid.uuid4().hex[:12]}@example.com", password_hash="test-hash"),
+                OrganizationMembership(user_id=user_id, organization_id=organization_id, role="owner"),
+            ]
+        )
+        await db.flush()
+        db.add(
+            TaskHandoff(
+                tenant_id=tenant.id,
+                parent_task_id=parent_task_id,
+                child_task_id=uuid.UUID(task_id),
+                idempotency_key=uuid.uuid4(),
+                teammate_id=teammate_id,
+                project_id=project_id,
+                delegated_from="Tech Lead",
+                delegated_to="QA Engineer",
+                reason="Verify the task output",
+                input_data='{"task":"Verify the task output"}',
+                status="completed",
+            )
+        )
+        await db.commit()
+
+    from solvyn.identity.security import create_access_token
+
+    client.headers["Authorization"] = f"Bearer {create_access_token(subject=str(user_id))}"
+    client.headers["X-Tenant-Slug"] = "test-tenant"
+
+    async def approve_and_execute(response):
+        approval_id = response.json()["approval_id"]
+        approval = await client.post(f"/api/v1/approvals/{approval_id}/approve", json={"note": "Approved verification"})
+        assert approval.status_code == 200
+        return await client.post(
+            f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs/{response.json()['verification_run']['id']}/execute"
+        )
+
     async def fake_run(self: DockerSandboxRunner, managed_workspace: Any, command: list[str]) -> SandboxResult:
         return SandboxResult(uuid.uuid4(), tuple(command), 0, False, "1 passed", "", False, 0.05)
 
@@ -247,12 +333,15 @@ async def test_task_verification_is_sandboxed_and_durable(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs",
         json={"kind": "test"},
     )
-    assert verification.status_code == 200
-    assert verification.json()["status"] == "passed"
-    assert verification.json()["command"] == ["pytest", "-q"]
-    assert verification.json()["stdout"] == "1 passed"
-    assert len(verification.json()["source_digest"]) == 64
-    assert verification.json()["regression_status"] == "baseline"
+    assert verification.status_code == 202
+    assert verification.json()["verification_run"]["status"] == "pending_approval"
+    assert verification.json()["verification_run"]["command"] == ["pytest", "-q"]
+    assert len(verification.json()["verification_run"]["source_digest"]) == 64
+    first_result = await approve_and_execute(verification)
+    assert first_result.status_code == 200
+    assert first_result.json()["status"] == "passed"
+    assert first_result.json()["stdout"] == "1 passed"
+    assert first_result.json()["regression_status"] == "baseline"
 
     async def failed_run(self: DockerSandboxRunner, managed_workspace: Any, command: list[str]) -> SandboxResult:
         return SandboxResult(uuid.uuid4(), tuple(command), 1, False, "1 failed", "", False, 0.05)
@@ -262,10 +351,12 @@ async def test_task_verification_is_sandboxed_and_durable(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs",
         json={"kind": "test"},
     )
+    assert regression.status_code == 202
+    regression = await approve_and_execute(regression)
     assert regression.status_code == 200
     assert regression.json()["status"] == "failed"
     assert regression.json()["regression_status"] == "regressed"
-    assert regression.json()["compared_to_run_id"] == verification.json()["id"]
+    assert regression.json()["compared_to_run_id"] == verification.json()["verification_run"]["id"]
     assert regression.json()["source_changed"] is False
 
     history = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
@@ -297,8 +388,39 @@ async def test_task_verification_is_sandboxed_and_durable(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs",
         json={"kind": "test", "command": ["pytest", "-q"]},
     )
+    assert late.status_code == 202
+    late = await approve_and_execute(late)
     assert late.status_code == 200
     assert late.json()["status"] == "interrupted"
+
+    rejected_request = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs",
+        json={"kind": "test", "command": ["pytest", "--version"]},
+    )
+    assert rejected_request.status_code == 202
+    rejected_approval = await client.post(
+        f"/api/v1/approvals/{rejected_request.json()['approval_id']}/reject",
+        json={"note": "Do not run this command"},
+    )
+    assert rejected_approval.status_code == 200
+    denied_execution = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs/{rejected_request.json()['verification_run']['id']}/execute"
+    )
+    assert denied_execution.status_code == 409
+
+    async def unexpected_failure(self: DockerSandboxRunner, managed_workspace: Any, command: list[str]) -> SandboxResult:
+        raise RuntimeError("transport diagnostic should not be exposed")
+
+    monkeypatch.setattr(DockerSandboxRunner, "run", unexpected_failure)
+    failed_request = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs",
+        json={"kind": "test"},
+    )
+    assert failed_request.status_code == 202
+    failed_result = await approve_and_execute(failed_request)
+    assert failed_result.status_code == 200
+    assert failed_result.json()["status"] == "failed"
+    assert "transport diagnostic" not in failed_result.json()["error"]
 
 
 @pytest.mark.asyncio
