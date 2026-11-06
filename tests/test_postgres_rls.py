@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -12,6 +13,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, async_sessionmaker, create_async_engine
 
 from solvyn.db.models import (
+    ApiKey,
     Approval,
     ExecutionGraph,
     Integration,
@@ -2640,6 +2642,124 @@ async def test_organization_membership_rls_preserves_first_membership_discovery(
                     text("DELETE FROM organizations WHERE id = :id"), {"id": organization_id}
                 )
             await connection.execute(text("DELETE FROM users WHERE id = :id"), {"id": user_id})
+            await connection.execute(
+                text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b}
+            )
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_api_key_rls_preserves_unscoped_key_authentication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url.startswith("postgresql+"):
+        pytest.skip("RLS behavior requires PostgreSQL and migrations at head")
+
+    from solvyn.multi_tenant import auth as tenant_auth
+
+    engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+    api_key_a, api_key_b = uuid.uuid4(), uuid.uuid4()
+    secret_a, secret_b = f"rls-api-key-{tenant_a}", f"rls-api-key-{tenant_b}"
+    monkeypatch.setattr(tenant_auth, "async_session_factory", sessions)
+
+    try:
+        async with engine.connect() as connection:
+            protected = (
+                await connection.execute(
+                    text("SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'api_keys'")
+                )
+            ).one()
+            assert protected == (True, True)
+
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'API Key RLS', :slug, '')"),
+                [
+                    {"id": tenant_a, "slug": f"rls-api-key-tenant-{tenant_a}"},
+                    {"id": tenant_b, "slug": f"rls-api-key-tenant-{tenant_b}"},
+                ],
+            )
+            for tenant_id, api_key_id, secret in (
+                (tenant_a, api_key_a, secret_a),
+                (tenant_b, api_key_b, secret_b),
+            ):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO api_keys (id, tenant_id, name, key_hash, key_prefix) "
+                        "VALUES (:id, :tenant_id, 'RLS test key', :key_hash, :key_prefix)"
+                    ),
+                    {
+                        "id": api_key_id,
+                        "tenant_id": tenant_id,
+                        "key_hash": hashlib.sha256(secret.encode()).hexdigest(),
+                        "key_prefix": secret[:12],
+                    },
+                )
+
+        tenant_context.clear()
+        async with sessions() as session:
+            assert (await session.execute(select(ApiKey.id))).scalars().all() == []
+            session.add(
+                ApiKey(
+                    id=uuid.uuid4(),
+                    tenant_id=tenant_a,
+                    name="Unscoped insert",
+                    key_hash=hashlib.sha256(b"unscoped").hexdigest(),
+                    key_prefix="unscoped",
+                )
+            )
+            with pytest.raises(DBAPIError):
+                await session.flush()
+            await session.rollback()
+
+        tenant_context.set(tenant_a, "rls-api-key-a")
+        async with sessions() as session:
+            assert (await session.execute(select(ApiKey.id))).scalars().all() == [api_key_a]
+            assert (
+                await session.execute(
+                    update(ApiKey).where(ApiKey.id == api_key_b).values(name="cross-tenant update")
+                )
+            ).rowcount == 0
+            assert (
+                await session.execute(text("DELETE FROM api_keys WHERE id = :id"), {"id": api_key_b})
+            ).rowcount == 0
+            session.add(
+                ApiKey(
+                    id=uuid.uuid4(),
+                    tenant_id=tenant_b,
+                    name="Cross tenant insert",
+                    key_hash=hashlib.sha256(b"cross-tenant").hexdigest(),
+                    key_prefix="cross-tenant",
+                )
+            )
+            with pytest.raises(DBAPIError):
+                await session.flush()
+            await session.rollback()
+
+        tenant_context.clear()
+        authenticated_tenant = await tenant_auth._validate_tenant_api_key(secret_b)
+        assert authenticated_tenant is not None
+        assert authenticated_tenant.id == tenant_b
+
+        tenant_context.set(tenant_b, "rls-api-key-b")
+        async with sessions() as session:
+            assert (await session.execute(select(ApiKey.id))).scalars().all() == [api_key_b]
+    finally:
+        tenant_context.clear()
+        async with engine.begin() as connection:
+            for tenant_id, api_key_id in ((tenant_a, api_key_a), (tenant_b, api_key_b)):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(text("DELETE FROM api_keys WHERE id = :id"), {"id": api_key_id})
             await connection.execute(
                 text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b}
             )

@@ -70,6 +70,7 @@ async def _validate_tenant_api_key(api_key: str, expected_tenant_id: uuid.UUID |
             if stored_hash and hmac.compare_digest(key_hash, stored_hash):
                 return tenant
             # Fall through to per-key table (tenant may have rotated keys)
+            await bind_tenant_scope(session, tenant.id)
             api_key_result = await session.execute(
                 select(ApiKey)
                 .where(ApiKey.tenant_id == expected_tenant_id)
@@ -86,16 +87,22 @@ async def _validate_tenant_api_key(api_key: str, expected_tenant_id: uuid.UUID |
         tenant = tenant_result.scalar_one_or_none()
         if tenant is not None:
             return tenant
-        api_key_result = await session.execute(
-            select(ApiKey).where(ApiKey.key_hash == key_hash, ApiKey.revoked_at.is_(None))
+        tenant_ids_result = await session.execute(
+            select(Tenant.id).where(Tenant.is_active == True).order_by(Tenant.created_at, Tenant.id)  # noqa: E712
         )
-        api_key_row = api_key_result.scalar_one_or_none()
-        if api_key_row is None:
-            return None
-        bound_result = await session.execute(
-            select(Tenant).where(Tenant.id == api_key_row.tenant_id, Tenant.is_active == True)  # noqa: E712
-        )
-        return bound_result.scalar_one_or_none()
+        for tenant_id in tenant_ids_result.scalars().all():
+            await bind_tenant_scope(session, tenant_id)
+            api_key_result = await session.execute(
+                select(ApiKey).where(ApiKey.tenant_id == tenant_id, ApiKey.key_hash == key_hash, ApiKey.revoked_at.is_(None))
+            )
+            api_key_row = api_key_result.scalar_one_or_none()
+            if api_key_row is None:
+                continue
+            bound_result = await session.execute(
+                select(Tenant).where(Tenant.id == tenant_id, Tenant.is_active == True)  # noqa: E712
+            )
+            return bound_result.scalar_one_or_none()
+        return None
 
 
 # ---------------------------------------------------------------------------
