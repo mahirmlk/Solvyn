@@ -214,6 +214,14 @@ async def test_teammate_memory_rls_scopes_tenant_and_assignment_relationships() 
                 {"teammate_id": teammate_a, "project_id": project_a},
             )
             assert (await session.execute(select(TeammateMemory.id))).scalars().all() == []
+            await session.execute(
+                text(
+                    "INSERT INTO teammate_project_assignments (id, teammate_id, project_id) "
+                    "VALUES (:id, :teammate_id, :project_id)"
+                ),
+                {"id": uuid.uuid4(), "teammate_id": teammate_a, "project_id": project_a},
+            )
+            assert (await session.execute(select(TeammateMemory.id))).scalars().all() == [memory_a]
             await session.rollback()
 
         async with sessions() as session:
