@@ -4,10 +4,32 @@ metadata:
   name: solvyn-config
   namespace: solvyn
 data:
-  DATABASE_URL: "postgresql+asyncpg://solvyn:$(POSTGRES_PASSWORD)@solvyn-db:5432/solvyn"
   REDIS_URL: "redis://solvyn-redis:6379/0"
   LLM_DEFAULT_PROVIDER: "openrouter"
   LLM_DEFAULT_MODEL: "openai/gpt-4o"
   LOG_LEVEL: "INFO"
   HOST: "0.0.0.0"
   PORT: "8000"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: solvyn-postgres-init
+  namespace: solvyn
+data:
+  10-runtime-role.sql: |
+    \getenv migration_user POSTGRES_MIGRATION_USER
+    \getenv migration_password POSTGRES_MIGRATION_PASSWORD
+    \getenv runtime_user POSTGRES_APP_USER
+    \getenv runtime_password POSTGRES_APP_PASSWORD
+    \getenv app_database POSTGRES_DB
+    CREATE ROLE :"migration_user" LOGIN PASSWORD :'migration_password' NOSUPERUSER NOBYPASSRLS;
+    CREATE ROLE :"runtime_user" LOGIN PASSWORD :'runtime_password' NOSUPERUSER NOBYPASSRLS;
+    ALTER DATABASE :"app_database" OWNER TO :"migration_user";
+    GRANT CONNECT ON DATABASE :"app_database" TO :"runtime_user";
+    ALTER SCHEMA public OWNER TO :"migration_user";
+    GRANT USAGE ON SCHEMA public TO :"runtime_user";
+    ALTER DEFAULT PRIVILEGES FOR ROLE :"migration_user" IN SCHEMA public
+      GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO :"runtime_user";
+    ALTER DEFAULT PRIVILEGES FOR ROLE :"migration_user" IN SCHEMA public
+      GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO :"runtime_user";

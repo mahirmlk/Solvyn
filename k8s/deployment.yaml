@@ -78,9 +78,26 @@ spec:
                 secretKeyRef:
                   name: solvyn-secrets
                   key: POSTGRES_PASSWORD
+            - name: POSTGRES_APP_USER
+              value: "solvyn_runtime"
+            - name: POSTGRES_MIGRATION_USER
+              value: "solvyn_migrator"
+            - name: POSTGRES_APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: solvyn-secrets
+                  key: POSTGRES_APP_PASSWORD
+            - name: POSTGRES_MIGRATION_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: solvyn-secrets
+                  key: POSTGRES_MIGRATION_PASSWORD
           volumeMounts:
             - name: pgdata
               mountPath: /var/lib/postgresql/data
+            - name: postgres-init
+              mountPath: /docker-entrypoint-initdb.d/10-runtime-role.sql
+              subPath: 10-runtime-role.sql
           resources:
             requests:
               cpu: "500m"
@@ -92,6 +109,9 @@ spec:
         - name: pgdata
           persistentVolumeClaim:
             claimName: solvyn-db-pvc
+        - name: postgres-init
+          configMap:
+            name: solvyn-postgres-init
 ---
 apiVersion: apps/v1
 kind: Deployment

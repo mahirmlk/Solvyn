@@ -557,7 +557,7 @@ All configuration uses environment variables, loaded via Pydantic-settings from 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_URL` | `postgresql+asyncpg://solvyn:solvyn@localhost:5432/solvyn` | Async PostgreSQL connection string |
+| `DATABASE_URL` | `postgresql+asyncpg://solvyn_runtime:solvyn_runtime@localhost:5432/solvyn` | Async PostgreSQL connection string for the restricted runtime role |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection string |
 | `OPENROUTER_API_KEY` | *(empty)* | OpenRouter API key (required for default LLM) |
 | `GROQ_API_KEY` | *(empty)* | Groq API key (fallback provider) |

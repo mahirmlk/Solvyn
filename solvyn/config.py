@@ -5,7 +5,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
-    database_url: str = "postgresql+asyncpg://solvyn:solvyn@localhost:5432/solvyn"
+    database_url: str = "postgresql+asyncpg://solvyn_runtime:solvyn_runtime@localhost:5432/solvyn"
+    migration_database_url: str | None = None
     redis_url: str = "redis://localhost:6379/0"
     sandbox_workspace_root: str = ".solvyn/workspaces"
     sandbox_image: str = "solvyn-sandbox:local"
