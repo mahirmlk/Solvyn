@@ -12,6 +12,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from solvyn.db.models import (
+    Approval,
     ExecutionGraph,
     Memory,
     Session,
@@ -55,7 +56,7 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                         "FROM pg_class WHERE relname IN "
                         "('tasks', 'task_acceptance_criteria', 'task_deliveries', 'task_workspaces', "
                         "'teammate_tool_invocations', 'task_dependencies', 'verification_runs', "
-                        "'task_handoffs', 'teammate_memory', 'sessions', 'execution_graphs', 'memory', 'token_usage')"
+                        "'task_handoffs', 'teammate_memory', 'sessions', 'execution_graphs', 'memory', 'token_usage', 'approvals')"
                     )
                 )
             ).all()
@@ -73,6 +74,7 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                 "execution_graphs",
                 "memory",
                 "token_usage",
+                "approvals",
             }
             assert all(row[1] and row[2] for row in protected_tables)
 
@@ -467,6 +469,119 @@ async def test_token_usage_rls_is_tenant_scoped_and_validates_session_owner() ->
                 )
                 await connection.execute(text("DELETE FROM token_usage WHERE id = :id"), {"id": usage_id})
                 await connection.execute(text("DELETE FROM sessions WHERE id = :id"), {"id": session_id})
+            await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_approval_rls_is_tenant_and_organization_scoped() -> None:
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url.startswith("postgresql+"):
+        pytest.skip("RLS behavior requires PostgreSQL and migrations at head")
+
+    engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+    organization_a, organization_a_other, organization_b = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    project_a, project_a_other = uuid.uuid4(), uuid.uuid4()
+    approval_a, approval_b = uuid.uuid4(), uuid.uuid4()
+
+    try:
+        async with engine.connect() as connection:
+            flags = (
+                await connection.execute(
+                    text("SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'approvals'")
+                )
+            ).one()
+            assert flags == (True, True)
+
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'RLS approvals', :slug, '')"),
+                [{"id": tenant_a, "slug": f"rls-approval-{tenant_a}"}, {"id": tenant_b, "slug": f"rls-approval-{tenant_b}"}],
+            )
+            await connection.execute(
+                text("INSERT INTO organizations (id, name, slug, tenant_id) VALUES (:id, 'RLS approvals', :slug, :tenant_id)"),
+                [
+                    {"id": organization_a, "slug": f"rls-approval-{organization_a}", "tenant_id": tenant_a},
+                    {"id": organization_a_other, "slug": f"rls-approval-{organization_a_other}", "tenant_id": tenant_a},
+                    {"id": organization_b, "slug": f"rls-approval-{organization_b}", "tenant_id": tenant_b},
+                ],
+            )
+            await connection.execute(
+                text("INSERT INTO projects (id, organization_id, tenant_id, name, slug) VALUES (:id, :organization_id, :tenant_id, 'RLS approvals', :slug)"),
+                [
+                    {"id": project_a, "organization_id": organization_a, "tenant_id": tenant_a, "slug": f"rls-approval-{project_a}"},
+                    {"id": project_a_other, "organization_id": organization_a_other, "tenant_id": tenant_a, "slug": f"rls-approval-{project_a_other}"},
+                ],
+            )
+            for tenant_id, organization_id, approval_id in (
+                (tenant_a, organization_a, approval_a),
+                (tenant_b, organization_b, approval_b),
+            ):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO approvals (id, organization_id, kind, summary) "
+                        "VALUES (:id, :organization_id, 'rls-test', 'RLS approval')"
+                    ),
+                    {"id": approval_id, "organization_id": organization_id},
+                )
+
+        tenant_context.clear()
+        async with sessions() as db:
+            assert (await db.execute(select(Approval.id))).scalars().all() == []
+            with pytest.raises(DBAPIError):
+                await db.execute(
+                    text(
+                        "INSERT INTO approvals (id, organization_id, kind, summary) "
+                        "VALUES (:id, :organization_id, 'rls-test', 'unscoped')"
+                    ),
+                    {"id": uuid.uuid4(), "organization_id": organization_a},
+                )
+            await db.rollback()
+
+        tenant_context.set(tenant_a, "rls-approval-a")
+        async with sessions() as db:
+            assert (await db.execute(select(Approval.id))).scalars().all() == [approval_a]
+            hidden_update = await db.execute(
+                text("UPDATE approvals SET summary = 'cross-tenant' WHERE id = :id"), {"id": approval_b}
+            )
+            assert hidden_update.rowcount == 0
+            await db.rollback()
+
+        async with sessions() as db:
+            db.add(
+                Approval(
+                    id=uuid.uuid4(),
+                    organization_id=organization_a,
+                    project_id=project_a_other,
+                    kind="rls-test",
+                    summary="cross-organization project",
+                )
+            )
+            with pytest.raises(DBAPIError):
+                await db.flush()
+            await db.rollback()
+    finally:
+        tenant_context.clear()
+        async with engine.begin() as connection:
+            for tenant_id, approval_id in ((tenant_a, approval_a), (tenant_b, approval_b)):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(text("DELETE FROM approvals WHERE id = :id"), {"id": approval_id})
+            await connection.execute(
+                text("DELETE FROM projects WHERE id IN (:a, :other)"), {"a": project_a, "other": project_a_other}
+            )
+            await connection.execute(
+                text("DELETE FROM organizations WHERE id IN (:a, :other, :b)"),
+                {"a": organization_a, "other": organization_a_other, "b": organization_b},
+            )
             await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
         await engine.dispose()
 
