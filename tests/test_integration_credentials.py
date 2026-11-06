@@ -50,7 +50,7 @@ async def test_repository_provider_uses_only_its_linked_organization_credential(
 
     assert isinstance(provider, GitHubClient)
     assert provider.http.base_url == httpx.URL("https://api.github.com")
-    assert provider._request_headers == {"Authorization": "Bearer ghp-private-repo-token"}
+    assert provider.http.headers["Authorization"] == "Bearer ghp-private-repo-token"
     load_token.assert_awaited_once()
     await provider.__aexit__()
 
