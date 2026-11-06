@@ -12,6 +12,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.api.v1._rbac import ANY_ROLE, OWNER_ADMIN, require_org_membership, require_tenant
@@ -39,6 +40,29 @@ class OrganizationOut(BaseModel):
     tenant_id: str
     is_active: bool
     created_at: str
+
+
+def _is_organization_slug_conflict(exc: IntegrityError) -> bool:
+    current: BaseException | None = exc.orig
+    constraint_names: set[str] = set()
+    messages: list[str] = []
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        messages.append(str(current))
+        constraint_name = getattr(current, "constraint_name", None)
+        if constraint_name:
+            constraint_names.add(str(constraint_name))
+        diagnostic = getattr(current, "diag", None)
+        diagnostic_name = getattr(diagnostic, "constraint_name", None)
+        if diagnostic_name:
+            constraint_names.add(str(diagnostic_name))
+        current = current.__cause__ or current.__context__
+
+    message = " ".join(messages)
+    return "organizations_slug_key" in constraint_names or "organizations_slug_key" in message or (
+        "UNIQUE constraint failed: organizations.slug" in message
+    )
 
 
 def _org_dict(org: Organization) -> dict[str, object]:
@@ -71,7 +95,16 @@ async def create_organization(payload: OrganizationCreate, db: AsyncSession = De
         raise HTTPException(status_code=409, detail=f"Organization with slug '{payload.slug}' already exists")
     org = Organization(name=payload.name, slug=payload.slug, tenant_id=tenant_id)
     db.add(org)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        # Organization slugs are globally unique. RLS hides a conflicting
+        # slug owned by another tenant, so return the same non-disclosing
+        # conflict response for both preflight and concurrent insert races.
+        await db.rollback()
+        if _is_organization_slug_conflict(exc):
+            raise HTTPException(status_code=409, detail="Organization slug is already in use") from exc
+        raise
     if tenant_context.user_id is not None:
         db.add(OrganizationMembership(user_id=tenant_context.user_id, organization_id=org.id, role="owner"))
     await db.commit()

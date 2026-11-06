@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, async_sessionmaker, create_async_engine
 
 from solvyn.db.models import (
     Approval,
@@ -18,6 +18,7 @@ from solvyn.db.models import (
     IntegrationCredential,
     MaintenanceSchedule,
     Memory,
+    Organization,
     ProactiveEvent,
     Project,
     ProjectKnowledge,
@@ -36,8 +37,39 @@ from solvyn.db.models import (
     TeammateToolInvocation,
     TokenUsage,
     VerificationRun,
+    Workspace,
 )
 from solvyn.multi_tenant.middleware import tenant_context
+
+
+async def _seed_organizations(
+    connection: AsyncConnection,
+    rows: list[tuple[uuid.UUID, uuid.UUID, str, str]],
+) -> None:
+    for organization_id, tenant_id, slug, name in rows:
+        await connection.execute(
+            text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+            {"tenant_id": str(tenant_id)},
+        )
+        await connection.execute(
+            text("INSERT INTO organizations (id, name, slug, tenant_id) VALUES (:id, :name, :slug, :tenant_id)"),
+            {"id": organization_id, "name": name, "slug": slug, "tenant_id": tenant_id},
+        )
+
+
+async def _delete_organizations(
+    connection: AsyncConnection,
+    rows: list[tuple[uuid.UUID, uuid.UUID]],
+) -> None:
+    for tenant_id, organization_id in rows:
+        await connection.execute(
+            text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+            {"tenant_id": str(tenant_id)},
+        )
+        await connection.execute(
+            text("DELETE FROM organizations WHERE id = :id"),
+            {"id": organization_id},
+        )
 
 
 @pytest.mark.asyncio
@@ -70,7 +102,8 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                         "'task_handoffs', 'teammate_memory', 'sessions', 'execution_graphs', 'memory', 'token_usage', "
                         "'approvals', 'proactive_events', 'maintenance_schedules', 'integrations', "
                         "'integration_credentials', 'projects', 'repositories', 'project_knowledge', "
-                        "'teammate_profiles', 'teammate_permissions', 'teammate_project_assignments')"
+                        "'teammate_profiles', 'teammate_permissions', 'teammate_project_assignments', "
+                        "'organizations', 'workspaces')"
                     )
                 )
             ).all()
@@ -99,6 +132,8 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                 "teammate_profiles",
                 "teammate_permissions",
                 "teammate_project_assignments",
+                "organizations",
+                "workspaces",
             }
             assert all(row[1] and row[2] for row in protected_tables)
 
@@ -524,12 +559,12 @@ async def test_approval_rls_is_tenant_and_organization_scoped() -> None:
                 text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'RLS approvals', :slug, '')"),
                 [{"id": tenant_a, "slug": f"rls-approval-{tenant_a}"}, {"id": tenant_b, "slug": f"rls-approval-{tenant_b}"}],
             )
-            await connection.execute(
-                text("INSERT INTO organizations (id, name, slug, tenant_id) VALUES (:id, 'RLS approvals', :slug, :tenant_id)"),
+            await _seed_organizations(
+                connection,
                 [
-                    {"id": organization_a, "slug": f"rls-approval-{organization_a}", "tenant_id": tenant_a},
-                    {"id": organization_a_other, "slug": f"rls-approval-{organization_a_other}", "tenant_id": tenant_a},
-                    {"id": organization_b, "slug": f"rls-approval-{organization_b}", "tenant_id": tenant_b},
+                    (organization_a, tenant_a, f"rls-approval-{organization_a}", "RLS approvals"),
+                    (organization_a_other, tenant_a, f"rls-approval-{organization_a_other}", "RLS approvals"),
+                    (organization_b, tenant_b, f"rls-approval-{organization_b}", "RLS approvals"),
                 ],
             )
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
@@ -605,9 +640,9 @@ async def test_approval_rls_is_tenant_and_organization_scoped() -> None:
                 text("DELETE FROM projects WHERE id IN (:a, :other)"), {"a": project_a, "other": project_a_other}
             )
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
-            await connection.execute(
-                text("DELETE FROM organizations WHERE id IN (:a, :other, :b)"),
-                {"a": organization_a, "other": organization_a_other, "b": organization_b},
+            await _delete_organizations(
+                connection,
+                [(tenant_a, organization_a), (tenant_a, organization_a_other), (tenant_b, organization_b)],
             )
             await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
         await engine.dispose()
@@ -645,12 +680,12 @@ async def test_proactive_data_rls_is_tenant_and_organization_scoped() -> None:
                 text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'RLS proactive', :slug, '')"),
                 [{"id": tenant_a, "slug": f"rls-proactive-{tenant_a}"}, {"id": tenant_b, "slug": f"rls-proactive-{tenant_b}"}],
             )
-            await connection.execute(
-                text("INSERT INTO organizations (id, name, slug, tenant_id) VALUES (:id, 'RLS proactive', :slug, :tenant_id)"),
+            await _seed_organizations(
+                connection,
                 [
-                    {"id": organization_a, "slug": f"rls-proactive-{organization_a}", "tenant_id": tenant_a},
-                    {"id": organization_a_other, "slug": f"rls-proactive-{organization_a_other}", "tenant_id": tenant_a},
-                    {"id": organization_b, "slug": f"rls-proactive-{organization_b}", "tenant_id": tenant_b},
+                    (organization_a, tenant_a, f"rls-proactive-{organization_a}", "RLS proactive"),
+                    (organization_a_other, tenant_a, f"rls-proactive-{organization_a_other}", "RLS proactive"),
+                    (organization_b, tenant_b, f"rls-proactive-{organization_b}", "RLS proactive"),
                 ],
             )
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
@@ -786,9 +821,9 @@ async def test_proactive_data_rls_is_tenant_and_organization_scoped() -> None:
             )
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
             await connection.execute(text("DELETE FROM projects WHERE id = :b"), {"b": project_b})
-            await connection.execute(
-                text("DELETE FROM organizations WHERE id IN (:a, :other, :b)"),
-                {"a": organization_a, "other": organization_a_other, "b": organization_b},
+            await _delete_organizations(
+                connection,
+                [(tenant_a, organization_a), (tenant_a, organization_a_other), (tenant_b, organization_b)],
             )
             await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
         await engine.dispose()
@@ -825,11 +860,11 @@ async def test_integration_credentials_rls_is_tenant_scoped_and_allows_inactive_
                 text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'RLS integrations', :slug, '')"),
                 [{"id": tenant_a, "slug": f"rls-integration-{tenant_a}"}, {"id": tenant_b, "slug": f"rls-integration-{tenant_b}"}],
             )
-            await connection.execute(
-                text("INSERT INTO organizations (id, name, slug, tenant_id) VALUES (:id, 'RLS integrations', :slug, :tenant_id)"),
+            await _seed_organizations(
+                connection,
                 [
-                    {"id": organization_a, "slug": f"rls-integration-{organization_a}", "tenant_id": tenant_a},
-                    {"id": organization_b, "slug": f"rls-integration-{organization_b}", "tenant_id": tenant_b},
+                    (organization_a, tenant_a, f"rls-integration-{organization_a}", "RLS integrations"),
+                    (organization_b, tenant_b, f"rls-integration-{organization_b}", "RLS integrations"),
                 ],
             )
             for tenant_id, organization_id, integration_id, credential_id, active in (
@@ -925,8 +960,9 @@ async def test_integration_credentials_rls_is_tenant_scoped_and_allows_inactive_
                     text("DELETE FROM integration_credentials WHERE id = :id"), {"id": credential_id}
                 )
                 await connection.execute(text("DELETE FROM integrations WHERE id = :id"), {"id": integration_id})
-            await connection.execute(
-                text("DELETE FROM organizations WHERE id IN (:a, :b)"), {"a": organization_a, "b": organization_b}
+            await _delete_organizations(
+                connection,
+                [(tenant_a, organization_a), (tenant_b, organization_b)],
             )
             await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
         await engine.dispose()
@@ -965,12 +1001,12 @@ async def test_project_repository_knowledge_rls_is_tenant_and_link_scoped() -> N
                 text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'RLS projects', :slug, '')"),
                 [{"id": tenant_a, "slug": f"rls-project-{tenant_a}"}, {"id": tenant_b, "slug": f"rls-project-{tenant_b}"}],
             )
-            await connection.execute(
-                text("INSERT INTO organizations (id, name, slug, tenant_id) VALUES (:id, 'RLS projects', :slug, :tenant_id)"),
+            await _seed_organizations(
+                connection,
                 [
-                    {"id": organization_a, "slug": f"rls-project-{organization_a}", "tenant_id": tenant_a},
-                    {"id": organization_b, "slug": f"rls-project-{organization_b}", "tenant_id": tenant_b},
-                    {"id": organization_a_other, "slug": f"rls-project-{organization_a_other}", "tenant_id": tenant_a},
+                    (organization_a, tenant_a, f"rls-project-{organization_a}", "RLS projects"),
+                    (organization_b, tenant_b, f"rls-project-{organization_b}", "RLS projects"),
+                    (organization_a_other, tenant_a, f"rls-project-{organization_a_other}", "RLS projects"),
                 ],
             )
             for tenant_id, organization_id, project_id, integration_id, repository_id, knowledge_id in (
@@ -1165,9 +1201,9 @@ async def test_project_repository_knowledge_rls_is_tenant_and_link_scoped() -> N
                 text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)}
             )
             await connection.execute(text("DELETE FROM integrations WHERE id = :id"), {"id": integration_a_other})
-            await connection.execute(
-                text("DELETE FROM organizations WHERE id IN (:a, :b, :c)"),
-                {"a": organization_a, "b": organization_b, "c": organization_a_other},
+            await _delete_organizations(
+                connection,
+                [(tenant_a, organization_a), (tenant_b, organization_b), (tenant_a, organization_a_other)],
             )
             await connection.execute(text("DELETE FROM tasks WHERE id = :id"), {"id": task_a_other})
             await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
@@ -1415,11 +1451,11 @@ async def test_teammate_memory_rls_scopes_tenant_and_assignment_relationships() 
                     {"id": tenant_b, "slug": f"rls-memory-{tenant_b}"},
                 ],
             )
-            await connection.execute(
-                text("INSERT INTO organizations (id, name, slug, tenant_id) VALUES (:id, 'Memory RLS', :slug, :tenant_id)"),
+            await _seed_organizations(
+                connection,
                 [
-                    {"id": org_a, "slug": f"rls-memory-org-{org_a}", "tenant_id": tenant_a},
-                    {"id": org_b, "slug": f"rls-memory-org-{org_b}", "tenant_id": tenant_b},
+                    (org_a, tenant_a, f"rls-memory-org-{org_a}", "Memory RLS"),
+                    (org_b, tenant_b, f"rls-memory-org-{org_b}", "Memory RLS"),
                 ],
             )
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
@@ -1525,7 +1561,7 @@ async def test_teammate_memory_rls_scopes_tenant_and_assignment_relationships() 
             await connection.execute(text("DELETE FROM projects WHERE id IN (:a, :b, :unassigned)"), {"a": project_a, "b": project_b, "unassigned": project_unassigned})
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
             await connection.execute(text("DELETE FROM projects WHERE id = :id"), {"id": project_b})
-            await connection.execute(text("DELETE FROM organizations WHERE id IN (:a, :b)"), {"a": org_a, "b": org_b})
+            await _delete_organizations(connection, [(tenant_a, org_a), (tenant_b, org_b)])
             await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
         await engine.dispose()
 
@@ -1571,11 +1607,11 @@ async def test_task_handoff_rls_is_tenant_scoped_and_validates_relationships() -
                     {"id": tenant_b, "slug": f"rls-handoff-{tenant_b}"},
                 ],
             )
-            await connection.execute(
-                text("INSERT INTO organizations (id, name, slug, tenant_id) VALUES (:id, 'Handoff RLS', :slug, :tenant_id)"),
+            await _seed_organizations(
+                connection,
                 [
-                    {"id": org_a, "slug": f"rls-handoff-org-{org_a}", "tenant_id": tenant_a},
-                    {"id": org_b, "slug": f"rls-handoff-org-{org_b}", "tenant_id": tenant_b},
+                    (org_a, tenant_a, f"rls-handoff-org-{org_a}", "Handoff RLS"),
+                    (org_b, tenant_b, f"rls-handoff-org-{org_b}", "Handoff RLS"),
                 ],
             )
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
@@ -1690,7 +1726,7 @@ async def test_task_handoff_rls_is_tenant_scoped_and_validates_relationships() -
             await connection.execute(text("DELETE FROM projects WHERE id = :id"), {"id": project_a})
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
             await connection.execute(text("DELETE FROM projects WHERE id = :id"), {"id": project_b})
-            await connection.execute(text("DELETE FROM organizations WHERE id IN (:a, :b)"), {"a": org_a, "b": org_b})
+            await _delete_organizations(connection, [(tenant_a, org_a), (tenant_b, org_b)])
             await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
         await engine.dispose()
 
@@ -1987,11 +2023,11 @@ async def test_teammate_tool_invocation_rls_is_tenant_scoped() -> None:
                 text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'RLS A', :slug, '')"),
                 [{"id": tenant_a, "slug": f"rls-{tenant_a}"}, {"id": tenant_b, "slug": f"rls-{tenant_b}"}],
             )
-            await connection.execute(
-                text("INSERT INTO organizations (id, name, slug, tenant_id) VALUES (:id, 'RLS org', :slug, :tenant_id)"),
+            await _seed_organizations(
+                connection,
                 [
-                    {"id": organization_a, "slug": f"rls-org-{organization_a}", "tenant_id": tenant_a},
-                    {"id": organization_b, "slug": f"rls-org-{organization_b}", "tenant_id": tenant_b},
+                    (organization_a, tenant_a, f"rls-org-{organization_a}", "RLS org"),
+                    (organization_b, tenant_b, f"rls-org-{organization_b}", "RLS org"),
                 ],
             )
             for tenant_id, task_id in ((tenant_a, task_a), (tenant_b, task_b)):
@@ -2095,7 +2131,7 @@ async def test_teammate_tool_invocation_rls_is_tenant_scoped() -> None:
             for tenant_id, task_id in ((tenant_a, task_a), (tenant_b, task_b)):
                 await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_id)})
                 await connection.execute(text("DELETE FROM tasks WHERE id = :id"), {"id": task_id})
-            await connection.execute(text("DELETE FROM organizations WHERE id IN (:a, :b)"), {"a": organization_a, "b": organization_b})
+            await _delete_organizations(connection, [(tenant_a, organization_a), (tenant_b, organization_b)])
             await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
         await engine.dispose()
 
@@ -2141,12 +2177,12 @@ async def test_teammate_authorization_rls_is_tenant_and_organization_scoped() ->
                     {"id": tenant_b, "slug": f"rls-teammate-{tenant_b}"},
                 ],
             )
-            await connection.execute(
-                text("INSERT INTO organizations (id, name, slug, tenant_id) VALUES (:id, 'Teammate RLS', :slug, :tenant_id)"),
+            await _seed_organizations(
+                connection,
                 [
-                    {"id": org_a, "slug": f"rls-teammate-org-{org_a}", "tenant_id": tenant_a},
-                    {"id": org_a_other, "slug": f"rls-teammate-org-{org_a_other}", "tenant_id": tenant_a},
-                    {"id": org_b, "slug": f"rls-teammate-org-{org_b}", "tenant_id": tenant_b},
+                    (org_a, tenant_a, f"rls-teammate-org-{org_a}", "Teammate RLS"),
+                    (org_a_other, tenant_a, f"rls-teammate-org-{org_a_other}", "Teammate RLS"),
+                    (org_b, tenant_b, f"rls-teammate-org-{org_b}", "Teammate RLS"),
                 ],
             )
             for tenant_id, organization_id, project_id in (
@@ -2288,9 +2324,176 @@ async def test_teammate_authorization_rls_is_tenant_and_organization_scoped() ->
                     await connection.execute(
                         text("DELETE FROM projects WHERE id = :id"), {"id": project_id}
                     )
+            await _delete_organizations(
+                connection,
+                [(tenant_a, org_a), (tenant_a, org_a_other), (tenant_b, org_b)],
+            )
             await connection.execute(
-                text("DELETE FROM organizations WHERE id IN (:a, :a_other, :b)"),
-                {"a": org_a, "a_other": org_a_other, "b": org_b},
+                text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b}
+            )
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_organization_workspace_rls_is_tenant_scoped_and_preserves_project_links() -> None:
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url.startswith("postgresql+"):
+        pytest.skip("RLS behavior requires PostgreSQL and migrations at head")
+
+    engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+    organization_a, organization_a_other, organization_b = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    workspace_a, workspace_a_other, workspace_b = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    project_a, project_b = uuid.uuid4(), uuid.uuid4()
+
+    try:
+        async with engine.connect() as connection:
+            protected = (
+                await connection.execute(
+                    text(
+                        "SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class "
+                        "WHERE relname IN ('organizations', 'workspaces')"
+                    )
+                )
+            ).all()
+            assert {row[0] for row in protected} == {"organizations", "workspaces"}
+            assert all(row[1] and row[2] for row in protected)
+
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'Organization RLS', :slug, '')"),
+                [
+                    {"id": tenant_a, "slug": f"rls-organization-{tenant_a}"},
+                    {"id": tenant_b, "slug": f"rls-organization-{tenant_b}"},
+                ],
+            )
+            await _seed_organizations(
+                connection,
+                [
+                    (organization_a, tenant_a, f"rls-organization-org-{organization_a}", "Organization RLS"),
+                    (organization_a_other, tenant_a, f"rls-organization-org-{organization_a_other}", "Organization RLS"),
+                    (organization_b, tenant_b, f"rls-organization-org-{organization_b}", "Organization RLS"),
+                ],
+            )
+            for tenant_id, organization_id, workspace_id, project_id in (
+                (tenant_a, organization_a, workspace_a, project_a),
+                (tenant_b, organization_b, workspace_b, project_b),
+            ):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(
+                    text("INSERT INTO workspaces (id, organization_id, name, slug) VALUES (:id, :organization_id, 'RLS workspace', :slug)"),
+                    {
+                        "id": workspace_id,
+                        "organization_id": organization_id,
+                        "slug": f"rls-workspace-{workspace_id}",
+                    },
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO projects (id, organization_id, workspace_id, tenant_id, name, slug) "
+                        "VALUES (:id, :organization_id, :workspace_id, :tenant_id, 'Organization RLS', :slug)"
+                    ),
+                    {
+                        "id": project_id,
+                        "organization_id": organization_id,
+                        "workspace_id": workspace_id,
+                        "tenant_id": tenant_id,
+                        "slug": f"rls-organization-project-{project_id}",
+                    },
+                )
+            await connection.execute(
+                text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                {"tenant_id": str(tenant_a)},
+            )
+            await connection.execute(
+                text("INSERT INTO workspaces (id, organization_id, name, slug) VALUES (:id, :organization_id, 'RLS workspace', :slug)"),
+                {
+                    "id": workspace_a_other,
+                    "organization_id": organization_a_other,
+                    "slug": f"rls-workspace-{workspace_a_other}",
+                },
+            )
+
+        tenant_context.clear()
+        async with sessions() as session:
+            assert (await session.execute(select(Organization.id))).scalars().all() == []
+            assert (await session.execute(select(Workspace.id))).scalars().all() == []
+            assert (await session.execute(select(Project.id))).scalars().all() == []
+
+        tenant_context.set(tenant_a, "rls-organization-a")
+        async with sessions() as session:
+            assert set((await session.execute(select(Organization.id))).scalars().all()) == {
+                organization_a,
+                organization_a_other,
+            }
+            assert set((await session.execute(select(Workspace.id))).scalars().all()) == {
+                workspace_a,
+                workspace_a_other,
+            }
+            assert (await session.execute(select(Project.id))).scalars().all() == [project_a]
+            await session.execute(text("DELETE FROM organizations WHERE id = :id"), {"id": organization_b})
+            await session.execute(text("DELETE FROM workspaces WHERE id = :id"), {"id": workspace_b})
+
+            session.add(
+                Organization(
+                    id=uuid.uuid4(), tenant_id=tenant_b, name="Cross tenant", slug=f"cross-{uuid.uuid4()}"
+                )
+            )
+            with pytest.raises(DBAPIError):
+                await session.flush()
+            await session.rollback()
+
+            session.add(
+                Workspace(
+                    id=uuid.uuid4(), organization_id=organization_b,
+                    name="Cross tenant", slug=f"cross-{uuid.uuid4()}",
+                )
+            )
+            with pytest.raises(DBAPIError):
+                await session.flush()
+            await session.rollback()
+
+            for workspace_id in (workspace_b, workspace_a_other):
+                session.add(
+                    Project(
+                        id=uuid.uuid4(), organization_id=organization_a, workspace_id=workspace_id,
+                        tenant_id=tenant_a, name="Mismatched workspace", slug=f"mismatch-{uuid.uuid4()}",
+                    )
+                )
+                with pytest.raises(DBAPIError):
+                    await session.flush()
+                await session.rollback()
+
+        tenant_context.set(tenant_b, "rls-organization-b")
+        async with sessions() as session:
+            assert (await session.execute(select(Organization.id))).scalars().all() == [organization_b]
+            assert (await session.execute(select(Workspace.id))).scalars().all() == [workspace_b]
+            assert (await session.execute(select(Project.id))).scalars().all() == [project_b]
+    finally:
+        tenant_context.clear()
+        async with engine.begin() as connection:
+            for tenant_id, project_id, workspace_id, organization_id in (
+                (tenant_a, project_a, workspace_a, organization_a),
+                (tenant_b, project_b, workspace_b, organization_b),
+            ):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(text("DELETE FROM projects WHERE id = :id"), {"id": project_id})
+                await connection.execute(text("DELETE FROM workspaces WHERE id = :id"), {"id": workspace_id})
+                await connection.execute(text("DELETE FROM organizations WHERE id = :id"), {"id": organization_id})
+            await connection.execute(
+                text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                {"tenant_id": str(tenant_a)},
+            )
+            await connection.execute(text("DELETE FROM workspaces WHERE id = :id"), {"id": workspace_a_other})
+            await connection.execute(
+                text("DELETE FROM organizations WHERE id = :id"), {"id": organization_a_other}
             )
             await connection.execute(
                 text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b}

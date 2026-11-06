@@ -745,13 +745,14 @@ async def test_only_one_concurrent_approval_decision_is_recorded(client: AsyncCl
     from sqlalchemy import select
 
     from solvyn.db.models import Organization, OrganizationMembership, Tenant, User
-    from solvyn.db.session import async_session_factory
+    from solvyn.db.session import async_session_factory, bind_tenant_scope
     from solvyn.identity.security import create_access_token
 
     user_id = uuid.uuid4()
     organization_id = uuid.uuid4()
     async with async_session_factory() as db:
         tenant = (await db.execute(select(Tenant).where(Tenant.slug == "test-tenant"))).scalar_one()
+        await bind_tenant_scope(db, tenant.id)
         organization = Organization(
             id=organization_id,
             name="Approval Race Review",
@@ -1189,6 +1190,97 @@ async def test_session_listing_returns_empty_without_tenant(client: AsyncClient)
 
 
 # ─── API key auth ───────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_registration_creates_organization_under_tenant_rls(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from solvyn.config import settings
+
+    monkeypatch.setattr(settings, "allow_public_registration", True)
+    response = await client.post(
+        "/api/v1/auth/register",
+        json={"email": f"org-rls-{uuid.uuid4().hex[:12]}@example.com", "password": "correct-horse-battery"},
+    )
+    assert response.status_code == 201
+
+
+@pytest.mark.asyncio
+async def test_first_membership_discovery_scopes_organization_queries(client: AsyncClient) -> None:
+    from sqlalchemy import delete, select
+
+    from solvyn.db.models import Organization, OrganizationMembership, Tenant, User
+    from solvyn.db.session import async_session_factory, bind_tenant_scope
+    from solvyn.identity.security import create_access_token
+
+    user_id = uuid.uuid4()
+    organization_id = uuid.uuid4()
+    other_tenant_id = uuid.uuid4()
+    other_organization_id = uuid.uuid4()
+    duplicate_slug = f"cross-tenant-duplicate-{uuid.uuid4().hex[:12]}"
+    async with async_session_factory() as db:
+        tenant = (await db.execute(select(Tenant).where(Tenant.slug == "test-tenant"))).scalar_one()
+        other_tenant = Tenant(
+            id=other_tenant_id,
+            name="Slug Conflict Tenant",
+            slug=f"slug-conflict-{other_tenant_id.hex[:12]}",
+            api_key_hash="",
+        )
+        db.add(other_tenant)
+        await db.flush()
+        await bind_tenant_scope(db, other_tenant_id)
+        db.add(
+            Organization(
+                id=other_organization_id,
+                name="Slug Conflict Organization",
+                slug=duplicate_slug,
+                tenant_id=other_tenant_id,
+            )
+        )
+        await db.flush()
+        await bind_tenant_scope(db, tenant.id)
+        organization = Organization(
+            id=organization_id,
+            name="Implicit Tenant Organization",
+            slug=f"implicit-tenant-{uuid.uuid4().hex[:12]}",
+            tenant_id=tenant.id,
+        )
+        db.add_all(
+            [
+                organization,
+                User(id=user_id, email=f"implicit-{uuid.uuid4().hex[:12]}@example.com", password_hash="test-hash"),
+            ]
+        )
+        await db.flush()
+        db.add(OrganizationMembership(user_id=user_id, organization_id=organization.id, role="owner"))
+        await db.commit()
+
+    client.headers["Authorization"] = f"Bearer {create_access_token(subject=str(user_id))}"
+    client.headers.pop("X-Tenant-Slug", None)
+    response = await client.get("/api/v1/organizations")
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["organizations"]] == [str(organization_id)]
+
+    client.headers["X-Tenant-Slug"] = "test-tenant"
+    collision = await client.post(
+        "/api/v1/organizations",
+        json={"name": "Hidden Conflict", "slug": duplicate_slug},
+    )
+    assert collision.status_code == 409
+    assert collision.json()["detail"] == "Organization slug is already in use"
+
+    async with async_session_factory() as db:
+        await bind_tenant_scope(db, tenant.id)
+        await db.execute(
+            delete(OrganizationMembership).where(OrganizationMembership.organization_id == organization_id)
+        )
+        await db.execute(delete(Organization).where(Organization.id == organization_id))
+        await db.execute(delete(User).where(User.id == user_id))
+        await bind_tenant_scope(db, other_tenant_id)
+        await db.execute(delete(Organization).where(Organization.id == other_organization_id))
+        await db.execute(delete(Tenant).where(Tenant.id == other_tenant_id))
+        await db.commit()
 
 
 @pytest.mark.asyncio
