@@ -247,8 +247,8 @@ async def test_task_verification_is_sandboxed_and_durable(
         Project,
         Task,
         TaskHandoff,
-        TeammateProjectAssignment,
         TeammateProfile,
+        TeammateProjectAssignment,
         TeammateStatus,
         Tenant,
         User,
@@ -1146,19 +1146,33 @@ async def test_workflows_endpoint_distinguishes_tenants(client: AsyncClient) -> 
 
 
 @pytest.mark.asyncio
-async def test_tenant_analytics_blocks_cross_tenant_access(client: AsyncClient) -> None:
+async def test_tenant_analytics_blocks_cross_tenant_access() -> None:
     """Tenant A cannot read tenant B's analytics.
 
     The analytics endpoint short-circuits with 403 when the path tenant_id
-    does not match the calling tenant.  This test verifies the guard
-    without hitting the database.
+    does not match the calling tenant. This test verifies the route guard
+    directly without relying on middleware state or a database connection.
     """
-    other_tenant_id = uuid.uuid4()
-    response = await client.get(f"/api/v1/observability/analytics/tenant/{other_tenant_id}")
-    # In shared-secret mode (no X-Tenant-Slug), the endpoint falls back to
-    # the default tenant and rejects a mismatched id.
-    assert response.status_code == 403
-    assert "tenant" in response.json()["detail"].lower()
+    from fastapi import HTTPException
+
+    from solvyn.multi_tenant.middleware import tenant_context
+    from solvyn.observability.analytics_api import get_tenant_analytics
+
+    current_tenant = uuid.uuid4()
+    other_tenant = MagicMock()
+    other_tenant.id = uuid.uuid4()
+    tenant_context.set(current_tenant, "tenant-a")
+    try:
+        with (
+            patch("solvyn.observability.analytics_api._resolve_active_tenant", return_value=other_tenant),
+            patch("solvyn.observability.analytics_api.bind_tenant_scope", new_callable=AsyncMock),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await get_tenant_analytics(str(other_tenant.id), db=AsyncMock())
+        assert exc_info.value.status_code == 403
+        assert "tenant" in str(exc_info.value.detail).lower()
+    finally:
+        tenant_context.clear()
 
 
 @pytest.mark.asyncio
