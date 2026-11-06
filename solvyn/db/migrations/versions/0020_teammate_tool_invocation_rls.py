@@ -1,6 +1,6 @@
 """Apply tenant RLS to teammate tool invocation records.
 
-Revision ID: 0020_teammate_tool_invocation_rls
+Revision ID: 0020_tool_invocation_rls
 Revises: 0019_postgres_rls_baseline
 Create Date: 2026-11-06 00:00:00.000000
 """
@@ -9,7 +9,7 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0020_teammate_tool_invocation_rls"
+revision: str = "0020_tool_invocation_rls"
 down_revision: str | None = "0019_postgres_rls_baseline"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
