@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from solvyn.db.models import (
     TaskAcceptanceCriterion,
     TaskDependency,
+    TaskHandoff,
     TaskWorkspace,
     TeammateToolInvocation,
     VerificationRun,
@@ -47,7 +48,7 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                         "SELECT relname, relrowsecurity, relforcerowsecurity "
                         "FROM pg_class WHERE relname IN "
                         "('task_acceptance_criteria', 'task_deliveries', 'task_workspaces', "
-                        "'teammate_tool_invocations', 'task_dependencies', 'verification_runs')"
+                        "'teammate_tool_invocations', 'task_dependencies', 'verification_runs', 'task_handoffs')"
                     )
                 )
             ).all()
@@ -58,6 +59,7 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                 "teammate_tool_invocations",
                 "task_dependencies",
                 "verification_runs",
+                "task_handoffs",
             }
             assert all(row[1] and row[2] for row in protected_tables)
 
@@ -116,6 +118,152 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
             await connection.execute(text("DELETE FROM task_acceptance_criteria WHERE id = :id"), {"id": criterion_b})
             await connection.execute(text("DELETE FROM tasks WHERE id IN (:task_a, :task_b)"), {"task_a": task_a, "task_b": task_b})
             await connection.execute(text("DELETE FROM tenants WHERE id IN (:tenant_a, :tenant_b)"), {"tenant_a": tenant_a, "tenant_b": tenant_b})
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_task_handoff_rls_is_tenant_scoped_and_validates_relationships() -> None:
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url.startswith("postgresql+"):
+        pytest.skip("RLS behavior requires PostgreSQL and migrations at head")
+
+    engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+    org_a, org_b = uuid.uuid4(), uuid.uuid4()
+    project_a, project_b = uuid.uuid4(), uuid.uuid4()
+    teammate_a, teammate_b = uuid.uuid4(), uuid.uuid4()
+    parent_a, child_a, parent_b, child_b = (uuid.uuid4() for _ in range(4))
+    handoff_a, handoff_b = uuid.uuid4(), uuid.uuid4()
+
+    try:
+        async with engine.connect() as connection:
+            role = (
+                await connection.execute(
+                    text("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user")
+                )
+            ).one()
+            assert role == (False, False)
+            protected = (
+                await connection.execute(
+                    text(
+                        "SELECT relrowsecurity, relforcerowsecurity FROM pg_class "
+                        "WHERE relname = 'task_handoffs'"
+                    )
+                )
+            ).one()
+            assert protected == (True, True)
+
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'Handoff RLS', :slug, '')"),
+                [
+                    {"id": tenant_a, "slug": f"rls-handoff-{tenant_a}"},
+                    {"id": tenant_b, "slug": f"rls-handoff-{tenant_b}"},
+                ],
+            )
+            await connection.execute(
+                text("INSERT INTO organizations (id, name, slug, tenant_id) VALUES (:id, 'Handoff RLS', :slug, :tenant_id)"),
+                [
+                    {"id": org_a, "slug": f"rls-handoff-org-{org_a}", "tenant_id": tenant_a},
+                    {"id": org_b, "slug": f"rls-handoff-org-{org_b}", "tenant_id": tenant_b},
+                ],
+            )
+            await connection.execute(
+                text("INSERT INTO projects (id, organization_id, tenant_id, name, slug) VALUES (:id, :organization_id, :tenant_id, 'Handoff RLS', :slug)"),
+                [
+                    {"id": project_a, "organization_id": org_a, "tenant_id": tenant_a, "slug": f"rls-handoff-project-{project_a}"},
+                    {"id": project_b, "organization_id": org_b, "tenant_id": tenant_b, "slug": f"rls-handoff-project-{project_b}"},
+                ],
+            )
+            await connection.execute(
+                text("INSERT INTO teammate_profiles (id, organization_id, tenant_id, name, role, agent_type) VALUES (:id, :organization_id, :tenant_id, 'Handoff RLS', 'developer', 'developer')"),
+                [
+                    {"id": teammate_a, "organization_id": org_a, "tenant_id": tenant_a},
+                    {"id": teammate_b, "organization_id": org_b, "tenant_id": tenant_b},
+                ],
+            )
+            await connection.execute(
+                text("INSERT INTO teammate_project_assignments (id, teammate_id, project_id) VALUES (:id, :teammate_id, :project_id)"),
+                [
+                    {"id": uuid.uuid4(), "teammate_id": teammate_a, "project_id": project_a},
+                    {"id": uuid.uuid4(), "teammate_id": teammate_b, "project_id": project_b},
+                ],
+            )
+            await connection.execute(
+                text("INSERT INTO tasks (id, tenant_id, title, parent_task_id) VALUES (:id, :tenant_id, 'Handoff task', :parent_task_id)"),
+                [
+                    {"id": parent_a, "tenant_id": tenant_a, "parent_task_id": None},
+                    {"id": child_a, "tenant_id": tenant_a, "parent_task_id": parent_a},
+                    {"id": parent_b, "tenant_id": tenant_b, "parent_task_id": None},
+                    {"id": child_b, "tenant_id": tenant_b, "parent_task_id": parent_b},
+                ],
+            )
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
+            await connection.execute(
+                text("INSERT INTO task_handoffs (id, tenant_id, parent_task_id, child_task_id, idempotency_key, teammate_id, project_id, delegated_from, delegated_to, reason, input_data) VALUES (:id, :tenant_id, :parent_task_id, :child_task_id, :idempotency_key, :teammate_id, :project_id, 'workflow', 'developer', 'valid', '{}')"),
+                {"id": handoff_a, "tenant_id": tenant_a, "parent_task_id": parent_a, "child_task_id": child_a, "idempotency_key": uuid.uuid4(), "teammate_id": teammate_a, "project_id": project_a},
+            )
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
+            await connection.execute(
+                text("INSERT INTO task_handoffs (id, tenant_id, parent_task_id, child_task_id, idempotency_key, teammate_id, project_id, delegated_from, delegated_to, reason, input_data) VALUES (:id, :tenant_id, :parent_task_id, :child_task_id, :idempotency_key, :teammate_id, :project_id, 'workflow', 'developer', 'valid', '{}')"),
+                {"id": handoff_b, "tenant_id": tenant_b, "parent_task_id": parent_b, "child_task_id": child_b, "idempotency_key": uuid.uuid4(), "teammate_id": teammate_b, "project_id": project_b},
+            )
+
+        tenant_context.clear()
+        async with sessions() as session:
+            assert (await session.execute(select(TaskHandoff.id))).scalars().all() == []
+
+        tenant_context.set(tenant_a, "rls-handoff-a")
+        async with sessions() as session:
+            assert (await session.execute(select(TaskHandoff.id))).scalars().all() == [handoff_a]
+            session.add(
+                TaskHandoff(
+                    id=uuid.uuid4(), tenant_id=tenant_b, parent_task_id=parent_b, child_task_id=child_b,
+                    idempotency_key=uuid.uuid4(), teammate_id=teammate_b, project_id=project_b,
+                    delegated_from="workflow", delegated_to="developer", reason="cross tenant", input_data="{}",
+                )
+            )
+            with pytest.raises(DBAPIError):
+                await session.flush()
+            await session.rollback()
+
+        async with sessions() as session:
+            session.add(
+                TaskHandoff(
+                    id=uuid.uuid4(), tenant_id=tenant_a, parent_task_id=parent_a, child_task_id=child_b,
+                    idempotency_key=uuid.uuid4(), teammate_id=teammate_a, project_id=project_a,
+                    delegated_from="workflow", delegated_to="developer", reason="mismatched child", input_data="{}",
+                )
+            )
+            with pytest.raises(DBAPIError):
+                await session.flush()
+            await session.rollback()
+
+        async with sessions() as session:
+            session.add(
+                TaskHandoff(
+                    id=uuid.uuid4(), tenant_id=tenant_a, parent_task_id=parent_a, child_task_id=child_a,
+                    idempotency_key=uuid.uuid4(), teammate_id=teammate_a, project_id=project_b,
+                    delegated_from="workflow", delegated_to="developer", reason="mismatched project", input_data="{}",
+                )
+            )
+            with pytest.raises(DBAPIError):
+                await session.flush()
+            await session.rollback()
+    finally:
+        tenant_context.clear()
+        async with engine.begin() as connection:
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
+            await connection.execute(text("DELETE FROM task_handoffs WHERE id = :id"), {"id": handoff_a})
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
+            await connection.execute(text("DELETE FROM task_handoffs WHERE id = :id"), {"id": handoff_b})
+            await connection.execute(text("DELETE FROM teammate_project_assignments WHERE teammate_id IN (:a, :b)"), {"a": teammate_a, "b": teammate_b})
+            await connection.execute(text("DELETE FROM tasks WHERE id IN (:pa, :ca, :pb, :cb)"), {"pa": parent_a, "ca": child_a, "pb": parent_b, "cb": child_b})
+            await connection.execute(text("DELETE FROM teammate_profiles WHERE id IN (:a, :b)"), {"a": teammate_a, "b": teammate_b})
+            await connection.execute(text("DELETE FROM projects WHERE id IN (:a, :b)"), {"a": project_a, "b": project_b})
+            await connection.execute(text("DELETE FROM organizations WHERE id IN (:a, :b)"), {"a": org_a, "b": org_b})
+            await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
         await engine.dispose()
 
 

@@ -773,6 +773,11 @@ async def create_task_handoff(
     except ValueError as exc:
         raise HTTPException(status_code=401, detail="Workflow tenant is not configured") from exc
 
+    # Resolve the tenant before touching task rows. RLS protects handoffs and
+    # their related task records, including compatibility credentials whose
+    # tenant is not present in request context.
+    await bind_tenant_scope(db, tenant_id)
+
     parent = (
         await db.execute(
             select(Task)
@@ -933,6 +938,7 @@ async def create_task_handoff(
             await db.commit()
         except IntegrityError:
             await db.rollback()
+            await bind_tenant_scope(db, tenant_id)
             handoff = (
                 await db.execute(
                     select(TaskHandoff).where(
@@ -996,6 +1002,9 @@ async def create_task_handoff(
                 session_id=str(parent.session_id) if parent.session_id else None,
             )
     except HandoffConflictError as exc:
+        # _execute_task_handoff rolls back on a lease conflict, clearing the
+        # transaction-local tenant setting before the replay lookup.
+        await bind_tenant_scope(db, tenant_id)
         current = (
             await db.execute(
                 select(TaskHandoff)
@@ -1030,6 +1039,8 @@ async def resume_task_handoff(
         tenant_id = await workflow_executor._resolve_tenant_uuid(tenant_ref)
     except ValueError as exc:
         raise HTTPException(status_code=401, detail="Workflow tenant is not configured") from exc
+
+    await bind_tenant_scope(db, tenant_id)
 
     result = await db.execute(
         select(TaskHandoff, Task, TeammateProfile)
