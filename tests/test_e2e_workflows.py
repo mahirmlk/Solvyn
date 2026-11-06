@@ -286,6 +286,8 @@ async def test_task_verification_is_sandboxed_and_durable(
             status=TeammateStatus.IDLE,
         )
         parent_task = Task(id=parent_task_id, tenant_id=tenant.id, title="Verification parent")
+        db.add(parent_task)
+        await db.flush()
         child_task = (await db.execute(select(Task).where(Task.id == uuid.UUID(task_id)))).scalar_one()
         child_task.parent_task_id = parent_task_id
         db.add_all(
@@ -293,7 +295,6 @@ async def test_task_verification_is_sandboxed_and_durable(
                 organization,
                 project,
                 teammate,
-                parent_task,
                 TeammateProjectAssignment(teammate_id=teammate_id, project_id=project_id),
                 User(id=user_id, email=f"verification-{uuid.uuid4().hex[:12]}@example.com", password_hash="test-hash"),
                 OrganizationMembership(user_id=user_id, organization_id=organization_id, role="owner"),
