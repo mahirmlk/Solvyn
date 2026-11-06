@@ -800,7 +800,7 @@ async def test_cancel_abandoned_workflow_execution(client: AsyncClient) -> None:
     from solvyn.agents.schema import ExecutionEdge
     from solvyn.agents.schema import ExecutionGraph as ExecutionGraphState
     from solvyn.db.models import ExecutionGraph, Session, Task, Tenant
-    from solvyn.db.session import async_session_factory
+    from solvyn.db.session import async_session_factory, bind_tenant_scope
 
     session_id = uuid.uuid4()
     execution_id = uuid.uuid4()
@@ -812,6 +812,7 @@ async def test_cancel_abandoned_workflow_execution(client: AsyncClient) -> None:
     active_task_id = uuid.uuid4()
     async with async_session_factory() as db:
         tenant = (await db.execute(select(Tenant).where(Tenant.slug == "test-tenant"))).scalar_one()
+        await bind_tenant_scope(db, tenant.id)
         db.add(Session(id=session_id, tenant_id=tenant.id, title="Cancellation test"))
         db.add(
             ExecutionGraph(
@@ -850,6 +851,7 @@ async def test_cancel_abandoned_workflow_execution(client: AsyncClient) -> None:
             )
         )
         await db.commit()
+        await bind_tenant_scope(db, tenant.id)
         db.add(
             Task(id=running_task_id, tenant_id=tenant.id, session_id=session_id, execution_id=execution_id,
                  node_id=str(running_task_id), title="Running task", status="running")
@@ -924,6 +926,24 @@ async def test_feature_workflow_returns_resolvable_session_id(client: AsyncClien
     traces = await client.get(f"/api/v1/observability/traces?session_id={session_id}")
     assert traces.status_code == 200
     assert "traces" in traces.json()
+
+
+@pytest.mark.asyncio
+async def test_shared_secret_workflow_reads_bind_the_resolved_default_tenant(client: AsyncClient) -> None:
+    workflow = await client.post(
+        "/api/v1/workflows/feature/run",
+        json={"requirement": "Read a workflow under the default tenant"},
+    )
+    assert workflow.status_code == 200
+    execution_id = workflow.json()["execution_id"]
+
+    snapshot = await client.get(f"/api/v1/workflows/executions/{execution_id}")
+    recent_tasks = await client.get("/api/v1/workflows/tasks")
+
+    assert snapshot.status_code == 200
+    assert snapshot.json()["execution_id"] == execution_id
+    assert recent_tasks.status_code == 200
+    assert any(task["execution_id"] == execution_id for task in recent_tasks.json()["tasks"])
 
 
 @pytest.mark.asyncio

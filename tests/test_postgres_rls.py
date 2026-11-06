@@ -12,6 +12,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from solvyn.db.models import (
+    Session,
     TaskAcceptanceCriterion,
     TaskDependency,
     TaskHandoff,
@@ -49,7 +50,7 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                         "SELECT relname, relrowsecurity, relforcerowsecurity "
                         "FROM pg_class WHERE relname IN "
                         "('task_acceptance_criteria', 'task_deliveries', 'task_workspaces', "
-                        "'teammate_tool_invocations', 'task_dependencies', 'verification_runs', 'task_handoffs', 'teammate_memory')"
+                        "'teammate_tool_invocations', 'task_dependencies', 'verification_runs', 'task_handoffs', 'teammate_memory', 'sessions')"
                     )
                 )
             ).all()
@@ -62,6 +63,7 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                 "verification_runs",
                 "task_handoffs",
                 "teammate_memory",
+                "sessions",
             }
             assert all(row[1] and row[2] for row in protected_tables)
 
@@ -120,6 +122,135 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
             await connection.execute(text("DELETE FROM task_acceptance_criteria WHERE id = :id"), {"id": criterion_b})
             await connection.execute(text("DELETE FROM tasks WHERE id IN (:task_a, :task_b)"), {"task_a": task_a, "task_b": task_b})
             await connection.execute(text("DELETE FROM tenants WHERE id IN (:tenant_a, :tenant_b)"), {"tenant_a": tenant_a, "tenant_b": tenant_b})
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_session_rls_is_tenant_scoped_and_fails_closed() -> None:
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url.startswith("postgresql+"):
+        pytest.skip("RLS behavior requires PostgreSQL and migrations at head")
+
+    engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+    session_a, session_b = uuid.uuid4(), uuid.uuid4()
+
+    try:
+        async with engine.connect() as connection:
+            protected = (
+                await connection.execute(
+                    text("SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'sessions'")
+                )
+            ).one()
+            assert protected == (True, True)
+
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'Session RLS', :slug, '')"),
+                [
+                    {"id": tenant_a, "slug": f"rls-session-{tenant_a}"},
+                    {"id": tenant_b, "slug": f"rls-session-{tenant_b}"},
+                ],
+            )
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
+            await connection.execute(
+                text("INSERT INTO sessions (id, tenant_id, title, status) VALUES (:id, :tenant_id, 'Private A', 'active')"),
+                {"id": session_a, "tenant_id": tenant_a},
+            )
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
+            await connection.execute(
+                text("INSERT INTO sessions (id, tenant_id, title, status) VALUES (:id, :tenant_id, 'Private B', 'active')"),
+                {"id": session_b, "tenant_id": tenant_b},
+            )
+
+        tenant_context.clear()
+        async with sessions() as session:
+            assert (await session.execute(select(Session.id))).scalars().all() == []
+            session.add(Session(id=uuid.uuid4(), tenant_id=tenant_a, title="Unscoped", status="active"))
+            with pytest.raises(DBAPIError):
+                await session.flush()
+            await session.rollback()
+
+        tenant_context.set(tenant_a, "rls-session-a")
+        async with sessions() as session:
+            assert (await session.execute(select(Session.id))).scalars().all() == [session_a]
+            session.add(Session(id=uuid.uuid4(), tenant_id=tenant_b, title="Cross tenant", status="active"))
+            with pytest.raises(DBAPIError):
+                await session.flush()
+            await session.rollback()
+
+        tenant_context.set(tenant_b, "rls-session-b")
+        async with sessions() as session:
+            assert (await session.execute(select(Session.id))).scalars().all() == [session_b]
+    finally:
+        tenant_context.clear()
+        async with engine.begin() as connection:
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
+            await connection.execute(text("DELETE FROM sessions WHERE id = :id"), {"id": session_a})
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
+            await connection.execute(text("DELETE FROM sessions WHERE id = :id"), {"id": session_b})
+            await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_fetches_due_workflows_under_each_tenant_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url.startswith("postgresql+"):
+        pytest.skip("RLS behavior requires PostgreSQL and migrations at head")
+
+    from solvyn.workflows.scheduler import _fetch_due_scheduled_workflows
+    from solvyn.workflows import scheduler
+
+    monkeypatch.setattr(scheduler, "_BATCH_SIZE", 100)
+
+    engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+    session_a, session_b = uuid.uuid4(), uuid.uuid4()
+    execution_a, execution_b = uuid.uuid4(), uuid.uuid4()
+
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'Scheduled RLS', :slug, '')"),
+                [
+                    {"id": tenant_a, "slug": f"rls-scheduler-{tenant_a}"},
+                    {"id": tenant_b, "slug": f"rls-scheduler-{tenant_b}"},
+                ],
+            )
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
+            await connection.execute(
+                text("INSERT INTO sessions (id, tenant_id, title, status) VALUES (:id, :tenant_id, 'Scheduled A', 'active')"),
+                {"id": session_a, "tenant_id": tenant_a},
+            )
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
+            await connection.execute(
+                text("INSERT INTO sessions (id, tenant_id, title, status) VALUES (:id, :tenant_id, 'Scheduled B', 'active')"),
+                {"id": session_b, "tenant_id": tenant_b},
+            )
+            await connection.execute(
+                text("INSERT INTO execution_graphs (id, session_id, graph_data, status, scheduled_at) VALUES (:id, :session_id, '{}', 'scheduled', now() - interval '1 minute')"),
+                [
+                    {"id": execution_a, "session_id": session_a},
+                    {"id": execution_b, "session_id": session_b},
+                ],
+            )
+
+        tenant_context.clear()
+        async with sessions() as session:
+            due = await _fetch_due_scheduled_workflows(session)
+            assert set(due) >= {(execution_a, tenant_a), (execution_b, tenant_b)}
+    finally:
+        tenant_context.clear()
+        async with engine.begin() as connection:
+            await connection.execute(text("DELETE FROM execution_graphs WHERE id IN (:a, :b)"), {"a": execution_a, "b": execution_b})
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
+            await connection.execute(text("DELETE FROM sessions WHERE id = :id"), {"id": session_a})
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
+            await connection.execute(text("DELETE FROM sessions WHERE id = :id"), {"id": session_b})
+            await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
         await engine.dispose()
 
 

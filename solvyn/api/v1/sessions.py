@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.api_metadata import COMMON_RESPONSES
 from solvyn.db.models import Session
-from solvyn.db.session import get_session
+from solvyn.db.session import bind_tenant_scope, get_session
 from solvyn.multi_tenant.middleware import tenant_context
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -44,6 +44,7 @@ async def list_sessions(db: AsyncSession = Depends(get_session)) -> dict[str, An
     current_tenant_id = tenant_context.tenant_id
     if not current_tenant_id:
         return {"sessions": []}
+    await bind_tenant_scope(db, current_tenant_id)
     result = await db.execute(select(Session).where(Session.tenant_id == current_tenant_id).limit(50))
     sessions = result.scalars().all()
     return {"sessions": [{"id": str(s.id), "title": s.title, "status": s.status, "created_at": s.created_at.isoformat()} for s in sessions]}
@@ -72,6 +73,7 @@ async def create_session(db: AsyncSession = Depends(get_session)) -> dict[str, A
     """Create a new session for the calling tenant."""
     if not tenant_context.tenant_id:
         raise HTTPException(status_code=400, detail="X-Tenant-Slug header required to create a session")
+    await bind_tenant_scope(db, tenant_context.tenant_id)
     session = Session(
         title="New Session",
         tenant_id=tenant_context.tenant_id,

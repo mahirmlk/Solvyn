@@ -1,10 +1,97 @@
-from unittest.mock import AsyncMock
+import uuid
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 
 from solvyn.observability.audit import AuditLogger
 from solvyn.observability.tracing import tracing_manager
 from solvyn.observability.websocket import ws_manager
+
+
+@pytest.mark.asyncio
+async def test_session_analytics_rejects_a_session_outside_the_current_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
+    from solvyn.observability import analytics_api
+
+    tenant_id = uuid.uuid4()
+    session_id = str(uuid.uuid4())
+    db = AsyncMock()
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = None
+    db.execute.return_value = result
+    bind_scope = AsyncMock()
+    totals = AsyncMock()
+    breakdown = AsyncMock()
+    monkeypatch.setattr(analytics_api, "tenant_context", SimpleNamespace(tenant_id=tenant_id))
+    monkeypatch.setattr(analytics_api, "bind_tenant_scope", bind_scope)
+    monkeypatch.setattr(analytics_api.cost_tracker, "get_session_totals", totals)
+    monkeypatch.setattr(analytics_api.cost_tracker, "get_agent_breakdown", breakdown)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await analytics_api.get_session_analytics(session_id, db)
+
+    assert exc_info.value.status_code == 404
+    bind_scope.assert_awaited_once_with(db, tenant_id)
+    totals.assert_not_awaited()
+    breakdown.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_session_analytics_does_not_fall_back_for_a_user_without_a_tenant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from solvyn.observability import analytics_api
+
+    db = AsyncMock()
+    bind_scope = AsyncMock()
+    totals = AsyncMock()
+    breakdown = AsyncMock()
+    monkeypatch.setattr(
+        analytics_api,
+        "tenant_context",
+        SimpleNamespace(
+            tenant_id=None,
+            authenticated_tenant_id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+        ),
+    )
+    monkeypatch.setattr(analytics_api, "bind_tenant_scope", bind_scope)
+    monkeypatch.setattr(analytics_api.cost_tracker, "get_session_totals", totals)
+    monkeypatch.setattr(analytics_api.cost_tracker, "get_agent_breakdown", breakdown)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await analytics_api.get_session_analytics(str(uuid.uuid4()), db)
+
+    assert exc_info.value.status_code == 401
+    db.execute.assert_not_awaited()
+    bind_scope.assert_not_awaited()
+    totals.assert_not_awaited()
+    breakdown.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_session_analytics_scopes_cost_queries_to_the_verified_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
+    from solvyn.observability import analytics_api
+
+    tenant_id = uuid.uuid4()
+    session_id = str(uuid.uuid4())
+    db = AsyncMock()
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = uuid.UUID(session_id)
+    db.execute.return_value = result
+    monkeypatch.setattr(analytics_api, "tenant_context", SimpleNamespace(tenant_id=tenant_id))
+    monkeypatch.setattr(analytics_api, "bind_tenant_scope", AsyncMock())
+    totals = AsyncMock(return_value={"total_tokens": 12, "total_cost": 0.01})
+    breakdown = AsyncMock(return_value=[])
+    monkeypatch.setattr(analytics_api.cost_tracker, "get_session_totals", totals)
+    monkeypatch.setattr(analytics_api.cost_tracker, "get_agent_breakdown", breakdown)
+
+    response = await analytics_api.get_session_analytics(session_id, db)
+
+    assert response["tenant_id"] == str(tenant_id)
+    totals.assert_awaited_once_with(session_id, str(tenant_id))
+    breakdown.assert_awaited_once_with(session_id, str(tenant_id))
 
 
 # ─── Tracing Manager ────────────────────────────────────────

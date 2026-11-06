@@ -12,7 +12,7 @@ from solvyn.agents.graph import AgentGraph
 from solvyn.agents.schema import ExecutionEdge, ExecutionGraph, ExecutionNode
 from solvyn.db.models import ExecutionGraph as ExecutionGraphModel
 from solvyn.db.models import Session, Task, TaskDependency, Tenant
-from solvyn.db.session import async_session_factory
+from solvyn.db.session import async_session_factory, bind_tenant_scope
 from solvyn.multi_tenant.middleware import tenant_context
 from solvyn.workflows.templates import WORKFLOW_TEMPLATES, WorkflowStep
 
@@ -176,6 +176,7 @@ class WorkflowExecutor:
         """Resume an interrupted run, rerunning every unfinished node at least once."""
         tenant_uuid = await self._resolve_tenant_uuid(tenant_id)
         async with async_session_factory() as db:
+            await bind_tenant_scope(db, tenant_uuid)
             record = (
                 await db.execute(
                     select(ExecutionGraphModel)
@@ -277,6 +278,7 @@ class WorkflowExecutor:
         """Cancel a tenant-owned execution and fence its current worker."""
         tenant_uuid = await self._resolve_tenant_uuid(tenant_id)
         async with async_session_factory() as db:
+            await bind_tenant_scope(db, tenant_uuid)
             record = (
                 await db.execute(
                     select(ExecutionGraphModel)
@@ -391,6 +393,7 @@ class WorkflowExecutor:
         lease_id: uuid.UUID,
     ) -> None:
         async with async_session_factory() as db:
+            await bind_tenant_scope(db, tenant_id)
             graph_id = uuid.UUID(graph.id)
             record = await db.get(ExecutionGraphModel, graph_id)
             graph_data = json.dumps(
@@ -540,6 +543,7 @@ class WorkflowExecutor:
         while True:
             await asyncio.sleep(_LEASE_HEARTBEAT_INTERVAL)
             async with async_session_factory() as db:
+                await bind_tenant_scope(db, tenant_id)
                 renewed = await db.execute(
                     update(ExecutionGraphModel)
                     .where(
@@ -557,6 +561,7 @@ class WorkflowExecutor:
 
     async def _mark_failed(self, execution_id: str, lease_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
         async with async_session_factory() as db:
+            await bind_tenant_scope(db, tenant_id)
             identity_scope = (
                 ExecutionGraphModel.id == uuid.UUID(execution_id),
                 ExecutionGraphModel.lease_owner == lease_id,
@@ -605,6 +610,7 @@ class WorkflowExecutor:
 
         session_uuid = uuid.UUID(session_id)
         async with async_session_factory() as db:
+            await bind_tenant_scope(db, tenant_uuid)
             session = await db.get(Session, session_uuid)
             if session is not None:
                 if session.tenant_id != tenant_uuid:
