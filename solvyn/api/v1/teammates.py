@@ -11,7 +11,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.agents.teammate_runtime import (
@@ -283,19 +283,6 @@ async def update_teammate(teammate_id: uuid.UUID, payload: TeammateUpdate, db: A
             db.add(TeammatePermission(teammate_id=teammate.id, permission=perm, granted=True))
     if payload.project_ids is not None:
         existing_assignments = (await db.execute(select(TeammateProjectAssignment).where(TeammateProjectAssignment.teammate_id == teammate_id))).scalars().all()
-        retained_project_ids = {project.id for project in project_rows}
-        removed_project_ids = {assignment.project_id for assignment in existing_assignments} - retained_project_ids
-        if removed_project_ids:
-            # Persistent memory is authorized through the current assignment.
-            # Delete it while the assignment rows still exist so forced RLS
-            # permits cleanup in the same tenant-scoped transaction.
-            await db.execute(
-                delete(TeammateMemory).where(
-                    TeammateMemory.tenant_id == tenant_id,
-                    TeammateMemory.teammate_id == teammate_id,
-                    TeammateMemory.project_id.in_(removed_project_ids),
-                )
-            )
         for assignment_row in existing_assignments:
             await db.delete(assignment_row)
         for project in project_rows:
