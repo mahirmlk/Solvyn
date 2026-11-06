@@ -593,9 +593,67 @@ class GitHubClient(RepositoryProvider):
             raise GitHubRepositoryError(422, "Pull request number must be positive")
         prefix = f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/pulls/{number}"
         metadata = await self._get_json(prefix)
+        review_status = await self._pull_request_review_status(
+            prefix, metadata, max_pages=_MAX_REVIEW_PAGES, check_next_page=True
+        )
+        diff = await self._get_text(prefix, accept="application/vnd.github.diff", max_bytes=_MAX_DIFF_BYTES)
+        head_value = metadata.get("head")
+        base_value = metadata.get("base")
+        head: dict[str, Any] = head_value if isinstance(head_value, dict) else {}
+        base: dict[str, Any] = base_value if isinstance(base_value, dict) else {}
+        return {
+            "number": metadata.get("number"),
+            "title": str(metadata.get("title") or "")[:512],
+            "body": str(metadata.get("body") or "")[:20_000],
+            "state": str(metadata.get("state") or "unknown"),
+            "draft": bool(metadata.get("draft", False)),
+            "merged": bool(metadata.get("merged_at")),
+            "url": str(metadata.get("html_url") or "")[:512],
+            "head_ref": str(head.get("ref") or "")[:255],
+            "head_sha": str(head.get("sha") or "")[:64],
+            "base_ref": str(base.get("ref") or "")[:255],
+            "review_status": review_status,
+            "diff": diff,
+            "content_trust": "untrusted_repository_data",
+        }
+
+    async def pull_request_status(self, full_name: str, number: int) -> dict[str, Any]:
+        """Fetch current PR metadata and bounded review state without downloading its diff."""
+        owner, repo = validate_full_name(full_name)
+        if number < 1:
+            raise GitHubRepositoryError(422, "Pull request number must be positive")
+        prefix = f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/pulls/{number}"
+        metadata = await self._get_json(prefix)
+        head_value = metadata.get("head")
+        base_value = metadata.get("base")
+        head: dict[str, Any] = head_value if isinstance(head_value, dict) else {}
+        base: dict[str, Any] = base_value if isinstance(base_value, dict) else {}
+        return {
+            "number": metadata.get("number"),
+            "title": str(metadata.get("title") or "")[:512],
+            "state": str(metadata.get("state") or "unknown"),
+            "draft": bool(metadata.get("draft", False)),
+            "merged": bool(metadata.get("merged_at")),
+            "url": str(metadata.get("html_url") or "")[:512],
+            "head_ref": str(head.get("ref") or "")[:255],
+            "head_sha": str(head.get("sha") or "")[:64],
+            "base_ref": str(base.get("ref") or "")[:255],
+            "review_status": await self._pull_request_review_status(prefix, metadata, max_pages=1),
+            "content_trust": "untrusted_repository_data",
+        }
+
+    async def _pull_request_review_status(
+        self,
+        prefix: str,
+        metadata: dict[str, Any],
+        *,
+        max_pages: int,
+        check_next_page: bool = False,
+    ) -> dict[str, Any]:
         raw_reviews: list[Any] = []
         review_history_truncated = False
-        for page in range(1, _MAX_REVIEW_PAGES + 2):
+        final_page = max_pages + int(check_next_page)
+        for page in range(1, final_page + 1):
             page_reviews = await self._get_json_payload(
                 f"{prefix}/reviews",
                 params={"per_page": str(_REVIEWS_PER_PAGE), "page": str(page)},
@@ -605,7 +663,7 @@ class GitHubClient(RepositoryProvider):
             raw_reviews.extend(page_reviews[:_REVIEWS_PER_PAGE])
             if len(page_reviews) < _REVIEWS_PER_PAGE:
                 break
-            if page > _MAX_REVIEW_PAGES:
+            if page == final_page and check_next_page:
                 next_page = await self._get_json_payload(
                     f"{prefix}/reviews",
                     params={"per_page": str(_REVIEWS_PER_PAGE), "page": str(page + 1)},
@@ -614,6 +672,8 @@ class GitHubClient(RepositoryProvider):
                     raise GitHubRepositoryError(502, "GitHub returned an invalid pull request review list")
                 review_history_truncated = bool(next_page)
                 break
+            if page == max_pages and not check_next_page:
+                review_history_truncated = True
 
         latest_by_reviewer: dict[str, tuple[str, str]] = {}
         for review in raw_reviews:
@@ -654,32 +714,13 @@ class GitHubClient(RepositoryProvider):
         else:
             review_state = "no_reviews"
 
-        diff = await self._get_text(prefix, accept="application/vnd.github.diff", max_bytes=_MAX_DIFF_BYTES)
-        head_value = metadata.get("head")
-        base_value = metadata.get("base")
-        head: dict[str, Any] = head_value if isinstance(head_value, dict) else {}
-        base: dict[str, Any] = base_value if isinstance(base_value, dict) else {}
         return {
-            "number": metadata.get("number"),
-            "title": str(metadata.get("title") or "")[:512],
-            "body": str(metadata.get("body") or "")[:20_000],
-            "state": str(metadata.get("state") or "unknown"),
-            "draft": bool(metadata.get("draft", False)),
-            "merged": bool(metadata.get("merged_at")),
-            "url": str(metadata.get("html_url") or "")[:512],
-            "head_ref": str(head.get("ref") or "")[:255],
-            "head_sha": str(head.get("sha") or "")[:64],
-            "base_ref": str(base.get("ref") or "")[:255],
-            "review_status": {
-                "state": review_state,
-                "approvals": latest_states.count("APPROVED"),
-                "changes_requested": latest_states.count("CHANGES_REQUESTED"),
-                "requested_reviewers": requested_reviewers,
-                "reviewer_decisions": reviewer_decisions,
-                "history_truncated": review_history_truncated,
-            },
-            "diff": diff,
-            "content_trust": "untrusted_repository_data",
+            "state": review_state,
+            "approvals": latest_states.count("APPROVED"),
+            "changes_requested": latest_states.count("CHANGES_REQUESTED"),
+            "requested_reviewers": requested_reviewers,
+            "reviewer_decisions": reviewer_decisions,
+            "history_truncated": review_history_truncated,
         }
 
     @staticmethod

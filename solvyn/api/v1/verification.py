@@ -13,11 +13,11 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from solvyn.api.v1._rbac import MEMBER_OR_ABOVE, OWNER_ADMIN, require_org_membership
+from solvyn.api.v1._rbac import ANY_ROLE, MEMBER_OR_ABOVE, OWNER_ADMIN, require_org_membership
 from solvyn.api.v1.repositories import _load_authorized_repository
 from solvyn.config import settings
 from solvyn.db.models import (
@@ -58,6 +58,9 @@ _MAX_STORED_OUTPUT_CHARS = 256 * 1024
 _MAX_DELIVERY_FILES = 50
 _MAX_DELIVERY_BYTES = 500_000
 _MAX_DELIVERY_DIFF_BYTES = 1_000_000
+_ACTIVITY_SOURCE_LIMIT = 100
+_ACTIVITY_TOTAL_LIMIT = 200
+_MAX_LIVE_PULL_REQUESTS = 5
 VerificationKind = Literal["test", "build", "lint", "typecheck", "security"]
 
 
@@ -930,6 +933,291 @@ async def list_task_tool_invocations(
     return {
         "task_id": str(task.id),
         "tool_invocations": [_tool_invocation_dict(item) for item in invocations],
+    }
+
+
+def _activity_timestamp(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _activity_sort_timestamp(value: str | None) -> datetime:
+    if value is None:
+        return datetime.min.replace(tzinfo=UTC)
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+async def _refresh_task_pull_request_statuses(
+    db: AsyncSession,
+    task: Task,
+    deliveries: list[TaskDelivery],
+) -> dict[uuid.UUID, dict[str, Any]]:
+    related_deliveries = [
+        item
+        for item in deliveries
+        if isinstance(item.pull_request_number, int) and item.pull_request_number > 0
+    ]
+    statuses: dict[uuid.UUID, dict[str, Any]] = {}
+    if not related_deliveries:
+        return statuses
+
+    unavailable = {"availability": "unavailable", "reason": "repository_access_unavailable"}
+
+    workspace = (
+        await db.execute(
+            select(TaskWorkspace).where(
+                TaskWorkspace.tenant_id == task.tenant_id,
+                TaskWorkspace.task_id == task.id,
+            )
+        )
+    ).scalar_one_or_none()
+    handoff = (
+        await db.execute(
+            select(TaskHandoff).where(
+                TaskHandoff.tenant_id == task.tenant_id,
+                TaskHandoff.child_task_id == task.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if workspace is None or workspace.repository_id is None or handoff is None:
+        return {item.id: unavailable for item in related_deliveries}
+
+    deliveries_by_number: dict[int, list[TaskDelivery]] = {}
+    for item in related_deliveries:
+        pull_request_number = item.pull_request_number
+        if not isinstance(pull_request_number, int):
+            continue
+        if item.workspace_id != workspace.id or item.repository_id != workspace.repository_id:
+            statuses[item.id] = {"availability": "unavailable", "reason": "repository_mismatch"}
+            continue
+        deliveries_by_number.setdefault(pull_request_number, []).append(item)
+    pull_request_numbers = list(deliveries_by_number)
+    if not pull_request_numbers:
+        return statuses
+
+    project = await db.get(Project, handoff.project_id)
+    repository = await db.get(Repository, workspace.repository_id)
+    organization = await db.get(Organization, project.organization_id) if project is not None else None
+    if (
+        project is None
+        or project.tenant_id != task.tenant_id
+        or not project.is_active
+        or organization is None
+        or organization.tenant_id != task.tenant_id
+        or not organization.is_active
+        or repository is None
+        or repository.provider != "github"
+        or repository.project_id != project.id
+        or not repository.is_active
+    ):
+        statuses.update({item.id: unavailable for item in related_deliveries if item.id not in statuses})
+        return statuses
+
+    if tenant_context.user_id is not None:
+        try:
+            await require_org_membership(db, project.organization_id, roles=ANY_ROLE)
+        except HTTPException:
+            statuses.update({item.id: unavailable for item in related_deliveries if item.id not in statuses})
+            return statuses
+
+    refresh_numbers = pull_request_numbers[:_MAX_LIVE_PULL_REQUESTS]
+    statuses_by_number = {
+        number: {"availability": "not_refreshed", "reason": "refresh_limit"}
+        for number in pull_request_numbers[_MAX_LIVE_PULL_REQUESTS:]
+    }
+    try:
+        provider = await get_authorized_repository_provider(
+            repository.provider, db, repository, project.organization_id
+        )
+        async with provider as github:
+            async def refresh(number: int) -> tuple[int, dict[str, Any]]:
+                try:
+                    current = await github.pull_request_status(repository.full_name, number)
+                except GitHubRepositoryError as exc:
+                    reason = "not_found" if exc.status_code == 404 else "github_unavailable"
+                    return number, {"availability": "unavailable", "reason": reason}
+                return number, {
+                    "availability": "current",
+                    "number": number,
+                    "title": str(current.get("title") or "")[:512],
+                    "state": str(current.get("state") or "unknown")[:32],
+                    "draft": bool(current.get("draft", False)),
+                    "merged": bool(current.get("merged", False)),
+                    "review_status": current.get("review_status"),
+                }
+
+            refreshed = await asyncio.gather(*(refresh(number) for number in refresh_numbers))
+            statuses_by_number.update(refreshed)
+    except (CredentialEncryptionUnavailableError, GitHubCredentialNotFoundError, GitHubRepositoryError):
+        statuses_by_number.update({number: unavailable for number in refresh_numbers})
+    except Exception:
+        # GitHub status is supplementary; remote failure must not hide durable history.
+        statuses_by_number.update({number: unavailable for number in refresh_numbers})
+    for number, items in deliveries_by_number.items():
+        for item in items:
+            statuses[item.id] = statuses_by_number[number]
+    return statuses
+
+
+@router.get("/activity", summary="List a unified task activity feed")
+async def list_task_activity(
+    execution_id: uuid.UUID,
+    task_id: uuid.UUID,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    task = await _owned_task(execution_id, task_id, db)
+    invocations = (
+        await db.execute(
+            select(TeammateToolInvocation)
+            .where(TeammateToolInvocation.tenant_id == task.tenant_id, TeammateToolInvocation.task_id == task.id)
+            .order_by(TeammateToolInvocation.started_at.desc(), TeammateToolInvocation.id.desc())
+            .limit(_ACTIVITY_SOURCE_LIMIT + 1)
+        )
+    ).scalars().all()
+    runs = (
+        await db.execute(
+            select(VerificationRun)
+            .where(VerificationRun.tenant_id == task.tenant_id, VerificationRun.task_id == task.id)
+            .order_by(VerificationRun.started_at.desc(), VerificationRun.id.desc())
+            .limit(_ACTIVITY_SOURCE_LIMIT + 1)
+        )
+    ).scalars().all()
+    deliveries = (
+        await db.execute(
+            select(TaskDelivery)
+            .where(TaskDelivery.tenant_id == task.tenant_id, TaskDelivery.task_id == task.id)
+            .order_by(TaskDelivery.created_at.desc(), TaskDelivery.id.desc())
+            .limit(_ACTIVITY_SOURCE_LIMIT + 1)
+        )
+    ).scalars().all()
+    handoffs = (
+        await db.execute(
+            select(TaskHandoff)
+            .where(
+                TaskHandoff.tenant_id == task.tenant_id,
+                or_(TaskHandoff.parent_task_id == task.id, TaskHandoff.child_task_id == task.id),
+            )
+            .order_by(TaskHandoff.created_at.desc(), TaskHandoff.id.desc())
+            .limit(_ACTIVITY_SOURCE_LIMIT + 1)
+        )
+    ).scalars().all()
+
+    handoff_ids = [item.id for item in handoffs]
+    run_ids = [item.id for item in runs]
+    approval_filters = []
+    if handoff_ids:
+        approval_filters.append(Approval.task_handoff_id.in_(handoff_ids))
+    if run_ids:
+        approval_filters.append(Approval.verification_run_id.in_(run_ids))
+    approvals: list[Approval] = []
+    if approval_filters:
+        approvals = list(
+            (
+                await db.execute(
+                    select(Approval)
+                    .join(Organization, Organization.id == Approval.organization_id)
+                    .where(Organization.tenant_id == task.tenant_id, or_(*approval_filters))
+                    .order_by(Approval.created_at.desc(), Approval.id.desc())
+                    .limit(_ACTIVITY_SOURCE_LIMIT + 1)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    source_truncated = any(
+        len(records) > _ACTIVITY_SOURCE_LIMIT
+        for records in (invocations, runs, deliveries, handoffs, approvals)
+    )
+    invocations = invocations[:_ACTIVITY_SOURCE_LIMIT]
+    runs = runs[:_ACTIVITY_SOURCE_LIMIT]
+    deliveries = deliveries[:_ACTIVITY_SOURCE_LIMIT]
+    handoffs = handoffs[:_ACTIVITY_SOURCE_LIMIT]
+    approvals = approvals[:_ACTIVITY_SOURCE_LIMIT]
+
+    live_pr_statuses = await _refresh_task_pull_request_statuses(db, task, list(deliveries))
+    events: list[dict[str, Any]] = [
+        {
+            "id": f"task:{task.id}",
+            "type": "task",
+            "status": task.status,
+            "timestamp": _activity_timestamp(task.updated_at or task.completed_at or task.created_at),
+            "summary": f"Task {task.status.replace('_', ' ')}",
+            "details": {"assigned_agent": task.assigned_agent},
+        }
+    ]
+    for invocation in invocations:
+        events.append(
+            {
+                "id": f"tool:{invocation.id}",
+                "type": "tool",
+                "status": invocation.status,
+                "timestamp": _activity_timestamp(invocation.completed_at or invocation.started_at),
+                "summary": f"Teammate used {invocation.tool_name}",
+                "details": {"path": invocation.path, "error_code": invocation.error_code},
+            }
+        )
+    for run in runs:
+        events.append(
+            {
+                "id": f"verification:{run.id}",
+                "type": "verification",
+                "status": run.status,
+                "timestamp": _activity_timestamp(run.completed_at or run.started_at),
+                "summary": f"{run.kind.title()} verification {run.status.replace('_', ' ')}",
+                "details": {"exit_code": run.exit_code, "timed_out": run.timed_out},
+            }
+        )
+    for delivery in deliveries:
+        number = delivery.pull_request_number
+        events.append(
+            {
+                "id": f"delivery:{delivery.id}",
+                "type": "delivery",
+                "status": delivery.status,
+                "timestamp": _activity_timestamp(delivery.updated_at or delivery.created_at),
+                "summary": delivery.pull_request_title or f"GitHub delivery {delivery.status.replace('_', ' ')}",
+                "details": {
+                    "branch": delivery.branch_name,
+                    "pull_request_number": number,
+                    "pull_request_status": live_pr_statuses.get(delivery.id) if number else None,
+                },
+            }
+        )
+    for handoff in handoffs:
+        direction = "received" if handoff.child_task_id == task.id else "delegated"
+        events.append(
+            {
+                "id": f"handoff:{handoff.id}",
+                "type": "handoff",
+                "status": handoff.status,
+                "timestamp": _activity_timestamp(handoff.completed_at or handoff.created_at),
+                "summary": f"Task {direction} by {handoff.delegated_to}",
+                "details": {"reason": handoff.reason[:1000]},
+            }
+        )
+    for approval in approvals:
+        events.append(
+            {
+                "id": f"approval:{approval.id}",
+                "type": "approval",
+                "status": approval.status,
+                "timestamp": _activity_timestamp(approval.decided_at or approval.updated_at or approval.created_at),
+                "summary": f"{approval.kind.replace('_', ' ').title()} approval {approval.status.replace('_', ' ')}",
+                "details": {"summary": approval.summary[:1000], "decision_note": (approval.decision_note or "")[:1000]},
+            }
+        )
+
+    events.sort(key=lambda event: _activity_sort_timestamp(event["timestamp"]), reverse=True)
+    truncated = source_truncated or len(events) > _ACTIVITY_TOTAL_LIMIT
+    return {
+        "task_id": str(task.id),
+        "activity": events[:_ACTIVITY_TOTAL_LIMIT],
+        "count": min(len(events), _ACTIVITY_TOTAL_LIMIT),
+        "truncated": truncated,
+        "github_status_freshness": "live_snapshot_when_available",
     }
 
 

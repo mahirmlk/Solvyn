@@ -253,6 +253,53 @@ export interface TaskDeliveryResult {
   replayed: boolean;
 }
 
+export interface TaskActivityPullRequestStatus {
+  availability: "current" | "unavailable" | "not_refreshed";
+  reason?: string;
+  number?: number;
+  title?: string;
+  state?: string;
+  draft?: boolean;
+  merged?: boolean;
+  review_status?: {
+    state: string;
+    approvals: number;
+    changes_requested: number;
+    requested_reviewers: string[];
+    reviewer_decisions: { login: string; state: string; submitted_at: string | null }[];
+    history_truncated: boolean;
+  };
+}
+
+export interface TaskActivityEvent {
+  id: string;
+  type: "task" | "tool" | "verification" | "delivery" | "handoff" | "approval";
+  status: string;
+  timestamp: string | null;
+  summary: string;
+  details: {
+    assigned_agent?: string | null;
+    path?: string | null;
+    error_code?: string | null;
+    exit_code?: number | null;
+    timed_out?: boolean;
+    branch?: string;
+    pull_request_number?: number | null;
+    pull_request_status?: TaskActivityPullRequestStatus | null;
+    reason?: string;
+    summary?: string;
+    decision_note?: string;
+  };
+}
+
+export interface TaskActivityFeed {
+  task_id: string;
+  activity: TaskActivityEvent[];
+  count: number;
+  truncated: boolean;
+  github_status_freshness: "live_snapshot_when_available";
+}
+
 // Admin panel types -----------------------------------------------------
 
 export interface AdminTenant {
@@ -351,6 +398,9 @@ export const api = {
 
   getTaskDeliveryPreview: (executionId: string, taskId: string) =>
     request<TaskDeliveryDiff>(`/workflows/executions/${executionId}/tasks/${taskId}/delivery-preview`),
+
+  getTaskActivity: (executionId: string, taskId: string) =>
+    request<TaskActivityFeed>(`/workflows/executions/${executionId}/tasks/${taskId}/activity`),
 
   deliverTaskWorkspace: (
     executionId: string,

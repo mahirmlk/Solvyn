@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useState } from "react";
-import { api, TaskDeliveryDiff, TaskDeliveryResult } from "@/lib/api";
+import { api, TaskActivityEvent, TaskDeliveryDiff, TaskDeliveryResult } from "@/lib/api";
 import styles from "./page.module.css";
 
 export default function TaskDeliveryReviewPage() {
@@ -12,6 +12,9 @@ export default function TaskDeliveryReviewPage() {
   const [preview, setPreview] = useState<TaskDeliveryDiff | null>(null);
   const [result, setResult] = useState<TaskDeliveryResult | null>(null);
   const [loading, setLoading] = useState(true);
+  const [activity, setActivity] = useState<TaskActivityEvent[]>([]);
+  const [activityLoading, setActivityLoading] = useState(true);
+  const [activityError, setActivityError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [branchName, setBranchName] = useState(`solvyn/task-${taskId.slice(0, 8)}`);
@@ -35,6 +38,21 @@ export default function TaskDeliveryReviewPage() {
 
   useEffect(() => { void loadPreview(); }, [loadPreview]);
 
+  const loadActivity = useCallback(async () => {
+    setActivityLoading(true);
+    setActivityError(null);
+    try {
+      const feed = await api.getTaskActivity(executionId, taskId);
+      setActivity(feed.activity);
+    } catch (reason) {
+      setActivityError(reason instanceof Error ? reason.message : "Could not load task activity.");
+    } finally {
+      setActivityLoading(false);
+    }
+  }, [executionId, taskId]);
+
+  useEffect(() => { void loadActivity(); }, [loadActivity]);
+
   async function submitDelivery(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!preview?.can_deliver) return;
@@ -50,10 +68,12 @@ export default function TaskDeliveryReviewPage() {
       });
       setResult(delivery);
       setPreview(await api.getTaskDeliveryPreview(executionId, taskId));
+      void loadActivity();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not create the draft pull request.");
       try {
         setPreview(await api.getTaskDeliveryPreview(executionId, taskId));
+        void loadActivity();
       } catch {
         // Keep the delivery error visible if history cannot be refreshed.
       }
@@ -63,6 +83,12 @@ export default function TaskDeliveryReviewPage() {
   }
 
   const currentAttempt = preview?.delivery_history.find((delivery) => delivery.diff_digest === preview.diff_digest);
+
+  function formatActivityTime(timestamp: string | null): string {
+    if (!timestamp) return "Time unavailable";
+    const date = new Date(timestamp);
+    return Number.isNaN(date.getTime()) ? "Time unavailable" : date.toLocaleString();
+  }
 
   return (
     <div className="route-page" aria-busy={loading || submitting}>
@@ -99,6 +125,56 @@ export default function TaskDeliveryReviewPage() {
       </section>
 
       {error && <section className={styles.notice} role="alert"><p>{error}</p></section>}
+
+      <section className={`${styles.diffPanel} pearl-pane`} aria-labelledby="activity-heading" aria-busy={activityLoading}>
+        <div className={styles.sectionHead}>
+          <div>
+            <span className="eyebrow">Task record</span>
+            <h2 id="activity-heading">Activity</h2>
+          </div>
+          <button className="action-button secondary" onClick={() => void loadActivity()} type="button" disabled={activityLoading}>
+            {activityLoading ? "Refreshing…" : "Refresh activity"}
+          </button>
+        </div>
+        {activityError && <p className={styles.activityError} role="alert">{activityError}</p>}
+        {activityLoading && activity.length === 0 ? (
+          <div className="skeleton" style={{ minHeight: 120 }} />
+        ) : activity.length ? (
+          <ol className={styles.activityList}>
+            {activity.map((event) => {
+              const pullRequest = event.details.pull_request_status;
+              return (
+                <li className={styles.activityItem} key={event.id}>
+                  <div className={styles.activityMeta}>
+                    <span className={styles.activityType}>{event.type.replaceAll("_", " ")}</span>
+                    <span className="status-pill">{event.status.replaceAll("_", " ")}</span>
+                    <time dateTime={event.timestamp ?? undefined}>{formatActivityTime(event.timestamp)}</time>
+                  </div>
+                  <strong className={styles.activitySummary}>{event.summary}</strong>
+                  {event.type === "tool" && event.details.path && <p className={styles.muted}>Path <code>{event.details.path}</code></p>}
+                  {event.type === "verification" && event.details.exit_code !== undefined && (
+                    <p className={styles.muted}>Exit code {event.details.exit_code}{event.details.timed_out ? " · timed out" : ""}</p>
+                  )}
+                  {event.type === "delivery" && event.details.branch && <p className={styles.muted}>Branch <code>{event.details.branch}</code></p>}
+                  {event.type === "handoff" && event.details.reason && <p className={styles.muted}>{event.details.reason}</p>}
+                  {event.type === "approval" && event.details.decision_note && <p className={styles.muted}>{event.details.decision_note}</p>}
+                  {event.type === "delivery" && pullRequest && (
+                    <p className={styles.muted}>
+                      {pullRequest.availability === "current" && pullRequest.review_status
+                        ? `GitHub snapshot: ${pullRequest.merged ? "merged" : pullRequest.state}${pullRequest.draft ? " · draft" : ""} · review ${pullRequest.review_status.state} · ${pullRequest.review_status.approvals} approval(s) · ${pullRequest.review_status.changes_requested} change request(s)${pullRequest.review_status.history_truncated ? " · review history incomplete" : ""}`
+                        : pullRequest.availability === "not_refreshed"
+                          ? "Current GitHub status was not refreshed because this task has many pull requests."
+                          : "Current GitHub status is unavailable; the saved delivery record is still shown."}
+                    </p>
+                  )}
+                </li>
+              );
+            })}
+          </ol>
+        ) : activityError ? null : (
+          <p className={styles.muted}>No activity has been recorded for this task yet.</p>
+        )}
+      </section>
 
       {loading ? (
         <div className="skeleton" style={{ minHeight: 220 }} />
