@@ -107,7 +107,7 @@ export default function TaskDeliveryReviewPage() {
           <section className={`${styles.diffPanel} pearl-pane`} aria-labelledby="diff-heading">
             <div className={styles.sectionHead}>
               <div>
-                <span className="eyebrow">{preview.files.length} changed file{preview.files.length === 1 ? "" : "s"}</span>
+                <span className="eyebrow">{preview.files.length + preview.deleted_paths.length} changed file{preview.files.length + preview.deleted_paths.length === 1 ? "" : "s"}</span>
                 <h2 id="diff-heading">Workspace diff</h2>
               </div>
               <button className="action-button secondary" onClick={() => void loadPreview()} type="button">
@@ -119,7 +119,7 @@ export default function TaskDeliveryReviewPage() {
               <div className={styles.fileList}>
                 {preview.diffs.map((item) => (
                   <details className={styles.file} key={item.path} open>
-                    <summary><code>{item.path}</code><span>View diff</span></summary>
+                    <summary><code>{item.path}</code><span>{preview.deleted_paths.includes(item.path) ? "Delete" : "View diff"}</span></summary>
                     <pre>{item.diff}</pre>
                   </details>
                 ))}
@@ -129,8 +129,8 @@ export default function TaskDeliveryReviewPage() {
             )}
             {preview.unsupported_missing_source_paths.length > 0 && (
               <div className={styles.blocker} role="status">
-                <strong>Delivery is blocked while selected files are missing.</strong>
-                <p>Deletion delivery is not supported. Restore these files in the workspace to continue.</p>
+                <strong>Some missing selected files cannot be safely deleted.</strong>
+                <p>Only selected regular, non-executable text files from the pinned source can be deleted.</p>
                 <ul>{preview.unsupported_missing_source_paths.map((path) => <li key={path}><code>{path}</code></li>)}</ul>
               </div>
             )}

@@ -232,9 +232,44 @@ async def _build_delivery_preview(
     }
     source_tree_paths = set(source_tree_entries)
     files: list[dict[str, str]] = []
+    deleted_paths: list[str] = []
     diffs: list[dict[str, str]] = []
     total_content_bytes = 0
     total_diff_bytes = 0
+    unsupported_missing_source_paths: list[str] = []
+    for path in missing_source_paths:
+        source_entry = source_tree_blob_entries.get(path)
+        if source_entry is None or source_entry.get("mode") != "100644":
+            unsupported_missing_source_paths.append(path)
+            continue
+        baseline = await github.text_file(
+            repository.full_name,
+            path,
+            source_commit_sha,
+            max_bytes=1_000_000,
+        )
+        if baseline is None:
+            unsupported_missing_source_paths.append(path)
+            continue
+        total_content_bytes += len(baseline.encode("utf-8"))
+        if total_content_bytes > _MAX_DELIVERY_BYTES:
+            raise HTTPException(status_code=413, detail="Delivery exceeds the 50-file or 500 KB limit")
+        if len(files) + len(deleted_paths) >= _MAX_DELIVERY_FILES:
+            raise HTTPException(status_code=413, detail="Delivery exceeds the 50-file or 500 KB limit")
+        deleted_paths.append(path)
+        diff = "".join(
+            difflib.unified_diff(
+                baseline.splitlines(keepends=True),
+                [],
+                fromfile=f"a/{path}",
+                tofile="/dev/null",
+            )
+        )
+        total_diff_bytes += len(diff.encode("utf-8"))
+        if total_diff_bytes > _MAX_DELIVERY_DIFF_BYTES:
+            raise HTTPException(status_code=413, detail="Rendered delivery diff exceeds the 1 MB limit")
+        diffs.append({"path": path, "diff": diff})
+
     for path in current_paths:
         try:
             content = manager.read_file(workspace, path, max_bytes=1_000_000).decode("utf-8")
@@ -276,7 +311,7 @@ async def _build_delivery_preview(
             )
         file_bytes = len(content.encode("utf-8"))
         total_content_bytes += file_bytes
-        if len(files) >= _MAX_DELIVERY_FILES or total_content_bytes > _MAX_DELIVERY_BYTES:
+        if len(files) + len(deleted_paths) >= _MAX_DELIVERY_FILES or total_content_bytes > _MAX_DELIVERY_BYTES:
             raise HTTPException(status_code=413, detail="Delivery exceeds the 50-file or 500 KB limit")
         files.append({"path": path, "content": content})
         diff = "".join(
@@ -296,7 +331,8 @@ async def _build_delivery_preview(
         "source_commit_sha": source_commit_sha,
         "base_branch": base_branch,
         "files": files,
-        "unsupported_missing_source_paths": missing_source_paths,
+        "deleted_paths": deleted_paths,
+        "unsupported_missing_source_paths": unsupported_missing_source_paths,
     }
     try:
         canonical = json.dumps(digest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -308,10 +344,11 @@ async def _build_delivery_preview(
         "source_commit_sha": source_commit_sha,
         "base_branch": base_branch,
         "files": files,
+        "deleted_paths": deleted_paths,
         "diffs": diffs,
-        "unsupported_missing_source_paths": missing_source_paths,
+        "unsupported_missing_source_paths": unsupported_missing_source_paths,
         "diff_digest": digest,
-        "can_deliver": bool(files) and not missing_source_paths,
+        "can_deliver": bool(files or deleted_paths) and not unsupported_missing_source_paths,
     }
 
 
@@ -1067,7 +1104,7 @@ async def deliver_task_workspace(
             if not preview["can_deliver"]:
                 raise HTTPException(
                     status_code=409,
-                    detail="Delivery requires at least one change and all selected source files; deletions are unsupported",
+                    detail="Delivery requires at least one supported change and no unsupported missing source files",
                 )
             existing = (
                 await db.execute(
@@ -1184,6 +1221,7 @@ async def deliver_task_workspace(
                     expected_head_sha=branch_created["sha"],
                     message=payload.commit_message,
                     files=preview["files"],
+                    deleted_paths=preview["deleted_paths"],
                 )
             except GitHubRepositoryError as exc:
                 delivery.status = "unknown"

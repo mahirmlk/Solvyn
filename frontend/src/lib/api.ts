@@ -219,6 +219,7 @@ export interface TaskDeliveryDiff {
   source_commit_sha: string;
   base_branch: string;
   files: { path: string; content: string }[];
+  deleted_paths: string[];
   diffs: { path: string; diff: string }[];
   unsupported_missing_source_paths: string[];
   diff_digest: string;

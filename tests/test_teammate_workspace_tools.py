@@ -135,6 +135,54 @@ async def test_workspace_write_requires_modify_permission(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_workspace_delete_requires_modify_permission_and_is_audited(tmp_path: Path) -> None:
+    runtime, session, manager, workspace = _runtime(tmp_path, {"READ_ONLY"})
+    manager.write_file(workspace, "src/main.py", b"source")
+
+    result = await runtime._invoke(
+        {
+            "id": "call-delete-denied",
+            "function": {"name": "workspace_delete_file", "arguments": '{"path":"src/main.py"}'},
+        }
+    )
+
+    assert result == {"error": "permission_denied"}
+    assert manager.read_file(workspace, "src/main.py") == b"source"
+    assert session.records[0].status == "denied"
+    available = {tool["function"]["name"] for tool in runtime._tool_definitions({"READ_ONLY"})}
+    assert "workspace_delete_file" not in available
+
+
+@pytest.mark.asyncio
+async def test_workspace_delete_is_scoped_and_verification_freeze_applies(tmp_path: Path) -> None:
+    runtime, session, manager, workspace = _runtime(tmp_path, {"READ_ONLY", "MODIFY_FILES"})
+    manager.write_file(workspace, "src/main.py", b"source")
+    session.active_verification_approval = True
+
+    frozen = await runtime._invoke(
+        {
+            "id": "call-delete-frozen",
+            "function": {"name": "workspace_delete_file", "arguments": '{"path":"src/main.py"}'},
+        }
+    )
+    assert frozen == {"error": "verification_approval_freezes_workspace"}
+    assert manager.read_file(workspace, "src/main.py") == b"source"
+
+    session.active_verification_approval = False
+    deleted = await runtime._invoke(
+        {
+            "id": "call-delete",
+            "function": {"name": "workspace_delete_file", "arguments": '{"path":"src/main.py"}'},
+        }
+    )
+    assert deleted == {"path": "src/main.py", "deleted": True}
+    assert session.records[-1].status == "succeeded"
+    assert session.records[-1].path == "src/main.py"
+    available = {tool["function"]["name"] for tool in runtime._tool_definitions({"MODIFY_FILES"})}
+    assert "workspace_delete_file" in available
+
+
+@pytest.mark.asyncio
 async def test_workspace_path_traversal_is_rejected_and_audited(tmp_path: Path) -> None:
     runtime, session, _manager, _workspace = _runtime(tmp_path, {"READ_ONLY"})
 

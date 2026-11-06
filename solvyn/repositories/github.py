@@ -234,13 +234,13 @@ class GitHubClient(RepositoryProvider):
         return {"name": branch, "sha": str(branch_sha)}
 
     @staticmethod
-    def _validate_commit_files(files: list[dict[str, str]]) -> None:
-        if not 1 <= len(files) <= _MAX_COMMIT_FILES:
+    def _validate_commit_files(files: list[dict[str, str]], deleted_paths: list[str] | None = None) -> None:
+        removals = deleted_paths or []
+        if not 1 <= len(files) + len(removals) <= _MAX_COMMIT_FILES:
             raise GitHubRepositoryError(422, "A commit must include between 1 and 50 files")
         total_bytes = 0
         seen: set[str] = set()
-        for item in files:
-            path, content = item.get("path", ""), item.get("content", "")
+        for path in [item.get("path", "") for item in files] + removals:
             segments = path.split("/")
             if (
                 not path
@@ -254,6 +254,8 @@ class GitHubClient(RepositoryProvider):
             ):
                 raise GitHubRepositoryError(422, "Commit contains an invalid or duplicate file path")
             seen.add(path)
+        for item in files:
+            content = item.get("content", "")
             try:
                 total_bytes += len(content.encode("utf-8"))
             except UnicodeEncodeError as exc:
@@ -269,6 +271,7 @@ class GitHubClient(RepositoryProvider):
         expected_head_sha: str,
         message: str,
         files: list[dict[str, str]],
+        deleted_paths: list[str] | None = None,
     ) -> dict[str, str]:
         owner, repo = validate_full_name(full_name)
         _validate_solvyn_branch(branch)
@@ -276,7 +279,8 @@ class GitHubClient(RepositoryProvider):
             raise GitHubRepositoryError(422, "Expected branch head is invalid")
         if not message.strip() or len(message) > 2000:
             raise GitHubRepositoryError(422, "Commit message must contain 1 to 2000 characters")
-        self._validate_commit_files(files)
+        removals = deleted_paths or []
+        self._validate_commit_files(files, removals)
         current_ref = await self._branch_ref(owner, repo, branch)
         current_object = current_ref.get("object")
         current_sha = current_object.get("sha") if isinstance(current_object, dict) else None
@@ -290,10 +294,13 @@ class GitHubClient(RepositoryProvider):
         if not isinstance(base_tree, str):
             raise GitHubRepositoryError(502, "GitHub returned an invalid base tree")
 
-        tree_items = [
+        tree_items: list[dict[str, Any]] = [
             {"path": item["path"], "mode": "100644", "type": "blob", "content": item["content"]}
             for item in files
         ]
+        tree_items.extend(
+            {"path": path, "mode": "100644", "type": "blob", "sha": None} for path in removals
+        )
         tree = await self._write_json(
             "POST",
             f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/git/trees",

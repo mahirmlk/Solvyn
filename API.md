@@ -632,6 +632,10 @@ Inspect the default branch. Returns repository metadata, revision SHA, file coun
 }
 ```
 
+### Review and deliver task workspace changes
+
+`GET /api/v1/workflows/executions/{execution_id}/tasks/{task_id}/delivery-preview` returns the current bounded diff and digest. `POST /api/v1/workflows/executions/{execution_id}/tasks/{task_id}/deliver` requires that digest and creates a branch from the pinned source commit, a commit, and a draft pull request. Delivery supports up to 50 changed paths and 500 KB. A removed workspace file is delivered as a deletion only when it was explicitly selected from the pinned source, is a regular non-executable file, and its contents fit the supported UTF-8 limits. Missing unselected or unsafe paths block delivery. The digest binds additions, edits, deletions, source revision, and the current base branch. Solvyn does not merge the pull request.
+
 ### `GET /api/v1/repositories/{repository_id}/files/search?query=...`
 
 Search file paths case-insensitively. This endpoint searches paths only; it does not search file contents.
