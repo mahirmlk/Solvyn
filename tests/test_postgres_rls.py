@@ -15,6 +15,8 @@ from solvyn.db.models import (
     Approval,
     ExecutionGraph,
     Memory,
+    MaintenanceSchedule,
+    ProactiveEvent,
     Session,
     Task,
     TaskAcceptanceCriterion,
@@ -56,7 +58,8 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                         "FROM pg_class WHERE relname IN "
                         "('tasks', 'task_acceptance_criteria', 'task_deliveries', 'task_workspaces', "
                         "'teammate_tool_invocations', 'task_dependencies', 'verification_runs', "
-                        "'task_handoffs', 'teammate_memory', 'sessions', 'execution_graphs', 'memory', 'token_usage', 'approvals')"
+                        "'task_handoffs', 'teammate_memory', 'sessions', 'execution_graphs', 'memory', 'token_usage', "
+                        "'approvals', 'proactive_events', 'maintenance_schedules')"
                     )
                 )
             ).all()
@@ -75,6 +78,8 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                 "memory",
                 "token_usage",
                 "approvals",
+                "proactive_events",
+                "maintenance_schedules",
             }
             assert all(row[1] and row[2] for row in protected_tables)
 
@@ -577,6 +582,179 @@ async def test_approval_rls_is_tenant_and_organization_scoped() -> None:
                 await connection.execute(text("DELETE FROM approvals WHERE id = :id"), {"id": approval_id})
             await connection.execute(
                 text("DELETE FROM projects WHERE id IN (:a, :other)"), {"a": project_a, "other": project_a_other}
+            )
+            await connection.execute(
+                text("DELETE FROM organizations WHERE id IN (:a, :other, :b)"),
+                {"a": organization_a, "other": organization_a_other, "b": organization_b},
+            )
+            await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_proactive_data_rls_is_tenant_and_organization_scoped() -> None:
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url.startswith("postgresql+"):
+        pytest.skip("RLS behavior requires PostgreSQL and migrations at head")
+
+    engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+    organization_a, organization_a_other, organization_b = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    project_a, project_a_other, project_b = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    event_a, event_b = uuid.uuid4(), uuid.uuid4()
+    schedule_a, schedule_b = uuid.uuid4(), uuid.uuid4()
+
+    try:
+        async with engine.connect() as connection:
+            protected = (
+                await connection.execute(
+                    text(
+                        "SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class "
+                        "WHERE relname IN ('proactive_events', 'maintenance_schedules')"
+                    )
+                )
+            ).all()
+            assert {row[0] for row in protected} == {"proactive_events", "maintenance_schedules"}
+            assert all(row[1] and row[2] for row in protected)
+
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'RLS proactive', :slug, '')"),
+                [{"id": tenant_a, "slug": f"rls-proactive-{tenant_a}"}, {"id": tenant_b, "slug": f"rls-proactive-{tenant_b}"}],
+            )
+            await connection.execute(
+                text("INSERT INTO organizations (id, name, slug, tenant_id) VALUES (:id, 'RLS proactive', :slug, :tenant_id)"),
+                [
+                    {"id": organization_a, "slug": f"rls-proactive-{organization_a}", "tenant_id": tenant_a},
+                    {"id": organization_a_other, "slug": f"rls-proactive-{organization_a_other}", "tenant_id": tenant_a},
+                    {"id": organization_b, "slug": f"rls-proactive-{organization_b}", "tenant_id": tenant_b},
+                ],
+            )
+            await connection.execute(
+                text("INSERT INTO projects (id, organization_id, tenant_id, name, slug) VALUES (:id, :organization_id, :tenant_id, 'RLS proactive', :slug)"),
+                [
+                    {"id": project_a, "organization_id": organization_a, "tenant_id": tenant_a, "slug": f"rls-proactive-{project_a}"},
+                    {"id": project_a_other, "organization_id": organization_a_other, "tenant_id": tenant_a, "slug": f"rls-proactive-{project_a_other}"},
+                    {"id": project_b, "organization_id": organization_b, "tenant_id": tenant_b, "slug": f"rls-proactive-{project_b}"},
+                ],
+            )
+            for tenant_id, organization_id, project_id, event_id, schedule_id in (
+                (tenant_a, organization_a, project_a, event_a, schedule_a),
+                (tenant_b, organization_b, project_b, event_b, schedule_b),
+            ):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO proactive_events "
+                        "(id, organization_id, project_id, delivery_id, source_event_id, event_type, action, "
+                        "repository_name, workflow_name, conclusion, status) "
+                        "VALUES (:id, :organization_id, :project_id, :delivery_id, :source_event_id, "
+                        "'workflow_run', 'completed', 'org/repo', 'CI', 'failure', 'pending')"
+                    ),
+                    {
+                        "id": event_id,
+                        "organization_id": organization_id,
+                        "project_id": project_id,
+                        "delivery_id": str(uuid.uuid4()),
+                        "source_event_id": f"rls-{event_id}",
+                    },
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO maintenance_schedules "
+                        "(id, organization_id, project_id, maintenance_type, title, interval_days, next_run_at) "
+                        "VALUES (:id, :organization_id, :project_id, 'code_quality', 'RLS schedule', 7, now())"
+                    ),
+                    {"id": schedule_id, "organization_id": organization_id, "project_id": project_id},
+                )
+
+        tenant_context.clear()
+        async with sessions() as db:
+            assert (await db.execute(select(ProactiveEvent.id))).scalars().all() == []
+            assert (await db.execute(select(MaintenanceSchedule.id))).scalars().all() == []
+            with pytest.raises(DBAPIError):
+                await db.execute(
+                    text(
+                        "INSERT INTO proactive_events "
+                        "(id, organization_id, project_id, delivery_id, source_event_id, event_type, action, "
+                        "repository_name, workflow_name, conclusion) "
+                        "VALUES (:id, :organization_id, :project_id, :delivery_id, :source_event_id, "
+                        "'test', 'test', '', '', 'test')"
+                    ),
+                    {
+                        "id": uuid.uuid4(),
+                        "organization_id": organization_a,
+                        "project_id": project_a,
+                        "delivery_id": str(uuid.uuid4()),
+                        "source_event_id": str(uuid.uuid4()),
+                    },
+                )
+            await db.rollback()
+
+        tenant_context.set(tenant_a, "rls-proactive-a")
+        async with sessions() as db:
+            assert (await db.execute(select(ProactiveEvent.id))).scalars().all() == [event_a]
+            assert (await db.execute(select(MaintenanceSchedule.id))).scalars().all() == [schedule_a]
+            hidden_event_update = await db.execute(
+                text("UPDATE proactive_events SET status = 'acknowledged' WHERE id = :id"), {"id": event_b}
+            )
+            hidden_schedule_update = await db.execute(
+                text("UPDATE maintenance_schedules SET enabled = false WHERE id = :id"), {"id": schedule_b}
+            )
+            assert hidden_event_update.rowcount == hidden_schedule_update.rowcount == 0
+            await db.rollback()
+
+        async with sessions() as db:
+            db.add(
+                ProactiveEvent(
+                    id=uuid.uuid4(),
+                    organization_id=organization_a,
+                    project_id=project_a_other,
+                    delivery_id=str(uuid.uuid4()),
+                    source_event_id=str(uuid.uuid4()),
+                    event_type="test",
+                    action="test",
+                    repository_name="",
+                    workflow_name="",
+                    conclusion="test",
+                )
+            )
+            with pytest.raises(DBAPIError):
+                await db.flush()
+            await db.rollback()
+
+        async with sessions() as db:
+            db.add(
+                MaintenanceSchedule(
+                    id=uuid.uuid4(),
+                    organization_id=organization_a,
+                    project_id=project_a_other,
+                    maintenance_type="code_quality",
+                    title="cross-organization project",
+                    interval_days=7,
+                    next_run_at=datetime.now(UTC),
+                )
+            )
+            with pytest.raises(DBAPIError):
+                await db.flush()
+            await db.rollback()
+    finally:
+        tenant_context.clear()
+        async with engine.begin() as connection:
+            for tenant_id, event_id, schedule_id in ((tenant_a, event_a, schedule_a), (tenant_b, event_b, schedule_b)):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(text("DELETE FROM proactive_events WHERE id = :id"), {"id": event_id})
+                await connection.execute(text("DELETE FROM maintenance_schedules WHERE id = :id"), {"id": schedule_id})
+            await connection.execute(
+                text("DELETE FROM projects WHERE id IN (:a, :other, :b)"),
+                {"a": project_a, "other": project_a_other, "b": project_b},
             )
             await connection.execute(
                 text("DELETE FROM organizations WHERE id IN (:a, :other, :b)"),
