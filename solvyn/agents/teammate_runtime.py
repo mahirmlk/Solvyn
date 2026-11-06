@@ -25,8 +25,9 @@ from solvyn.db.models import (
     TeammateProjectAssignment,
     TeammateStatus,
 )
+from solvyn.repositories.credentials import CredentialEncryptionUnavailableError, GitHubCredentialNotFoundError
 from solvyn.repositories.github import GitHubRepositoryError
-from solvyn.repositories.providers import get_repository_provider
+from solvyn.repositories.providers import get_authorized_repository_provider, get_repository_provider
 from solvyn.sandbox.workspaces import WorkspaceManager
 
 ROLE_AGENT_TYPES = {
@@ -103,10 +104,22 @@ def build_teammate_system_context(
     return "\n".join(sections)[:_MAX_CONTEXT_CHARS]
 
 
-async def _load_repository_context(repository: Repository, source_paths: list[str] | None = None) -> str:
+async def _load_repository_context(
+    repository: Repository,
+    source_paths: list[str] | None = None,
+    *,
+    db: AsyncSession | None = None,
+    organization_id: uuid.UUID | None = None,
+) -> str:
     """Return bounded summaries and caller-selected files from a connected GitHub repository."""
     try:
-        async with get_repository_provider(repository.provider) as provider:
+        if db is not None and organization_id is not None:
+            provider_context = await get_authorized_repository_provider(
+                repository.provider, db, repository, organization_id
+            )
+        else:
+            provider_context = get_repository_provider(repository.provider)
+        async with provider_context as provider:
             inspection = await provider.inspect(repository.full_name)
             dependencies = provider.parse_dependencies(inspection.get("manifests", {}))
             frameworks = provider.detect_frameworks(dependencies)
@@ -120,7 +133,7 @@ async def _load_repository_context(repository: Repository, source_paths: list[st
                     raise
                 if contents:
                     selected_sources.append((path, contents[:_MAX_SELECTED_SOURCE_FILE_CHARS]))
-    except GitHubRepositoryError as exc:
+    except (GitHubRepositoryError, GitHubCredentialNotFoundError, CredentialEncryptionUnavailableError) as exc:
         raise RepositoryContextUnavailableError("Connected repository context is temporarily unavailable") from exc
 
     repository_info = inspection.get("repository", {})
@@ -203,7 +216,9 @@ async def run_teammate(
             raise TeammateRunDeniedError("Repository is not connected to the assigned project")
         if repository.provider != "github":
             raise RepositoryContextUnavailableError("Repository context is not supported for this provider")
-        repository_context = await _load_repository_context(repository, repository_paths)
+        repository_context = await _load_repository_context(
+            repository, repository_paths, db=db, organization_id=project.organization_id
+        )
 
     knowledge_result = await db.execute(
         select(ProjectKnowledge)

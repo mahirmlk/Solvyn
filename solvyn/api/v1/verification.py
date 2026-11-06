@@ -43,7 +43,7 @@ from solvyn.repositories.credentials import (
     load_organization_github_token,
 )
 from solvyn.repositories.github import GitHubClient, GitHubRepositoryError, _validate_solvyn_branch
-from solvyn.repositories.providers import get_repository_provider
+from solvyn.repositories.providers import get_authorized_repository_provider
 from solvyn.sandbox.factory import create_sandbox_runner
 from solvyn.sandbox.remote import RemoteSandboxResult, RemoteSandboxRunner
 from solvyn.sandbox.runtime import DockerSandboxRunner, SandboxResult, SandboxRuntimeError
@@ -568,10 +568,19 @@ async def create_task_workspace(
             source_paths.append(normalized)
 
         try:
-            async with get_repository_provider("github") as github:
+            try:
+                github_provider = await get_authorized_repository_provider(
+                    repository.provider, db, repository, project.organization_id
+                )
+            except GitHubCredentialNotFoundError as exc:
+                raise HTTPException(status_code=409, detail="Reconnect the GitHub organization integration") from exc
+            except CredentialEncryptionUnavailableError as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="GitHub credential cannot be decrypted with current configuration",
+                ) from exc
+            async with github_provider as github:
                 metadata = await github.repository_metadata(repository.full_name)
-                if metadata["private"]:
-                    raise HTTPException(status_code=422, detail="Only public GitHub repository workspaces are supported")
                 source_commit_sha = await github.branch_commit(repository.full_name, str(metadata["default_branch"]))
                 _, tree = await github.repository_tree(repository.full_name, source_commit_sha)
                 tree_entries = {entry["path"]: entry for entry in tree}

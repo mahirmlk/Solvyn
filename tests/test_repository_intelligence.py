@@ -74,6 +74,51 @@ async def test_inspect_public_repository_returns_bounded_untrusted_context() -> 
 
 
 @pytest.mark.asyncio
+async def test_inspect_private_repository_uses_scoped_token_without_returning_it() -> None:
+    token = "ghp-private-repository-token"
+    requests: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "api.github.com"
+        assert request.headers["authorization"] == f"Bearer {token}"
+        requests.append(request.url.path)
+        if request.url.path == "/repos/acme/private-service":
+            return httpx.Response(
+                200,
+                json={
+                    "id": 456,
+                    "full_name": "acme/private-service",
+                    "description": "Private service",
+                    "default_branch": "main",
+                    "html_url": "https://github.com/acme/private-service",
+                    "private": True,
+                },
+            )
+        if request.url.path == "/repos/acme/private-service/git/trees/main":
+            return httpx.Response(
+                200,
+                json={"sha": "b" * 40, "truncated": False, "tree": [{"path": "README.md", "type": "blob", "size": 6}]},
+            )
+        if request.url.path == "/repos/acme/private-service/contents/README.md":
+            return httpx.Response(200, json={"encoding": "base64", "content": base64.b64encode(b"secret").decode()})
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    async with GitHubClient(http, token=token) as github:
+        inspection = await github.inspect("acme/private-service")
+    await http.aclose()
+
+    assert inspection["repository"]["private"] is True
+    assert inspection["manifests"]["README.md"] == "secret"
+    assert token not in repr(inspection)
+    assert requests == [
+        "/repos/acme/private-service",
+        "/repos/acme/private-service/git/trees/main",
+        "/repos/acme/private-service/contents/README.md",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_inspection_rejects_truncated_repository_trees() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/repos/octo/example":

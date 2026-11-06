@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -14,6 +15,75 @@ from solvyn.api.v1.integrations import GitHubCredentialInput, connect_github_int
 from solvyn.db.models import Integration, IntegrationCredential
 from solvyn.repositories.credentials import CredentialEncryptionUnavailableError, IntegrationCredentialVault
 from solvyn.repositories.github import GitHubClient
+
+
+@pytest.mark.asyncio
+async def test_repository_provider_uses_only_its_linked_organization_credential() -> None:
+    from solvyn.repositories.providers import get_authorized_repository_provider
+
+    organization_id = uuid.uuid4()
+    integration_id = uuid.uuid4()
+    integration = Integration(
+        id=integration_id,
+        organization_id=organization_id,
+        provider="github",
+        external_id="organization-token",
+        is_active=True,
+    )
+
+    class StubDB:
+        async def get(self, model, _integration_id):
+            assert model is Integration
+            return integration
+
+    with patch(
+        "solvyn.repositories.providers.load_organization_github_token",
+        new_callable=AsyncMock,
+        return_value="ghp-private-repo-token",
+    ) as load_token:
+        provider = await get_authorized_repository_provider(
+            "github",
+            StubDB(),  # type: ignore[arg-type]
+            SimpleNamespace(integration_id=integration_id),  # type: ignore[arg-type]
+            organization_id,
+        )
+
+    assert isinstance(provider, GitHubClient)
+    assert provider.http.base_url == httpx.URL("https://api.github.com")
+    assert provider._request_headers == {"Authorization": "Bearer ghp-private-repo-token"}
+    load_token.assert_awaited_once()
+    await provider.__aexit__()
+
+
+@pytest.mark.asyncio
+async def test_repository_provider_rejects_a_credential_linked_to_another_organization() -> None:
+    from solvyn.repositories.credentials import GitHubCredentialNotFoundError
+    from solvyn.repositories.providers import get_authorized_repository_provider
+
+    integration = Integration(
+        id=uuid.uuid4(),
+        organization_id=uuid.uuid4(),
+        provider="github",
+        external_id="organization-token",
+        is_active=True,
+    )
+
+    class StubDB:
+        async def get(self, _model, _integration_id):
+            return integration
+
+    with (
+        patch("solvyn.repositories.providers.load_organization_github_token", new_callable=AsyncMock) as load_token,
+        pytest.raises(GitHubCredentialNotFoundError),
+    ):
+        await get_authorized_repository_provider(
+            "github",
+            StubDB(),  # type: ignore[arg-type]
+            SimpleNamespace(integration_id=integration.id),  # type: ignore[arg-type]
+            uuid.uuid4(),
+        )
+
+    load_token.assert_not_awaited()
 
 
 def test_credential_vault_encrypts_and_supports_rotation() -> None:

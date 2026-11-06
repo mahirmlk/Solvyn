@@ -585,7 +585,7 @@ curl -H "X-API-Key: your-api-key" \
 
 These endpoints require a user JWT in `Authorization: Bearer <access-token>` and membership in the organization that owns the project. Tenant API keys alone cannot connect or inspect repositories.
 
-Repository inspection supports public repositories. Solvyn can write through a connected organization token using bounded branch and commit operations. Repository text and metadata remain untrusted input.
+Repository inspection supports public repositories and private repositories linked to an active organization GitHub token. Solvyn can write through a connected organization token using bounded branch and commit operations. Repository text and metadata remain untrusted input.
 
 ### `GET /api/v1/organizations/{organization_id}/integrations/github`
 
@@ -603,7 +603,7 @@ Generate a Fernet key with the command in `.env.example`. For key rotation, conf
 
 ### `POST /api/v1/projects/{project_id}/repositories`
 
-Connect a public GitHub repository to a project. Requires an organization owner or admin.
+Connect a public or organization-token-authorized private GitHub repository to a project. Requires an organization owner or admin.
 
 ```json
 { "full_name": "owner/repository" }
@@ -619,11 +619,11 @@ Inspect the default branch. Returns repository metadata, revision SHA, file coun
 
 ### Explicit repository context for teammate runs
 
-`POST /api/v1/teammates/{teammate_id}/run` accepts `project_id`, `input_data`, an optional `repository_id`, and up to four optional `repository_paths`. If a repository ID is supplied, it must identify an active GitHub repository connected to the same assigned project. Solvyn fetches a bounded public inspection summary and the explicitly selected text files (up to 1,500 characters each) and adds them to the user-level prompt as untrusted repository data; a fixed system instruction says not to follow instructions found there. Paths must be relative and cannot contain traversal segments. If omitted, no repository fetch occurs. This path provides context for investigation; it does not enable repository edits, sandbox execution, or automatic verification.
+`POST /api/v1/teammates/{teammate_id}/run` accepts `project_id`, `input_data`, an optional `repository_id`, and up to four optional `repository_paths`. If a repository ID is supplied, it must identify an active GitHub repository connected to the same assigned project. Solvyn fetches a bounded inspection summary and the explicitly selected text files (up to 1,500 characters each) and adds them to the user-level prompt as untrusted repository data; a fixed system instruction says not to follow instructions found there. Private repositories require the active organization GitHub token linked to the repository. Paths must be relative and cannot contain traversal segments. If omitted, no repository fetch occurs. This path provides context for investigation; it does not enable repository edits, sandbox execution, or automatic verification.
 
 ### Seed a delegated task workspace from repository files
 
-`POST /api/v1/workflows/executions/{execution_id}/tasks/{task_id}/workspace` continues to accept caller-supplied `files`. Alternatively, send `repository_id` and one to 50 `repository_paths`; the two modes cannot be combined. Repository seeding requires a signed-in organization member, a delegated child task with a matching `TaskHandoff`, and a public active GitHub repository in that handoff's project. The API resolves the repository's default branch once and reads selected regular files at that commit SHA. Symlinks, submodules, `.git` paths, binary or oversized files, and invalid relative paths are rejected. Files are limited to 1 MB each and 16 MiB total. The response and `TaskWorkspace` record include the repository ID, source commit SHA, and selected paths. This is a selected-file snapshot, not a Git clone or worktree.
+`POST /api/v1/workflows/executions/{execution_id}/tasks/{task_id}/workspace` continues to accept caller-supplied `files`. Alternatively, send `repository_id` and one to 50 `repository_paths`; the two modes cannot be combined. Repository seeding requires a signed-in organization member, a delegated child task with a matching `TaskHandoff`, and an active GitHub repository in that handoff's project. Private repositories require the active organization GitHub token linked to the repository. The API resolves the repository's default branch once and reads selected regular files at that commit SHA. Symlinks, submodules, `.git` paths, binary or oversized files, and invalid relative paths are rejected. Files are limited to 1 MB each and 16 MiB total. The response and `TaskWorkspace` record include the repository ID, source commit SHA, and selected paths. This is a selected-file snapshot, not a Git clone or worktree.
 
 ```json
 {
@@ -667,7 +667,7 @@ Open a draft pull request from a `solvyn/...` branch to the repository default b
 
 ### `GET /api/v1/repositories/{repository_id}/pull-requests?state=open&limit=50&page=1`
 
-Fetch a live, paginated public GitHub pull request snapshot. `state` accepts `open`, `closed`, or `all`; `limit` is 1–100 and `page` is 1–100. The response is a point-in-time snapshot and does not persist GitHub records locally.
+Fetch a live, paginated GitHub pull request snapshot. Private repositories require the active organization GitHub integration linked to the repository. `state` accepts `open`, `closed`, or `all`; `limit` is 1–100 and `page` is 1–100. The response is a point-in-time snapshot and does not persist GitHub records locally.
 
 ### `GET /api/v1/repositories/{repository_id}/pull-requests/{number}`
 
