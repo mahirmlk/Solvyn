@@ -253,7 +253,7 @@ async def test_task_verification_is_sandboxed_and_durable(
         Tenant,
         User,
     )
-    from solvyn.db.session import async_session_factory
+    from solvyn.db.session import async_session_factory, bind_tenant_scope
 
     user_id = uuid.uuid4()
     organization_id = uuid.uuid4()
@@ -434,7 +434,7 @@ async def test_acceptance_criteria_require_an_owner_admin_decision(client: Async
     from sqlalchemy import select
 
     from solvyn.db.models import Organization, OrganizationMembership, Tenant, User
-    from solvyn.db.session import async_session_factory, bind_tenant_scope
+    from solvyn.db.session import async_session_factory
 
     workflow = await client.post("/api/v1/workflows/feature/run", json={"requirement": "Track task acceptance criteria"})
     assert workflow.status_code == 200
