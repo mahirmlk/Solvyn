@@ -651,6 +651,7 @@ async def test_feature_workflow_runs_to_completion(client: AsyncClient) -> None:
     assert handoff_response.json()["detail"] == "Teammate is already running; retry this handoff"
 
     async with async_session_factory() as db:
+        await bind_tenant_scope(db, tenant.id)
         await db.execute(
             update(TeammateProfile)
             .where(TeammateProfile.id == teammate_id)

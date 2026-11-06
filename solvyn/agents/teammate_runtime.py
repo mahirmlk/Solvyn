@@ -25,6 +25,7 @@ from solvyn.db.models import (
     TeammateProjectAssignment,
     TeammateStatus,
 )
+from solvyn.db.session import bind_tenant_scope
 from solvyn.repositories.credentials import CredentialEncryptionUnavailableError, GitHubCredentialNotFoundError
 from solvyn.repositories.github import GitHubRepositoryError
 from solvyn.repositories.providers import get_authorized_repository_provider, get_repository_provider
@@ -177,6 +178,9 @@ async def run_teammate(
     handoff_lease_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """Run one registered agent as a persisted teammate on an assigned project."""
+    # Callers must authorize the tenant before invoking this runtime. Bind the
+    # explicit scope as well so reusable/background entry points fail closed.
+    await bind_tenant_scope(db, tenant_id)
     if teammate.tenant_id != tenant_id:
         raise LookupError("Teammate not found")
     if not teammate.is_enabled:
@@ -321,9 +325,14 @@ async def run_teammate(
     finally:
         # Preserve a concurrent pause/disable transition. A disabling request
         # changes status away from BUSY, so this update cannot overwrite it.
+        await bind_tenant_scope(db, tenant_id)
         await db.execute(
             update(TeammateProfile)
-            .where(TeammateProfile.id == teammate.id, TeammateProfile.status == TeammateStatus.BUSY)
+            .where(
+                TeammateProfile.id == teammate.id,
+                TeammateProfile.tenant_id == tenant_id,
+                TeammateProfile.status == TeammateStatus.BUSY,
+            )
             .values(
                 status=case(
                     (TeammateProfile.is_enabled.is_(True), TeammateStatus.IDLE),
