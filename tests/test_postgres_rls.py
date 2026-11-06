@@ -3031,3 +3031,228 @@ async def test_task_workspace_rls_is_tenant_scoped() -> None:
                 await connection.execute(text("DELETE FROM tasks WHERE id = :id"), {"id": task_id})
             await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_legacy_table_rls_is_tenant_scoped_and_checks_parent_links() -> None:
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url.startswith("postgresql+"):
+        pytest.skip("RLS behavior requires PostgreSQL and migrations at head")
+
+    engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
+    tenant_a, tenant_b, user_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    session_a, session_b = uuid.uuid4(), uuid.uuid4()
+    organization_a, organization_b = uuid.uuid4(), uuid.uuid4()
+    project_a, project_b = uuid.uuid4(), uuid.uuid4()
+    agent_a, agent_b = uuid.uuid4(), uuid.uuid4()
+    artifact_a, artifact_b = uuid.uuid4(), uuid.uuid4()
+    message_a, message_b = uuid.uuid4(), uuid.uuid4()
+    membership_a, membership_b = uuid.uuid4(), uuid.uuid4()
+
+    async def set_tenant(connection: AsyncConnection, tenant_id: uuid.UUID) -> None:
+        await connection.execute(
+            text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+            {"tenant_id": str(tenant_id)},
+        )
+
+    try:
+        async with engine.connect() as connection:
+            transaction = await connection.begin()
+            try:
+                await connection.execute(
+                    text(
+                        "INSERT INTO tenants (id, name, slug, api_key_hash) "
+                        "VALUES (:id, :name, :slug, '')"
+                    ),
+                    [
+                        {"id": tenant_a, "name": "Legacy A", "slug": f"rls-legacy-{tenant_a}"},
+                        {"id": tenant_b, "name": "Legacy B", "slug": f"rls-legacy-{tenant_b}"},
+                    ],
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO users (id, email, password_hash) "
+                        "VALUES (:id, :email, 'test-hash')"
+                    ),
+                    {"id": user_id, "email": f"{user_id}@example.test"},
+                )
+                for tenant_id, session_id, organization_id, project_id, suffix in (
+                    (tenant_a, session_a, organization_a, project_a, "a"),
+                    (tenant_b, session_b, organization_b, project_b, "b"),
+                ):
+                    await set_tenant(connection, tenant_id)
+                    await connection.execute(
+                        text("INSERT INTO sessions (id, tenant_id, title) VALUES (:id, :tenant_id, :title)"),
+                        {"id": session_id, "tenant_id": tenant_id, "title": f"Session {suffix}"},
+                    )
+                    await connection.execute(
+                        text(
+                            "INSERT INTO agent_instances (id, tenant_id, agent_type, name) "
+                            "VALUES (:id, :tenant_id, 'engineer', :name)"
+                        ),
+                        {
+                            "id": agent_a if suffix == "a" else agent_b,
+                            "tenant_id": tenant_id,
+                            "name": f"Agent {suffix}",
+                        },
+                    )
+                    await connection.execute(
+                        text(
+                            "INSERT INTO artifacts (id, tenant_id, session_id, agent_type, artifact_type, name, content) "
+                            "VALUES (:id, :tenant_id, :session_id, 'engineer', 'note', :name, 'body')"
+                        ),
+                        {
+                            "id": artifact_a if suffix == "a" else artifact_b,
+                            "tenant_id": tenant_id,
+                            "session_id": session_id,
+                            "name": f"Artifact {suffix}",
+                        },
+                    )
+                    await connection.execute(
+                        text(
+                            "INSERT INTO messages (id, session_id, role, content) "
+                            "VALUES (:id, :session_id, 'user', :content)"
+                        ),
+                        {
+                            "id": message_a if suffix == "a" else message_b,
+                            "session_id": session_id,
+                            "content": f"Message {suffix}",
+                        },
+                    )
+                    await connection.execute(
+                        text(
+                            "INSERT INTO organizations (id, name, slug, tenant_id) "
+                            "VALUES (:id, :name, :slug, :tenant_id)"
+                        ),
+                        {
+                            "id": organization_id,
+                            "name": f"Organization {suffix}",
+                            "slug": f"rls-legacy-org-{suffix}-{organization_id}",
+                            "tenant_id": tenant_id,
+                        },
+                    )
+                    await connection.execute(
+                        text(
+                            "INSERT INTO projects (id, organization_id, tenant_id, name, slug) "
+                            "VALUES (:id, :organization_id, :tenant_id, :name, :slug)"
+                        ),
+                        {
+                            "id": project_id,
+                            "organization_id": organization_id,
+                            "tenant_id": tenant_id,
+                            "name": f"Project {suffix}",
+                            "slug": f"project-{suffix}",
+                        },
+                    )
+                    await connection.execute(
+                        text(
+                            "INSERT INTO project_memberships (id, user_id, project_id, role) "
+                            "VALUES (:id, :user_id, :project_id, 'member')"
+                        ),
+                        {
+                            "id": membership_a if suffix == "a" else membership_b,
+                            "user_id": user_id,
+                            "project_id": project_id,
+                        },
+                    )
+
+                await set_tenant(connection, tenant_a)
+                protected = (
+                    await connection.execute(
+                        text(
+                            "SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class "
+                            "WHERE relname = ANY(:tables) ORDER BY relname"
+                        ),
+                        {"tables": ["agent_instances", "artifacts", "messages", "project_memberships"]},
+                    )
+                ).all()
+                assert protected == [
+                    ("agent_instances", True, True),
+                    ("artifacts", True, True),
+                    ("messages", True, True),
+                    ("project_memberships", True, True),
+                ]
+                for table, row_id in (
+                    ("agent_instances", agent_a),
+                    ("artifacts", artifact_a),
+                    ("messages", message_a),
+                    ("project_memberships", membership_a),
+                ):
+                    assert (
+                        await connection.execute(
+                            text(f"SELECT count(*) FROM {table} WHERE id = :id"), {"id": row_id}
+                        )
+                    ).scalar_one() == 1
+                for table, row_id in (
+                    ("agent_instances", agent_b),
+                    ("artifacts", artifact_b),
+                    ("messages", message_b),
+                    ("project_memberships", membership_b),
+                ):
+                    assert (
+                        await connection.execute(
+                            text(f"SELECT count(*) FROM {table} WHERE id = :id"), {"id": row_id}
+                        )
+                    ).scalar_one() == 0
+
+                await connection.execute(text("SELECT set_config('app.tenant_id', '', true)"))
+                for table in ("agent_instances", "artifacts", "messages", "project_memberships"):
+                    assert (await connection.execute(text(f"SELECT count(*) FROM {table}"))).scalar_one() == 0
+
+                await set_tenant(connection, tenant_a)
+                hidden_mutations = (
+                    ("UPDATE agent_instances SET name = 'hidden' WHERE id = :id", agent_b),
+                    ("DELETE FROM agent_instances WHERE id = :id", agent_b),
+                    ("UPDATE artifacts SET content = 'hidden' WHERE id = :id", artifact_b),
+                    ("DELETE FROM artifacts WHERE id = :id", artifact_b),
+                    ("UPDATE messages SET content = 'hidden' WHERE id = :id", message_b),
+                    ("DELETE FROM messages WHERE id = :id", message_b),
+                    ("UPDATE project_memberships SET role = 'admin' WHERE id = :id", membership_b),
+                    ("DELETE FROM project_memberships WHERE id = :id", membership_b),
+                )
+                for statement, row_id in hidden_mutations:
+                    result = await connection.execute(text(statement), {"id": row_id})
+                    assert result.rowcount == 0
+
+                invalid_inserts = (
+                    (
+                        "INSERT INTO agent_instances (id, tenant_id, agent_type, name) "
+                        "VALUES (:id, :tenant_id, 'engineer', 'forged')",
+                        {"id": uuid.uuid4(), "tenant_id": tenant_b},
+                    ),
+                    (
+                        "INSERT INTO artifacts (id, tenant_id, session_id, agent_type, artifact_type, name, content) "
+                        "VALUES (:id, :tenant_id, :session_id, 'engineer', 'note', 'forged', 'body')",
+                        {"id": uuid.uuid4(), "tenant_id": tenant_a, "session_id": session_b},
+                    ),
+                    (
+                        "INSERT INTO messages (id, session_id, role, content) "
+                        "VALUES (:id, :session_id, 'user', 'forged')",
+                        {"id": uuid.uuid4(), "session_id": session_b},
+                    ),
+                    (
+                        "INSERT INTO project_memberships (id, user_id, project_id, role) "
+                        "VALUES (:id, :user_id, :project_id, 'member')",
+                        {"id": uuid.uuid4(), "user_id": user_id, "project_id": project_b},
+                    ),
+                )
+                for statement, params in invalid_inserts:
+                    savepoint = await connection.begin_nested()
+                    with pytest.raises(DBAPIError):
+                        await connection.execute(text(statement), params)
+                    await savepoint.rollback()
+
+                await set_tenant(connection, tenant_b)
+                assert (
+                    await connection.execute(
+                        text("SELECT count(*) FROM messages WHERE session_id = :session_id"),
+                        {"session_id": session_b},
+                    )
+                ).scalar_one() == 1
+            finally:
+                if transaction.is_active:
+                    await transaction.rollback()
+        await engine.dispose()
+    except Exception:
+        await engine.dispose()
+        raise
