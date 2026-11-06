@@ -41,6 +41,7 @@ from solvyn.db.models import (
     ExecutionGraph as ExecutionGraphModel,
 )
 from solvyn.db.session import async_session_factory, bind_tenant_scope, get_session
+from solvyn.multi_tenant.middleware import tenant_context
 from solvyn.workflows.executor import workflow_executor
 from solvyn.workflows.task_generator import TaskGenerator
 from solvyn.workflows.templates import WORKFLOW_TEMPLATES
@@ -983,15 +984,17 @@ async def create_task_handoff(
         }
 
     try:
-        return await _execute_task_handoff(
-            db,
-            handoff=handoff,
-            child=child,
-            teammate=teammate,
-            tenant_id=tenant_id,
-            input_data=payload.input_data,
-            session_id=str(parent.session_id) if parent.session_id else None,
-        )
+        await bind_tenant_scope(db, tenant_id)
+        with tenant_context.scoped_tenant(tenant_id):
+            return await _execute_task_handoff(
+                db,
+                handoff=handoff,
+                child=child,
+                teammate=teammate,
+                tenant_id=tenant_id,
+                input_data=payload.input_data,
+                session_id=str(parent.session_id) if parent.session_id else None,
+            )
     except HandoffConflictError as exc:
         current = (
             await db.execute(
@@ -1053,15 +1056,17 @@ async def resume_task_handoff(
         raise HTTPException(status_code=409, detail="Assigned teammate is disabled")
 
     try:
-        return await _execute_task_handoff(
-            db,
-            handoff=handoff,
-            child=child,
-            teammate=teammate,
-            tenant_id=tenant_id,
-            input_data=json.loads(handoff.input_data),
-            session_id=str(child.session_id) if child.session_id else None,
-        )
+        await bind_tenant_scope(db, tenant_id)
+        with tenant_context.scoped_tenant(tenant_id):
+            return await _execute_task_handoff(
+                db,
+                handoff=handoff,
+                child=child,
+                teammate=teammate,
+                tenant_id=tenant_id,
+                input_data=json.loads(handoff.input_data),
+                session_id=str(child.session_id) if child.session_id else None,
+            )
     except HandoffConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except HandoffLeaseLostError as exc:

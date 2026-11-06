@@ -13,6 +13,7 @@ from solvyn.agents.schema import ExecutionEdge, ExecutionGraph, ExecutionNode
 from solvyn.db.models import ExecutionGraph as ExecutionGraphModel
 from solvyn.db.models import Session, Task, TaskDependency, Tenant
 from solvyn.db.session import async_session_factory
+from solvyn.multi_tenant.middleware import tenant_context
 from solvyn.workflows.templates import WORKFLOW_TEMPLATES, WorkflowStep
 
 logger = logging.getLogger(__name__)
@@ -63,18 +64,19 @@ class WorkflowExecutor:
                 await self._persist_execution_graph(snapshot, template_name, merged_inputs, tenant_uuid, lease_id)
 
         try:
-            result = await self._execute_with_lease(
-                execution_id,
-                lease_id,
-                tenant_uuid,
-                graph.execute(
-                    session_id=resolved_session_id,
-                    tenant_id=tenant_id,
-                    agent_configs={},
-                    on_checkpoint=persist_checkpoint,
-                    graph_id=execution_id,
-                ),
-            )
+            with tenant_context.scoped_tenant(tenant_uuid):
+                result = await self._execute_with_lease(
+                    execution_id,
+                    lease_id,
+                    tenant_uuid,
+                    graph.execute(
+                        session_id=resolved_session_id,
+                        tenant_id=tenant_id,
+                        agent_configs={},
+                        on_checkpoint=persist_checkpoint,
+                        graph_id=execution_id,
+                    ),
+                )
         except BaseException:
             await self._mark_failed(execution_id, lease_id, tenant_uuid)
             raise
@@ -252,18 +254,19 @@ class WorkflowExecutor:
                 await self._persist_execution_graph(snapshot, template_name, inputs, tenant_uuid, lease_id)
 
         try:
-            result = await self._execute_with_lease(
-                str(execution_id),
-                lease_id,
-                tenant_uuid,
-                graph.execute(
-                    session_id=session_id,
-                    tenant_id=str(tenant_uuid),
-                    on_checkpoint=persist_checkpoint,
-                    graph_id=str(execution_id),
-                    execution_status="resuming",
-                ),
-            )
+            with tenant_context.scoped_tenant(tenant_uuid):
+                result = await self._execute_with_lease(
+                    str(execution_id),
+                    lease_id,
+                    tenant_uuid,
+                    graph.execute(
+                        session_id=session_id,
+                        tenant_id=str(tenant_uuid),
+                        on_checkpoint=persist_checkpoint,
+                        graph_id=str(execution_id),
+                        execution_status="resuming",
+                    ),
+                )
         except BaseException:
             await self._mark_failed(str(execution_id), lease_id, tenant_uuid)
             raise

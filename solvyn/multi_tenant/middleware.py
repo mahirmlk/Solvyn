@@ -1,6 +1,7 @@
 import contextvars
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 
 from fastapi import Request, Response
 from sqlalchemy import select
@@ -91,6 +92,15 @@ class TenantContext:
         self._tenant_role.set(TenantRole.VIEWER)
         self._authenticated_tenant_id.set(None)
         self._user_id.set(None)
+
+    @contextmanager
+    def scoped_tenant(self, tenant_id: uuid.UUID) -> Iterator[None]:
+        """Temporarily bind internal worker work to a resolved tenant ID."""
+        token = self._tenant_id.set(tenant_id)
+        try:
+            yield
+        finally:
+            self._tenant_id.reset(token)
 
 
 tenant_context = TenantContext()
