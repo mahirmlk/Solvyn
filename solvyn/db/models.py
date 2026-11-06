@@ -634,6 +634,19 @@ class MaintenanceSchedule(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
+class WorkflowWorkerHeartbeat(Base):
+    """Latest liveness record for one scheduler worker process."""
+
+    __tablename__ = "workflow_worker_heartbeats"
+
+    worker_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    worker_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    host_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+
 class Repository(Base):
     """A connected git repository; tokens live in encrypted integration storage."""
 

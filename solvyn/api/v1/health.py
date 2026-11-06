@@ -9,18 +9,22 @@ show up under a dedicated group in the generated OpenAPI schema.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
 from sqlalchemy import text as sa_text
 
+from solvyn.db.models import WorkflowWorkerHeartbeat
 from solvyn.db.session import async_session_factory
 from solvyn.message_bus.redis import message_bus
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["health"])
+_WORKER_STALE_AFTER = timedelta(seconds=30)
 
 # Health probes are public, so we do not document the standard 401/403/422
 # responses. We do declare 503 because the deep probe may return it.
@@ -109,3 +113,38 @@ async def deep_health_check() -> JSONResponse:
         status_code=status_code,
         content={"status": "ok" if all_ok else "degraded", "checks": checks},
     )
+
+
+@router.get(
+    "/health/workers",
+    summary="Inspect workflow worker heartbeats",
+    description=(
+        "Returns persisted workflow scheduler worker liveness. A worker is "
+        "healthy when its latest heartbeat is less than 30 seconds old. "
+        "This operator signal does not imply that queued work is being recovered."
+    ),
+)
+async def worker_health_check() -> dict[str, Any]:
+    now = datetime.now(UTC)
+    async with async_session_factory() as session:
+        rows = (await session.execute(select(WorkflowWorkerHeartbeat).order_by(WorkflowWorkerHeartbeat.last_seen_at.desc()).limit(100))).scalars().all()
+
+    workers = []
+    for heartbeat in rows:
+        age_seconds = max(0, int((now - heartbeat.last_seen_at).total_seconds()))
+        healthy = heartbeat.status == "running" and age_seconds < _WORKER_STALE_AFTER.total_seconds()
+        workers.append(
+            {
+                "worker_name": heartbeat.worker_name,
+                "status": heartbeat.status if healthy else ("stale" if heartbeat.status == "running" else heartbeat.status),
+                "healthy": healthy,
+                "age_seconds": age_seconds,
+                "last_seen_at": heartbeat.last_seen_at.isoformat(),
+            }
+        )
+    return {
+        "status": "healthy" if any(worker["healthy"] for worker in workers) else "unhealthy",
+        "healthy_count": sum(1 for worker in workers if worker["healthy"]),
+        "worker_count": len(workers),
+        "workers": workers,
+    }
