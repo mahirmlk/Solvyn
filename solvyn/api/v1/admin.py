@@ -167,6 +167,7 @@ async def _load_tenant_or_404(db: AsyncSession, tenant_id: uuid.UUID) -> Tenant:
     tenant = await db.get(Tenant, tenant_id)
     if tenant is None:
         raise HTTPException(status_code=404, detail=f"Tenant {tenant_id} not found")
+    await bind_tenant_scope(db, tenant.id)
     return tenant
 
 
@@ -250,6 +251,7 @@ async def list_tenants(db: AsyncSession = Depends(get_session)) -> dict[str, Any
 
     tokens_by_tenant: dict[uuid.UUID, tuple[int, float]] = {}
     sessions_by_tenant: dict[uuid.UUID, int] = {}
+    api_keys_by_tenant: dict[uuid.UUID, int] = {}
     for tenant_id in tenant_ids:
         await bind_tenant_scope(db, tenant_id)
         token_row = (
@@ -269,15 +271,17 @@ async def list_tenants(db: AsyncSession = Depends(get_session)) -> dict[str, Any
             ).scalar_one()
             or 0
         )
-
-    api_keys_rows = (
-        await db.execute(
-            select(ApiKey.tenant_id, sqlfunc.count(ApiKey.id))
-            .where(ApiKey.tenant_id.in_(tenant_ids), ApiKey.revoked_at.is_(None))
-            .group_by(ApiKey.tenant_id)
+        api_keys_by_tenant[tenant_id] = int(
+            (
+                await db.execute(
+                    select(sqlfunc.count(ApiKey.id)).where(
+                        ApiKey.tenant_id == tenant_id,
+                        ApiKey.revoked_at.is_(None),
+                    )
+                )
+            ).scalar_one()
+            or 0
         )
-    ).all()
-    api_keys_by_tenant = {row[0]: int(row[1] or 0) for row in api_keys_rows}
 
     items = [
         _tenant_to_dict(
@@ -327,6 +331,7 @@ async def create_tenant(payload: TenantCreate, db: AsyncSession = Depends(get_se
 
     db.add(tenant)
     await db.flush()  # populate tenant.id before creating the ApiKey row
+    await bind_tenant_scope(db, tenant.id)
 
     api_key = ApiKey(
         tenant_id=tenant.id,
@@ -464,6 +469,7 @@ async def create_api_key(tenant_id: uuid.UUID, payload: ApiKeyCreate, db: AsyncS
     )
     db.add(api_key)
     await db.commit()
+    await bind_tenant_scope(db, tenant.id)
     await db.refresh(api_key)
 
     return {
@@ -505,7 +511,15 @@ async def list_api_keys(tenant_id: uuid.UUID, db: AsyncSession = Depends(get_ses
 )
 async def revoke_api_key(key_id: uuid.UUID, db: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     """Revoke an API key by setting its `revoked_at` timestamp."""
-    api_key = await db.get(ApiKey, key_id)
+    tenant_ids = (await db.execute(select(Tenant.id).order_by(Tenant.id))).scalars().all()
+    api_key: ApiKey | None = None
+    for tenant_id in tenant_ids:
+        await bind_tenant_scope(db, tenant_id)
+        api_key = (
+            await db.execute(select(ApiKey).where(ApiKey.id == key_id))
+        ).scalar_one_or_none()
+        if api_key is not None:
+            break
     if api_key is None:
         raise HTTPException(status_code=404, detail=f"API key {key_id} not found")
 
@@ -513,6 +527,7 @@ async def revoke_api_key(key_id: uuid.UUID, db: AsyncSession = Depends(get_sessi
         api_key.revoked_at = datetime.now(UTC)
         db.add(api_key)
         await db.commit()
+        await bind_tenant_scope(db, api_key.tenant_id)
         await db.refresh(api_key)
 
     return {

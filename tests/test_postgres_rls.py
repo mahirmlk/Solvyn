@@ -38,6 +38,7 @@ from solvyn.db.models import (
     TeammateProfile,
     TeammateProjectAssignment,
     TeammateToolInvocation,
+    TenantRole,
     TokenUsage,
     VerificationRun,
     Workspace,
@@ -2656,12 +2657,14 @@ async def test_api_key_rls_preserves_unscoped_key_authentication(
     if not database_url.startswith("postgresql+"):
         pytest.skip("RLS behavior requires PostgreSQL and migrations at head")
 
+    from solvyn.api.v1 import admin
     from solvyn.multi_tenant import auth as tenant_auth
 
     engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
     api_key_a, api_key_b = uuid.uuid4(), uuid.uuid4()
+    created_tenant_id: uuid.UUID | None = None
     secret_a, secret_b = f"rls-api-key-{tenant_a}", f"rls-api-key-{tenant_b}"
     monkeypatch.setattr(tenant_auth, "async_session_factory", sessions)
 
@@ -2751,18 +2754,54 @@ async def test_api_key_rls_preserves_unscoped_key_authentication(
         tenant_context.set(tenant_b, "rls-api-key-b")
         async with sessions() as session:
             assert (await session.execute(select(ApiKey.id))).scalars().all() == [api_key_b]
+
+        tenant_context.set(tenant_a, "rls-api-key-admin", TenantRole.ADMIN)
+        async with sessions() as session:
+            tenant_list = await admin.list_tenants(session)
+            tenant_items = {uuid.UUID(item["id"]): item for item in tenant_list["tenants"]}
+            assert tenant_items[tenant_a]["api_keys_count"] == 1
+            assert tenant_items[tenant_b]["api_keys_count"] == 1
+
+            created_tenant = await admin.create_tenant(
+                admin.TenantCreate(name="Admin-created", slug=f"rls-admin-created-{uuid.uuid4().hex}"),
+                session,
+            )
+            created_tenant_id = uuid.UUID(created_tenant["id"])
+            created_key = await admin.create_api_key(
+                tenant_b,
+                admin.ApiKeyCreate(name="Cross-tenant admin key"),
+                session,
+            )
+            assert uuid.UUID(created_key["tenant_id"]) == tenant_b
+            listed_keys = await admin.list_api_keys(tenant_b, session)
+            assert listed_keys["count"] == 2
+            revoked = await admin.revoke_api_key(uuid.UUID(created_key["id"]), session)
+            assert revoked["revoked"] is True
+            assert uuid.UUID(revoked["tenant_id"]) == tenant_b
+
+            tenant_list = await admin.list_tenants(session)
+            tenant_items = {uuid.UUID(item["id"]): item for item in tenant_list["tenants"]}
+            assert tenant_items[tenant_a]["api_keys_count"] == 1
+            assert tenant_items[tenant_b]["api_keys_count"] == 1
+            assert tenant_items[created_tenant_id]["api_keys_count"] == 1
     finally:
         tenant_context.clear()
         async with engine.begin() as connection:
-            for tenant_id, api_key_id in ((tenant_a, api_key_a), (tenant_b, api_key_b)):
+            for tenant_id in (tenant_a, tenant_b, created_tenant_id):
+                if tenant_id is None:
+                    continue
                 await connection.execute(
                     text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
                     {"tenant_id": str(tenant_id)},
                 )
-                await connection.execute(text("DELETE FROM api_keys WHERE id = :id"), {"id": api_key_id})
+                await connection.execute(text("DELETE FROM api_keys WHERE tenant_id = :id"), {"id": tenant_id})
             await connection.execute(
                 text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b}
             )
+            if created_tenant_id is not None:
+                await connection.execute(
+                    text("DELETE FROM tenants WHERE id = :id"), {"id": created_tenant_id}
+                )
         await engine.dispose()
 
 
