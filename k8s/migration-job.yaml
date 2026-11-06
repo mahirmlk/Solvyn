@@ -21,6 +21,6 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: solvyn-secrets
-                  key: DATABASE_URL
+                  key: MIGRATION_DATABASE_URL
                   optional: true
       restartPolicy: OnFailure

@@ -55,16 +55,29 @@ jobs:
           pip install -e ".[dev]"
       - name: Initialize test database
         run: |
+          PGPASSWORD=solvyn psql -h localhost -U solvyn -d solvyn -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE solvyn_migrator LOGIN PASSWORD 'solvyn_migrator' NOSUPERUSER NOBYPASSRLS;
+          CREATE ROLE solvyn_runtime LOGIN PASSWORD 'solvyn_runtime' NOSUPERUSER NOBYPASSRLS;
+          ALTER DATABASE solvyn OWNER TO solvyn_migrator;
+          ALTER SCHEMA public OWNER TO solvyn_migrator;
+          GRANT CONNECT ON DATABASE solvyn TO solvyn_runtime;
+          GRANT USAGE ON SCHEMA public TO solvyn_runtime;
+          ALTER DEFAULT PRIVILEGES FOR ROLE solvyn_migrator IN SCHEMA public
+            GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO solvyn_runtime;
+          ALTER DEFAULT PRIVILEGES FOR ROLE solvyn_migrator IN SCHEMA public
+            GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO solvyn_runtime;
+          SQL
           alembic upgrade head
           python tests/seed_ci_tenant.py
         env:
-          DATABASE_URL: postgresql+asyncpg://solvyn:solvyn@localhost:5432/solvyn
+          DATABASE_URL: postgresql+asyncpg://solvyn_runtime:solvyn_runtime@localhost:5432/solvyn
+          MIGRATION_DATABASE_URL: postgresql+asyncpg://solvyn_migrator:solvyn_migrator@localhost:5432/solvyn
           REDIS_URL: redis://localhost:6379/0
           API_KEY_SECRET: test-secret-key-for-ci-only
       - name: Run tests
         run: pytest tests/ -v --cov=solvyn
         env:
-          DATABASE_URL: postgresql+asyncpg://solvyn:solvyn@localhost:5432/solvyn
+          DATABASE_URL: postgresql+asyncpg://solvyn_runtime:solvyn_runtime@localhost:5432/solvyn
           REDIS_URL: redis://localhost:6379/0
           API_KEY_SECRET: test-secret-key-for-ci-only
       - name: Check for dependency vulnerabilities

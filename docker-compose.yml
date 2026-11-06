@@ -18,15 +18,20 @@ services:
   db:
     image: pgvector/pgvector:pg16
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-solvyn}
+      POSTGRES_USER: ${POSTGRES_USER:-solvyn_bootstrap}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-solvyn}
+      POSTGRES_MIGRATION_USER: ${POSTGRES_MIGRATION_USER:-solvyn_migrator}
+      POSTGRES_MIGRATION_PASSWORD: ${POSTGRES_MIGRATION_PASSWORD:-solvyn_migrator}
+      POSTGRES_APP_USER: ${POSTGRES_APP_USER:-solvyn_runtime}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:-solvyn_runtime}
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./scripts/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U solvyn"]
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
       timeout: 5s
       retries: 5

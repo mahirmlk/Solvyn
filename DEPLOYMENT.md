@@ -149,7 +149,7 @@ docker compose down -v
 The production-oriented stack builds the API and frontend images, runs Alembic migrations once before the API and worker start, and keeps PostgreSQL and Redis off public interfaces. PostgreSQL is optionally reachable on a loopback-only host port for operator backups; Redis remains only on the private Compose network. It uses persistent named volumes, container health checks, restart policies, and CPU/memory limits. The API and frontend ports also bind to loopback so a host TLS reverse proxy can publish them.
 
 1. Install Docker Engine with the Compose v2 plugin and PostgreSQL client tools (`pg_dump`, `psql`, and `gzip`) on the backup operator's host.
-2. Prepare a secrets file and replace every placeholder. Use separate random values for API and JWT signing, a valid Fernet key for integration encryption, and URL-encode special characters in the database URL password. Keep JSON-valued settings such as `ALLOWED_ORIGINS` quoted as in the example; quote `DATABASE_URL` if its encoded value contains shell-sensitive characters:
+2. Prepare a secrets file and replace every placeholder. Use separate random values for the PostgreSQL bootstrap administrator, migration role, and restricted runtime role; API and JWT signing; and a valid Fernet key for integration encryption. URL-encode special characters in both database URLs. Keep JSON-valued settings such as `ALLOWED_ORIGINS` quoted as in the example; quote URLs if encoded values contain shell-sensitive characters. The PostgreSQL init script creates separate `NOSUPERUSER NOBYPASSRLS` roles: the migrator owns database objects and the API/worker runtime role receives data access only. Alembic uses `MIGRATION_DATABASE_URL`; API and worker use `DATABASE_URL`. Never point either variable at the bootstrap administrator:
 
    ```bash
    cp .env.production.example .env.production
@@ -159,7 +159,7 @@ The production-oriented stack builds the API and frontend images, runs Alembic m
    python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
    ```
 
-3. Set `ALLOWED_ORIGINS` to the public HTTPS origin and set the database connection string to host `db`, the configured database name, and the URL-encoded password. Set at least one LLM provider key if workflows need model access. Do not commit `.env.production`.
+3. Set `ALLOWED_ORIGINS` to the public HTTPS origin. Set `DATABASE_URL` to `POSTGRES_APP_USER` and `MIGRATION_DATABASE_URL` to `POSTGRES_MIGRATION_USER`, both at host `db` with their URL-encoded passwords. Set at least one LLM provider key if workflows need model access. Do not commit `.env.production`.
 4. Start the stack:
 
    ```bash
@@ -171,6 +171,8 @@ The production-oriented stack builds the API and frontend images, runs Alembic m
 5. Terminate TLS at a reverse proxy and proxy the public hostname to `127.0.0.1:3000`. Keep the API port private to the host/proxy. Do not expose PostgreSQL or Redis publicly.
 
 The workflow scheduler runs in exactly one `worker` service; the API disables its in-process scheduler. Do not scale the worker through this Compose file. The app containers run as non-root. The stack does not create an off-host backup, TLS proxy, firewall, secret manager, or disaster-recovery policy; operators must configure and periodically exercise those controls.
+
+The `docker-entrypoint-initdb.d` role setup runs only when PostgreSQL initializes an empty data directory. For an existing volume, provision separate `NOSUPERUSER NOBYPASSRLS` migration and runtime roles, transfer database, schema, table, and sequence ownership to the migration role, grant the runtime role CRUD and sequence privileges plus default privileges for future tables, and set both database URLs before enabling this migration. Update the role setup on existing Kubernetes volumes as a separate operator migration; init scripts are not replayed for initialized data directories. PostgreSQL superusers always bypass RLS, even when a table uses `FORCE ROW LEVEL SECURITY`.
 
 For status and explicitly outstanding product blockers, see [Shipment readiness](./docs/SHIPMENT_READINESS.md).
 
@@ -243,8 +245,8 @@ make deploy
 | Resource | Name | Details |
 |----------|------|---------|
 | Namespace | `solvyn` | Isolates all Solvyn resources |
-| ConfigMap | `solvyn-config` | DATABASE_URL, REDIS_URL, LLM_DEFAULT_PROVIDER, LOG_LEVEL, HOST, PORT |
-| Secret | `solvyn-secrets` | POSTGRES_PASSWORD, OPENROUTER_API_KEY, GROQ_API_KEY, DEEPSEEK_API_KEY, API_KEY_SECRET |
+| ConfigMap | `solvyn-config` | REDIS_URL, LLM_DEFAULT_PROVIDER, LOG_LEVEL, HOST, PORT |
+| Secret | `solvyn-secrets` | Bootstrap/migration/runtime passwords, DATABASE_URL, MIGRATION_DATABASE_URL, OPENROUTER_API_KEY, GROQ_API_KEY, DEEPSEEK_API_KEY, API_KEY_SECRET |
 | PVC | `solvyn-db-pvc` | 50Gi, ReadWriteOnce, standard storage class |
 | Deployment | `solvyn-api` | 2 replicas, 500m-2000m CPU, 512Mi-2Gi memory |
 | Deployment | `solvyn-db` | 1 replica, pgvector/pgvector:pg16, 500m-2000m CPU, 1Gi-4Gi memory |
@@ -294,7 +296,8 @@ annotations:
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `DATABASE_URL` | `postgresql+asyncpg://solvyn:solvyn@localhost:5432/solvyn` | Yes | PostgreSQL connection string with asyncpg driver |
+| `DATABASE_URL` | `postgresql+asyncpg://solvyn_runtime:solvyn_runtime@localhost:5432/solvyn` | Yes | PostgreSQL connection string for a non-superuser runtime role with asyncpg driver |
+| `MIGRATION_DATABASE_URL` | unset | For migrations | PostgreSQL connection string for the separate schema-owner migration role |
 | `REDIS_URL` | `redis://localhost:6379/0` | Yes | Redis connection string |
 | `OPENROUTER_API_KEY` | `""` | For OpenRouter | OpenRouter API key (format: `sk-or-v1-...`) |
 | `GROQ_API_KEY` | `""` | For Groq | Groq API key (format: `gsk_...`) |
@@ -316,7 +319,6 @@ Non-secret values go in the ConfigMap (`k8s/configmap.yaml`):
 
 ```yaml
 data:
-  DATABASE_URL: "postgresql+asyncpg://solvyn:$(POSTGRES_PASSWORD)@solvyn-db:5432/solvyn"
   REDIS_URL: "redis://solvyn-redis:6379/0"
   LLM_DEFAULT_PROVIDER: "openrouter"
   LLM_DEFAULT_MODEL: "openai/gpt-4o"
@@ -329,7 +331,9 @@ Sensitive values go in the Secret (`k8s/secrets.yaml`):
 
 ```yaml
 stringData:
-  POSTGRES_PASSWORD: "<strong-password>"
+  POSTGRES_PASSWORD: "<bootstrap-admin-password>"
+  POSTGRES_APP_PASSWORD: "<different-runtime-role-password>"
+  DATABASE_URL: "postgresql+asyncpg://solvyn_runtime:URL_ENCODED_RUNTIME_PASSWORD@solvyn-db:5432/solvyn"
   OPENROUTER_API_KEY: "sk-or-v1-..."
   GROQ_API_KEY: "gsk_..."
   DEEPSEEK_API_KEY: "sk-..."
@@ -345,8 +349,10 @@ stringData:
 Solvyn uses Alembic with asyncpg driver for PostgreSQL migrations:
 
 ```bash
-# Ensure DATABASE_URL is set
-export DATABASE_URL=postgresql+asyncpg://solvyn:solvyn@localhost:5432/solvyn
+# Ensure DATABASE_URL is set to the restricted runtime role and
+# MIGRATION_DATABASE_URL to the separate schema-owner role.
+export DATABASE_URL=postgresql+asyncpg://solvyn_runtime:solvyn_runtime@localhost:5432/solvyn
+export MIGRATION_DATABASE_URL=postgresql+asyncpg://solvyn_migrator:solvyn_migrator@localhost:5432/solvyn
 
 # Apply all pending migrations
 alembic upgrade head
@@ -371,7 +377,7 @@ alembic current
 ```ini
 [alembic]
 script_location = solvyn/db/migrations
-sqlalchemy.url = postgresql+asyncpg://solvyn:solvyn@localhost:5432/solvyn
+sqlalchemy.url = postgresql+asyncpg://solvyn_runtime:solvyn_runtime@localhost:5432/solvyn
 ```
 
 > **⚠️ HUMAN INPUT NEEDED**: No migration is run automatically at startup. For production, add a pre-start script or init container that runs `alembic upgrade head`.
