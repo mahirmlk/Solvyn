@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import select, text
 
 from solvyn.db.models import Memory as MemoryModel
-from solvyn.db.session import async_session_factory
+from solvyn.db.session import async_session_factory, bind_tenant_scope
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,12 @@ class AgentMemory:
         self.tenant_id = tenant_id
         self.session_id = session_id
 
+    def _tenant_uuid(self) -> uuid.UUID:
+        tenant_uuid = _to_uuid(self.tenant_id)
+        if tenant_uuid is None:
+            raise ValueError("Agent memory requires a tenant ID")
+        return tenant_uuid
+
     def _prefixed_key(self, key: str) -> str:
         if key.startswith(self.MEMORY_PREFIX):
             return key
@@ -47,11 +53,13 @@ class AgentMemory:
         ttl_seconds: int | None = None,
     ) -> None:
         prefixed = self._prefixed_key(key)
+        tenant_uuid = self._tenant_uuid()
         async with async_session_factory() as session:
+            await bind_tenant_scope(session, tenant_uuid)
             # Store embedding directly as Vector data (not JSON string)
             record = MemoryModel(
                 id=uuid.uuid4(),
-                tenant_id=_to_uuid(self.tenant_id),
+                tenant_id=tenant_uuid,
                 session_id=_to_uuid(self.session_id),
                 agent_type=agent_type,
                 key=prefixed,
@@ -64,9 +72,12 @@ class AgentMemory:
 
     async def retrieve(self, agent_type: str, key: str) -> Any | None:
         prefixed = self._prefixed_key(key)
+        tenant_uuid = self._tenant_uuid()
         async with async_session_factory() as session:
+            await bind_tenant_scope(session, tenant_uuid)
             result = await session.execute(
                 select(MemoryModel)
+                .where(MemoryModel.tenant_id == tenant_uuid)
                 .where(MemoryModel.agent_type == agent_type)
                 .where(MemoryModel.key == prefixed)
                 .order_by(MemoryModel.created_at.desc())
@@ -117,12 +128,15 @@ class AgentMemory:
         limit: int,
     ) -> list[dict[str, Any]]:
         try:
+            tenant_uuid = self._tenant_uuid()
             async with async_session_factory() as session:
+                await bind_tenant_scope(session, tenant_uuid)
                 sql = text("""
                     SELECT id, agent_type, key, value, embedding, created_at,
                            1 - (embedding <=> :query_embedding) AS similarity
                     FROM memory
-                    WHERE agent_type = :agent_type
+                    WHERE tenant_id = :tenant_id
+                      AND agent_type = :agent_type
                       AND embedding IS NOT NULL
                     ORDER BY embedding <=> :query_embedding
                     LIMIT :limit
@@ -131,6 +145,7 @@ class AgentMemory:
                     sql,
                     {
                         "agent_type": agent_type,
+                        "tenant_id": tenant_uuid,
                         "query_embedding": query_embedding,  # Direct Vector data
                         "limit": limit,
                     },
@@ -153,9 +168,12 @@ class AgentMemory:
             raise
 
     async def _keyword_search(self, agent_type: str, query: str, limit: int) -> list[dict[str, Any]]:
+        tenant_uuid = self._tenant_uuid()
         async with async_session_factory() as session:
+            await bind_tenant_scope(session, tenant_uuid)
             stmt = (
                 select(MemoryModel)
+                .where(MemoryModel.tenant_id == tenant_uuid)
                 .where(MemoryModel.agent_type == agent_type)
                 .where(MemoryModel.key.like(f"{self.MEMORY_PREFIX}%"))
                 .order_by(MemoryModel.created_at.desc())
@@ -176,17 +194,29 @@ class AgentMemory:
             ]
 
     async def list_keys(self, agent_type: str) -> list[str]:
+        tenant_uuid = self._tenant_uuid()
         async with async_session_factory() as session:
+            await bind_tenant_scope(session, tenant_uuid)
             result = await session.execute(
-                select(MemoryModel.key).where(MemoryModel.agent_type == agent_type).where(MemoryModel.key.like(f"{self.MEMORY_PREFIX}%")).distinct().limit(100),
+                select(MemoryModel.key)
+                .where(MemoryModel.tenant_id == tenant_uuid)
+                .where(MemoryModel.agent_type == agent_type)
+                .where(MemoryModel.key.like(f"{self.MEMORY_PREFIX}%"))
+                .distinct()
+                .limit(100),
             )
             return [row[0] for row in result.all()]
 
     async def delete(self, agent_type: str, key: str) -> bool:
         prefixed = self._prefixed_key(key)
+        tenant_uuid = self._tenant_uuid()
         async with async_session_factory() as session:
+            await bind_tenant_scope(session, tenant_uuid)
             result = await session.execute(
-                select(MemoryModel).where(MemoryModel.agent_type == agent_type).where(MemoryModel.key == prefixed),
+                select(MemoryModel)
+                .where(MemoryModel.tenant_id == tenant_uuid)
+                .where(MemoryModel.agent_type == agent_type)
+                .where(MemoryModel.key == prefixed),
             )
             record = result.scalar_one_or_none()
             if record:
@@ -199,11 +229,14 @@ class AgentMemory:
         from datetime import UTC, datetime, timedelta
 
         cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
+        tenant_uuid = self._tenant_uuid()
         total_deleted = 0
         while True:
             async with async_session_factory() as session:
+                await bind_tenant_scope(session, tenant_uuid)
                 result = await session.execute(
                     select(MemoryModel)
+                    .where(MemoryModel.tenant_id == tenant_uuid)
                     .where(MemoryModel.agent_type == agent_type)
                     .where(MemoryModel.key.like(f"{self.MEMORY_PREFIX}%"))
                     .where(MemoryModel.created_at < cutoff)

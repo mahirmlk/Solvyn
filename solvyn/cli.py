@@ -481,9 +481,20 @@ def audit(
     """Show audit log entries."""
 
     async def _show_audit() -> None:
+        from solvyn.config import settings
         from solvyn.observability.audit import audit_logger
 
-        entries = await audit_logger.search(action=action or None, agent_type=agent or None, limit=limit)
+        try:
+            tenant_id = await audit_logger.resolve_tenant_id(settings.default_tenant_id)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/]")
+            return
+        entries = await audit_logger.search(
+            action=action or None,
+            agent_type=agent or None,
+            limit=limit,
+            tenant_id=tenant_id,
+        )
         if not entries:
             console.print("[yellow]No audit entries found.[/]")
             return

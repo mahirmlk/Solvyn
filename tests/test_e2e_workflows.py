@@ -1006,7 +1006,7 @@ async def test_audit_search_filters_records_by_tenant() -> None:
     from sqlalchemy import delete, select
 
     from solvyn.db.models import Memory, Tenant
-    from solvyn.db.session import async_session_factory
+    from solvyn.db.session import async_session_factory, bind_tenant_scope
     from solvyn.observability.audit import AuditLogger
 
     audit_id = f"audit:{uuid.uuid4()}"
@@ -1018,6 +1018,7 @@ async def test_audit_search_filters_records_by_tenant() -> None:
         db.add(other_tenant)
         await db.flush()
         now = datetime.now(UTC)
+        await bind_tenant_scope(db, tenant.id)
         db.add_all(
             [
                 Memory(
@@ -1026,13 +1027,6 @@ async def test_audit_search_filters_records_by_tenant() -> None:
                     key=audit_id,
                     value='{"action":"wanted.action"}',
                     created_at=now - timedelta(minutes=1),
-                ),
-                Memory(
-                    tenant_id=other_tenant.id,
-                    agent_type="qa-engineer",
-                    key=other_audit_id,
-                    value='{"action":"wanted.action"}',
-                    created_at=now + timedelta(minutes=1),
                 ),
                 Memory(
                     tenant_id=tenant.id,
@@ -1044,13 +1038,30 @@ async def test_audit_search_filters_records_by_tenant() -> None:
             ]
         )
         await db.commit()
+    async with async_session_factory() as db:
+        await bind_tenant_scope(db, other_tenant.id)
+        db.add(
+            Memory(
+                tenant_id=other_tenant.id,
+                agent_type="qa-engineer",
+                key=other_audit_id,
+                value='{"action":"wanted.action"}',
+                created_at=now + timedelta(minutes=1),
+            )
+        )
+        await db.commit()
 
     try:
         entries = await AuditLogger().search(tenant_id=tenant.id, action="wanted.action", limit=1)
         assert [entry["id"] for entry in entries] == [audit_id]
     finally:
         async with async_session_factory() as db:
-            await db.execute(delete(Memory).where(Memory.key.in_([audit_id, other_audit_id, newer_id])))
+            await bind_tenant_scope(db, tenant.id)
+            await db.execute(delete(Memory).where(Memory.key.in_([audit_id, newer_id])))
+            await db.commit()
+        async with async_session_factory() as db:
+            await bind_tenant_scope(db, other_tenant.id)
+            await db.execute(delete(Memory).where(Memory.key == other_audit_id))
             await db.execute(delete(Tenant).where(Tenant.id == other_tenant.id))
             await db.commit()
 

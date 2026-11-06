@@ -6,8 +6,8 @@ from typing import Any
 
 from sqlalchemy import select
 
-from solvyn.db.models import Memory
-from solvyn.db.session import async_session_factory
+from solvyn.db.models import Memory, Tenant
+from solvyn.db.session import async_session_factory, bind_tenant_scope
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,20 @@ class AuditLogger:
 
     AUDIT_PREFIX = "audit:"
 
+    async def resolve_tenant_id(self, tenant_ref: str) -> uuid.UUID:
+        """Resolve a configured tenant UUID or slug for local audit access."""
+        try:
+            tenant_uuid = uuid.UUID(tenant_ref)
+        except ValueError:
+            tenant_uuid = None
+        async with async_session_factory() as db:
+            query = select(Tenant.id).where(Tenant.is_active.is_(True))
+            query = query.where(Tenant.id == tenant_uuid) if tenant_uuid else query.where(Tenant.slug == tenant_ref)
+            resolved_id = (await db.execute(query)).scalar_one_or_none()
+        if resolved_id is None:
+            raise ValueError("Configured audit tenant does not exist or is inactive")
+        return resolved_id
+
     async def log(
         self,
         action: str,
@@ -52,10 +66,12 @@ class AuditLogger:
         }
 
         try:
+            tenant_uuid = await self.resolve_tenant_id(tenant_id)
             async with async_session_factory() as db:
+                await bind_tenant_scope(db, tenant_uuid)
                 memory_record = Memory(
                     id=uuid.uuid4(),
-                    tenant_id=_to_uuid(tenant_id),
+                    tenant_id=tenant_uuid,
                     session_id=_to_uuid(session_id),
                     agent_type=agent_type,
                     key=audit_id,
@@ -75,12 +91,13 @@ class AuditLogger:
         agent_type: str | None = None,
         session_id: str | None = None,
         limit: int = 50,
-        tenant_id: uuid.UUID | None = None,
+        *,
+        tenant_id: uuid.UUID,
     ) -> list[dict[str, Any]]:
         async with async_session_factory() as db:
+            await bind_tenant_scope(db, tenant_id)
             query = select(Memory).where(Memory.key.like(f"{self.AUDIT_PREFIX}%"))
-            if tenant_id is not None:
-                query = query.where(Memory.tenant_id == tenant_id)
+            query = query.where(Memory.tenant_id == tenant_id)
             if agent_type:
                 query = query.where(Memory.agent_type == agent_type)
             if session_id:
