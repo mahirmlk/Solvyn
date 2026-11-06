@@ -593,9 +593,11 @@ async def test_approval_rls_is_tenant_and_organization_scoped() -> None:
                     {"tenant_id": str(tenant_id)},
                 )
                 await connection.execute(text("DELETE FROM approvals WHERE id = :id"), {"id": approval_id})
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
             await connection.execute(
                 text("DELETE FROM projects WHERE id IN (:a, :other)"), {"a": project_a, "other": project_a_other}
             )
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
             await connection.execute(
                 text("DELETE FROM organizations WHERE id IN (:a, :other, :b)"),
                 {"a": organization_a, "other": organization_a_other, "b": organization_b},
@@ -770,10 +772,13 @@ async def test_proactive_data_rls_is_tenant_and_organization_scoped() -> None:
                 )
                 await connection.execute(text("DELETE FROM proactive_events WHERE id = :id"), {"id": event_id})
                 await connection.execute(text("DELETE FROM maintenance_schedules WHERE id = :id"), {"id": schedule_id})
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
             await connection.execute(
-                text("DELETE FROM projects WHERE id IN (:a, :other, :b)"),
-                {"a": project_a, "other": project_a_other, "b": project_b},
+                text("DELETE FROM projects WHERE id IN (:a, :other)"),
+                {"a": project_a, "other": project_a_other},
             )
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
+            await connection.execute(text("DELETE FROM projects WHERE id = :b"), {"b": project_b})
             await connection.execute(
                 text("DELETE FROM organizations WHERE id IN (:a, :other, :b)"),
                 {"a": organization_a, "other": organization_a_other, "b": organization_b},
@@ -1505,7 +1510,10 @@ async def test_teammate_memory_rls_scopes_tenant_and_assignment_relationships() 
             await connection.execute(text("DELETE FROM teammate_memory WHERE id = :id"), {"id": memory_b})
             await connection.execute(text("DELETE FROM teammate_project_assignments WHERE teammate_id IN (:a, :b)"), {"a": teammate_a, "b": teammate_b})
             await connection.execute(text("DELETE FROM teammate_profiles WHERE id IN (:a, :b)"), {"a": teammate_a, "b": teammate_b})
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
             await connection.execute(text("DELETE FROM projects WHERE id IN (:a, :b, :unassigned)"), {"a": project_a, "b": project_b, "unassigned": project_unassigned})
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
+            await connection.execute(text("DELETE FROM projects WHERE id = :id"), {"id": project_b})
             await connection.execute(text("DELETE FROM organizations WHERE id IN (:a, :b)"), {"a": org_a, "b": org_b})
             await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
         await engine.dispose()
@@ -1661,7 +1669,10 @@ async def test_task_handoff_rls_is_tenant_scoped_and_validates_relationships() -
                 await connection.execute(text("DELETE FROM tasks WHERE id = :id"), {"id": child_id})
                 await connection.execute(text("DELETE FROM tasks WHERE id = :id"), {"id": parent_id})
             await connection.execute(text("DELETE FROM teammate_profiles WHERE id IN (:a, :b)"), {"a": teammate_a, "b": teammate_b})
-            await connection.execute(text("DELETE FROM projects WHERE id IN (:a, :b)"), {"a": project_a, "b": project_b})
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
+            await connection.execute(text("DELETE FROM projects WHERE id = :id"), {"id": project_a})
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
+            await connection.execute(text("DELETE FROM projects WHERE id = :id"), {"id": project_b})
             await connection.execute(text("DELETE FROM organizations WHERE id IN (:a, :b)"), {"a": org_a, "b": org_b})
             await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
         await engine.dispose()
