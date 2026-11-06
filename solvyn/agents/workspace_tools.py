@@ -472,6 +472,7 @@ class TeammateWorkspaceToolRuntime:
             requested_by=teammate.name,
         )
         self.db.add(run)
+        await self.db.flush()
         self.db.add(approval)
         await self.db.commit()
         return {

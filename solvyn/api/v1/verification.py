@@ -714,6 +714,7 @@ async def run_task_verification(
         requested_by=str(tenant_context.user_id or "User"),
     )
     db.add(run)
+    await db.flush()
     db.add(approval)
     await db.commit()
     await db.refresh(run)

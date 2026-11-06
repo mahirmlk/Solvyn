@@ -55,6 +55,9 @@ class _Session:
     async def commit(self) -> None:
         return None
 
+    async def flush(self) -> None:
+        return None
+
     async def refresh(self, _record) -> None:
         return None
 
