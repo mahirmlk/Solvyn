@@ -43,6 +43,16 @@ metrics_handler = Metrics()
 metrics_middleware = MetricsMiddleware()
 
 
+async def _resolve_active_tenant(db: AsyncSession, tenant_ref: str) -> Tenant | None:
+    try:
+        tenant_uuid = uuid.UUID(tenant_ref)
+    except ValueError:
+        query = select(Tenant).where(Tenant.slug == tenant_ref, Tenant.is_active.is_(True))
+    else:
+        query = select(Tenant).where(Tenant.id == tenant_uuid, Tenant.is_active.is_(True))
+    return (await db.execute(query)).scalar_one_or_none()
+
+
 @router.get(
     "/metrics",
     summary="Prometheus metrics",
@@ -172,18 +182,7 @@ async def get_session_analytics(session_id: str, db: AsyncSession = Depends(get_
         ):
             raise HTTPException(status_code=401, detail="Analytics tenant is not configured")
         tenant_ref = settings.default_tenant_id
-        try:
-            tenant_uuid = uuid.UUID(tenant_ref)
-        except ValueError:
-            tenant = (
-                await db.execute(
-                    select(Tenant).where(Tenant.slug == tenant_ref, Tenant.is_active.is_(True))
-                )
-            ).scalar_one_or_none()
-        else:
-            tenant = (
-                await db.execute(select(Tenant).where(Tenant.id == tenant_uuid, Tenant.is_active.is_(True)))
-            ).scalar_one_or_none()
+        tenant = await _resolve_active_tenant(db, tenant_ref)
         if tenant is None:
             raise HTTPException(status_code=401, detail="Analytics tenant is not configured")
         current_tenant = tenant.id
@@ -224,13 +223,27 @@ async def get_session_analytics(session_id: str, db: AsyncSession = Depends(get_
         **COMMON_RESPONSES,
     },
 )
-async def get_tenant_analytics(tenant_id: str) -> dict[str, Any]:
+async def get_tenant_analytics(tenant_id: str, db: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     """Return the cost analytics for a single tenant."""
-    current_tenant = str(tenant_context.tenant_id) if tenant_context.tenant_id else settings.default_tenant_id
-    if tenant_id != current_tenant:
+    current_tenant_id = tenant_context.tenant_id
+    if current_tenant_id is None:
+        if (
+            tenant_context.authenticated_tenant_id != SHARED_SECRET_PRINCIPAL_ID
+            or tenant_context.user_id is not None
+        ):
+            raise HTTPException(status_code=401, detail="Analytics tenant is not configured")
+        configured_tenant = await _resolve_active_tenant(db, settings.default_tenant_id)
+        if configured_tenant is None:
+            raise HTTPException(status_code=401, detail="Analytics tenant is not configured")
+        current_tenant_id = configured_tenant.id
+
+    requested_tenant = await _resolve_active_tenant(db, tenant_id)
+    if requested_tenant is None or requested_tenant.id != current_tenant_id:
         raise HTTPException(status_code=403, detail="Access denied: tenant mismatch")
-    totals = await cost_tracker.get_tenant_totals(tenant_id)
-    return {"tenant_id": tenant_id, "totals": totals}
+    await bind_tenant_scope(db, current_tenant_id)
+    canonical_tenant_id = str(current_tenant_id)
+    totals = await cost_tracker.get_tenant_totals(canonical_tenant_id)
+    return {"tenant_id": canonical_tenant_id, "totals": totals}
 
 
 @router.get(

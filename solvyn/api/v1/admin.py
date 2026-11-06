@@ -248,25 +248,19 @@ async def list_tenants(db: AsyncSession = Depends(get_session)) -> dict[str, Any
 
     tenant_ids = [t.id for t in tenants]
 
-    # Aggregate token usage per tenant in a single query.
-    tokens_rows = (
-        await db.execute(
-            select(
-                TokenUsage.tenant_id,
-                sqlfunc.coalesce(sqlfunc.sum(TokenUsage.total_tokens), 0).label("total_tokens"),
-                sqlfunc.coalesce(sqlfunc.sum(TokenUsage.cost), 0.0).label("total_cost"),
-            )
-            .where(TokenUsage.tenant_id.in_(tenant_ids))
-            .group_by(TokenUsage.tenant_id)
-        )
-    ).all()
-    tokens_by_tenant: dict[uuid.UUID, tuple[int, float]] = {
-        row.tenant_id: (int(row.total_tokens or 0), float(row.total_cost or 0.0)) for row in tokens_rows
-    }
-
+    tokens_by_tenant: dict[uuid.UUID, tuple[int, float]] = {}
     sessions_by_tenant: dict[uuid.UUID, int] = {}
     for tenant_id in tenant_ids:
         await bind_tenant_scope(db, tenant_id)
+        token_row = (
+            await db.execute(
+                select(
+                    sqlfunc.coalesce(sqlfunc.sum(TokenUsage.total_tokens), 0).label("total_tokens"),
+                    sqlfunc.coalesce(sqlfunc.sum(TokenUsage.cost), 0.0).label("total_cost"),
+                ).where(TokenUsage.tenant_id == tenant_id)
+            )
+        ).one()
+        tokens_by_tenant[tenant_id] = (int(token_row.total_tokens or 0), float(token_row.total_cost or 0.0))
         sessions_by_tenant[tenant_id] = int(
             (
                 await db.execute(

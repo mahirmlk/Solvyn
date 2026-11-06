@@ -5,7 +5,7 @@ from sqlalchemy import func as sqlfunc
 from sqlalchemy import select
 
 from solvyn.db.models import TokenUsage
-from solvyn.db.session import async_session_factory
+from solvyn.db.session import async_session_factory, bind_tenant_scope
 
 _DEFAULT_UUID = uuid.UUID("00000000-0000-0000-0000-000000000000")
 
@@ -16,6 +16,13 @@ def _to_uuid(value: str | None) -> uuid.UUID | None:
     if value == "default":
         return _DEFAULT_UUID
     return uuid.UUID(value)
+
+
+def _required_tenant_uuid(value: str) -> uuid.UUID:
+    tenant_uuid = _to_uuid(value)
+    if tenant_uuid is None:
+        raise ValueError("Cost tracking requires a tenant ID")
+    return tenant_uuid
 
 
 class CostTracker:
@@ -31,10 +38,12 @@ class CostTracker:
         total_tokens: int,
         cost: float,
     ) -> None:
+        tenant_uuid = _required_tenant_uuid(tenant_id)
         async with async_session_factory() as db:
+            await bind_tenant_scope(db, tenant_uuid)
             record = TokenUsage(
                 id=uuid.uuid4(),
-                tenant_id=_to_uuid(tenant_id),
+                tenant_id=tenant_uuid,
                 session_id=_to_uuid(session_id),
                 agent_type=agent_type,
                 provider=provider,
@@ -48,7 +57,9 @@ class CostTracker:
             await db.commit()
 
     async def get_session_totals(self, session_id: str, tenant_id: str) -> dict[str, Any]:
+        tenant_uuid = _required_tenant_uuid(tenant_id)
         async with async_session_factory() as db:
+            await bind_tenant_scope(db, tenant_uuid)
             result = await db.execute(
                 select(
                     sqlfunc.sum(TokenUsage.total_tokens).label("total_tokens"),
@@ -57,7 +68,7 @@ class CostTracker:
                     sqlfunc.sum(TokenUsage.completion_tokens).label("completion_tokens"),
                 ).where(
                     TokenUsage.session_id == _to_uuid(session_id),
-                    TokenUsage.tenant_id == _to_uuid(tenant_id),
+                    TokenUsage.tenant_id == tenant_uuid,
                 ),
             )
             row = result.one_or_none()
@@ -71,12 +82,14 @@ class CostTracker:
             }
 
     async def get_tenant_totals(self, tenant_id: str) -> dict[str, Any]:
+        tenant_uuid = _required_tenant_uuid(tenant_id)
         async with async_session_factory() as db:
+            await bind_tenant_scope(db, tenant_uuid)
             result = await db.execute(
                 select(
                     sqlfunc.sum(TokenUsage.total_tokens).label("total_tokens"),
                     sqlfunc.sum(TokenUsage.cost).label("total_cost"),
-                ).where(TokenUsage.tenant_id == _to_uuid(tenant_id)),
+                ).where(TokenUsage.tenant_id == tenant_uuid),
             )
             row = result.one_or_none()
             if row is None:
@@ -87,7 +100,9 @@ class CostTracker:
             }
 
     async def get_agent_breakdown(self, session_id: str, tenant_id: str) -> list[dict[str, Any]]:
+        tenant_uuid = _required_tenant_uuid(tenant_id)
         async with async_session_factory() as db:
+            await bind_tenant_scope(db, tenant_uuid)
             result = await db.execute(
                 select(
                     TokenUsage.agent_type,
@@ -97,7 +112,7 @@ class CostTracker:
                 )
                 .where(
                     TokenUsage.session_id == _to_uuid(session_id),
-                    TokenUsage.tenant_id == _to_uuid(tenant_id),
+                    TokenUsage.tenant_id == tenant_uuid,
                 )
                 .group_by(TokenUsage.agent_type),
             )

@@ -1153,8 +1153,19 @@ async def test_tenant_analytics_blocks_cross_tenant_access(client: AsyncClient) 
     does not match the calling tenant.  This test verifies the guard
     without hitting the database.
     """
-    other_tenant_id = uuid.uuid4()
-    response = await client.get(f"/api/v1/observability/analytics/tenant/{other_tenant_id}")
+    default_tenant = MagicMock()
+    default_tenant.id = uuid.uuid4()
+    requested_tenant = MagicMock()
+    requested_tenant.id = uuid.uuid4()
+
+    async def _resolve(_db: Any, tenant_ref: str) -> Any:
+        if tenant_ref == "test-tenant":
+            return default_tenant
+        return requested_tenant
+
+    other_tenant_id = requested_tenant.id
+    with patch("solvyn.observability.analytics_api._resolve_active_tenant", side_effect=_resolve):
+        response = await client.get(f"/api/v1/observability/analytics/tenant/{other_tenant_id}")
     # In shared-secret mode (no X-Tenant-Slug), the endpoint falls back to
     # the default tenant and rejects a mismatched id.
     assert response.status_code == 403
