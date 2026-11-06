@@ -18,7 +18,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.db.models import Organization, OrganizationMembership, RefreshToken, Tenant, User
-from solvyn.db.session import get_session
+from solvyn.db.session import bind_tenant_scope, get_session
 from solvyn.identity.security import (
     create_access_token,
     generate_refresh_token,
@@ -124,6 +124,9 @@ async def register(payload: RegisterRequest, request: Request, db: AsyncSession 
     )
     db.add(tenant)
     await db.flush()
+    # Organization rows are protected by tenant RLS, so bind the new tenant
+    # before persisting its initial organization and membership.
+    await bind_tenant_scope(db, tenant.id)
 
     org = Organization(name=(payload.display_name or email)[:255], slug=f"org-{user.id.hex}", tenant_id=tenant.id)
     db.add(org)

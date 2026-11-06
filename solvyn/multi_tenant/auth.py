@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
 from solvyn.db.models import ApiKey, Organization, OrganizationMembership, Tenant, TenantRole
-from solvyn.db.session import async_session_factory
+from solvyn.db.session import async_session_factory, bind_tenant_scope
 from solvyn.multi_tenant.middleware import tenant_context
 from solvyn.multi_tenant.rate_limiter import redis_rate_limiter
 
@@ -115,6 +115,7 @@ _ORG_ROLE_TO_TENANT_ROLE = {
 async def _membership_for_tenant(user_id: uuid.UUID, tenant_id: uuid.UUID) -> tuple[str, str] | None:
     """Return (organization slug, role) when the user is a member of the tenant."""
     async with async_session_factory() as session:
+        await bind_tenant_scope(session, tenant_id)
         result = await session.execute(
             select(Organization.slug, OrganizationMembership.role)
             .join(OrganizationMembership, OrganizationMembership.organization_id == Organization.id)
@@ -129,15 +130,37 @@ async def _membership_for_tenant(user_id: uuid.UUID, tenant_id: uuid.UUID) -> tu
 async def _first_membership(user_id: uuid.UUID) -> tuple[uuid.UUID, str, str] | None:
     """Return (tenant_id, organization slug, role) for the user's first org (deterministic)."""
     async with async_session_factory() as session:
-        result = await session.execute(
-            select(Organization.tenant_id, Organization.slug, OrganizationMembership.role)
-            .join(OrganizationMembership, OrganizationMembership.organization_id == Organization.id)
-            .where(OrganizationMembership.user_id == user_id, Organization.is_active == True)  # noqa: E712
-            .order_by(OrganizationMembership.created_at, Organization.created_at)
-            .limit(1)
+        tenant_result = await session.execute(
+            select(Tenant.id).where(Tenant.is_active == True).order_by(Tenant.created_at, Tenant.id)  # noqa: E712
         )
-        row = result.first()
-        return (row[0], row[1], row[2]) if row else None
+        tenant_ids = tenant_result.scalars().all()
+        matches: list[tuple[Any, Any, uuid.UUID, str, str]] = []
+        for tenant_id in tenant_ids:
+            await bind_tenant_scope(session, tenant_id)
+            result = await session.execute(
+                select(
+                    OrganizationMembership.created_at,
+                    Organization.created_at,
+                    Organization.tenant_id,
+                    Organization.slug,
+                    OrganizationMembership.role,
+                )
+                .join(OrganizationMembership, OrganizationMembership.organization_id == Organization.id)
+                .where(
+                    OrganizationMembership.user_id == user_id,
+                    Organization.tenant_id == tenant_id,
+                    Organization.is_active == True,  # noqa: E712
+                )
+                .order_by(OrganizationMembership.created_at, Organization.created_at)
+                .limit(1)
+            )
+            row = result.first()
+            if row is not None:
+                matches.append((row[0], row[1], row[2], row[3], row[4]))
+        if not matches:
+            return None
+        first = min(matches, key=lambda row: (row[0], row[1], row[2]))
+        return (first[2], first[3], first[4])
 
 
 # ---------------------------------------------------------------------------
