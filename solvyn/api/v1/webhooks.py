@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.api.v1._rbac import ANY_ROLE, OWNER_ADMIN, require_org_membership
 from solvyn.config import settings
-from solvyn.db.models import Organization, ProactiveEvent, Project, Repository
+from solvyn.db.models import Organization, ProactiveEvent, Project, Repository, Tenant
 from solvyn.db.session import bind_tenant_scope, get_session
 from solvyn.repositories.github import GitHubRepositoryError, validate_full_name
 
@@ -204,24 +204,32 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
         reason = "not_a_failed_workflow_run" if event_type == "workflow_run" else "not_an_open_security_alert"
         return {"accepted": True, "ignored": True, "reason": reason}
 
-    project_matches = (
-        await db.execute(
-            select(Project.id, Project.organization_id, Organization.tenant_id)
-            .join(Repository, Repository.project_id == Project.id)
-            .join(Organization, Organization.id == Project.organization_id)
-            .where(
-                Repository.provider == "github",
-                Repository.is_active == True,  # noqa: E712
-                Project.is_active == True,  # noqa: E712
-                Organization.is_active == True,  # noqa: E712
-                # GitHub full names are case-insensitive; equality avoids LIKE wildcards.
-                func.lower(Repository.full_name) == signal["repository_name"].lower(),
+    active_tenants = (
+        await db.execute(select(Tenant.id).where(Tenant.is_active == True).order_by(Tenant.id))  # noqa: E712
+    ).scalars().all()
+    project_matches: list[tuple[uuid.UUID, uuid.UUID, uuid.UUID]] = []
+    for tenant_id in active_tenants:
+        await bind_tenant_scope(db, tenant_id)
+        tenant_matches = (
+            await db.execute(
+                select(Project.id, Project.organization_id, Organization.tenant_id)
+                .join(Repository, Repository.project_id == Project.id)
+                .join(Organization, Organization.id == Project.organization_id)
+                .where(
+                    Repository.provider == "github",
+                    Repository.is_active == True,  # noqa: E712
+                    Project.is_active == True,  # noqa: E712
+                    Organization.is_active == True,  # noqa: E712
+                    Project.tenant_id == tenant_id,
+                    # GitHub full names are case-insensitive; equality avoids LIKE wildcards.
+                    func.lower(Repository.full_name) == signal["repository_name"].lower(),
+                )
+                .limit(_MAX_PROJECT_MATCHES + 1)
             )
-            .limit(_MAX_PROJECT_MATCHES + 1)
-        )
-    ).all()
-    if len(project_matches) > _MAX_PROJECT_MATCHES:
-        raise HTTPException(status_code=413, detail="Repository is connected to too many projects for webhook fan-out")
+        ).all()
+        project_matches.extend(tenant_matches)
+        if len(project_matches) > _MAX_PROJECT_MATCHES:
+            raise HTTPException(status_code=413, detail="Repository is connected to too many projects for webhook fan-out")
     if not project_matches:
         return {"accepted": True, "ignored": True, "reason": "repository_not_connected"}
 
