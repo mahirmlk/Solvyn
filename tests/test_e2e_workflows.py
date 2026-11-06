@@ -247,12 +247,13 @@ async def test_task_verification_is_sandboxed_and_durable(
         Project,
         Task,
         TaskHandoff,
+        TeammateProjectAssignment,
         TeammateProfile,
         TeammateStatus,
         Tenant,
         User,
     )
-    from solvyn.db.session import async_session_factory
+    from solvyn.db.session import async_session_factory, bind_tenant_scope
 
     user_id = uuid.uuid4()
     organization_id = uuid.uuid4()
@@ -261,6 +262,7 @@ async def test_task_verification_is_sandboxed_and_durable(
     parent_task_id = uuid.uuid4()
     async with async_session_factory() as db:
         tenant = (await db.execute(select(Tenant).where(Tenant.slug == "test-tenant"))).scalar_one()
+        await bind_tenant_scope(db, tenant.id)
         organization = Organization(
             id=organization_id,
             name="Verification Approval",
@@ -284,12 +286,16 @@ async def test_task_verification_is_sandboxed_and_durable(
             status=TeammateStatus.IDLE,
         )
         parent_task = Task(id=parent_task_id, tenant_id=tenant.id, title="Verification parent")
+        db.add(parent_task)
+        await db.flush()
+        child_task = (await db.execute(select(Task).where(Task.id == uuid.UUID(task_id)))).scalar_one()
+        child_task.parent_task_id = parent_task_id
         db.add_all(
             [
                 organization,
                 project,
                 teammate,
-                parent_task,
+                TeammateProjectAssignment(teammate_id=teammate_id, project_id=project_id),
                 User(id=user_id, email=f"verification-{uuid.uuid4().hex[:12]}@example.com", password_hash="test-hash"),
                 OrganizationMembership(user_id=user_id, organization_id=organization_id, role="owner"),
             ]
