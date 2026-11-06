@@ -9,7 +9,7 @@ def test_defaults() -> None:
     assert s.host == "0.0.0.0"
     assert s.port == 8000
     assert s.log_level == "INFO"
-    assert s.database_url == "postgresql+asyncpg://solvyn:solvyn@localhost:5432/solvyn"
+    assert s.database_url == "postgresql+asyncpg://solvyn_runtime:solvyn_runtime@localhost:5432/solvyn"
     assert s.redis_url == "redis://localhost:6379/0"
     assert s.llm_default_provider == "openrouter"
     assert s.json_logging is True

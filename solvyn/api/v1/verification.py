@@ -35,7 +35,7 @@ from solvyn.db.models import (
     User,
     VerificationRun,
 )
-from solvyn.db.session import get_session
+from solvyn.db.session import bind_tenant_scope, get_session
 from solvyn.multi_tenant.middleware import SHARED_SECRET_PRINCIPAL_ID, tenant_context
 from solvyn.repositories.credentials import (
     CredentialEncryptionUnavailableError,
@@ -372,6 +372,7 @@ async def _owned_task(
     ).scalar_one_or_none()
     if task is None:
         raise HTTPException(status_code=404, detail="Workflow task not found")
+    await bind_tenant_scope(db, task.tenant_id)
     return task
 
 

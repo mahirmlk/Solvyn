@@ -40,7 +40,7 @@ from solvyn.db.models import (
 from solvyn.db.models import (
     ExecutionGraph as ExecutionGraphModel,
 )
-from solvyn.db.session import async_session_factory, get_session
+from solvyn.db.session import async_session_factory, bind_tenant_scope, get_session
 from solvyn.workflows.executor import workflow_executor
 from solvyn.workflows.task_generator import TaskGenerator
 from solvyn.workflows.templates import WORKFLOW_TEMPLATES
@@ -584,6 +584,7 @@ async def list_workflow_execution_tasks(
         tenant_id = await workflow_executor._resolve_tenant_uuid(tenant_ref)
     except ValueError as exc:
         raise HTTPException(status_code=401, detail="Workflow tenant is not configured") from exc
+    await bind_tenant_scope(db, tenant_id)
 
     graph = (
         await db.execute(

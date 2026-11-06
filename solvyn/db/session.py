@@ -1,3 +1,4 @@
+import uuid
 from collections.abc import AsyncGenerator
 
 from sqlalchemy import event, text
@@ -46,3 +47,15 @@ def _set_postgres_tenant_context(
 async def get_session() -> AsyncGenerator[AsyncSession]:
     async with async_session_factory() as session:
         yield session
+
+
+async def bind_tenant_scope(session: AsyncSession, tenant_id: uuid.UUID) -> None:
+    """Set transaction-local scope after a route has authorized a tenant row.
+
+    Some compatibility credentials authorize the configured default tenant
+    without putting that tenant UUID in request context. Callers must first
+    resolve and authorize the tenant from a resource they already own.
+    """
+    if session.get_bind().dialect.name != "postgresql":
+        return
+    await session.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_id)})
