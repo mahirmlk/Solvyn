@@ -141,7 +141,7 @@ async def test_pull_request_refresh_is_deduplicated_bounded_and_fail_soft(monkey
     task = SimpleNamespace(id=task_id, tenant_id=tenant_id)
     workspace = SimpleNamespace(id=uuid.uuid4(), repository_id=repository_id)
     handoff = SimpleNamespace(project_id=project_id)
-    project = SimpleNamespace(id=project_id, tenant_id=tenant_id, organization_id=uuid.uuid4())
+    project = SimpleNamespace(id=project_id, tenant_id=tenant_id, organization_id=uuid.uuid4(), is_active=True)
     organization = SimpleNamespace(tenant_id=tenant_id, is_active=True)
     repository = SimpleNamespace(
         id=repository_id, project_id=project_id, provider="github", full_name="octo/repo", is_active=True
