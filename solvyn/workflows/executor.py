@@ -122,7 +122,7 @@ class WorkflowExecutor:
             raise ValueError("scheduled_at must be in the future")
 
         resolved_session_id = session_id or str(uuid.uuid4())
-        await self._ensure_session(resolved_session_id, tenant_id, template_name)
+        tenant_uuid = await self._ensure_session(resolved_session_id, tenant_id, template_name)
         merged_inputs = {**template.default_inputs, **inputs}
         graph = AgentGraph()
         node_map: dict[str, str] = {}
@@ -154,6 +154,7 @@ class WorkflowExecutor:
             }
         )
         async with async_session_factory() as db:
+            await bind_tenant_scope(db, tenant_uuid)
             db.add(
                 ExecutionGraphModel(
                     id=uuid.UUID(execution_id),
