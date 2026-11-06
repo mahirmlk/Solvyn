@@ -253,7 +253,7 @@ async def test_task_verification_is_sandboxed_and_durable(
         Tenant,
         User,
     )
-    from solvyn.db.session import async_session_factory, bind_tenant_scope
+    from solvyn.db.session import async_session_factory
 
     user_id = uuid.uuid4()
     organization_id = uuid.uuid4()
@@ -434,7 +434,7 @@ async def test_acceptance_criteria_require_an_owner_admin_decision(client: Async
     from sqlalchemy import select
 
     from solvyn.db.models import Organization, OrganizationMembership, Tenant, User
-    from solvyn.db.session import async_session_factory
+    from solvyn.db.session import async_session_factory, bind_tenant_scope
 
     workflow = await client.post("/api/v1/workflows/feature/run", json={"requirement": "Track task acceptance criteria"})
     assert workflow.status_code == 200
@@ -800,7 +800,7 @@ async def test_cancel_abandoned_workflow_execution(client: AsyncClient) -> None:
     from solvyn.agents.schema import ExecutionEdge
     from solvyn.agents.schema import ExecutionGraph as ExecutionGraphState
     from solvyn.db.models import ExecutionGraph, Session, Task, Tenant
-    from solvyn.db.session import async_session_factory
+    from solvyn.db.session import async_session_factory, bind_tenant_scope
 
     session_id = uuid.uuid4()
     execution_id = uuid.uuid4()
@@ -812,6 +812,7 @@ async def test_cancel_abandoned_workflow_execution(client: AsyncClient) -> None:
     active_task_id = uuid.uuid4()
     async with async_session_factory() as db:
         tenant = (await db.execute(select(Tenant).where(Tenant.slug == "test-tenant"))).scalar_one()
+        await bind_tenant_scope(db, tenant.id)
         db.add(Session(id=session_id, tenant_id=tenant.id, title="Cancellation test"))
         db.add(
             ExecutionGraph(
@@ -850,6 +851,7 @@ async def test_cancel_abandoned_workflow_execution(client: AsyncClient) -> None:
             )
         )
         await db.commit()
+        await bind_tenant_scope(db, tenant.id)
         db.add(
             Task(id=running_task_id, tenant_id=tenant.id, session_id=session_id, execution_id=execution_id,
                  node_id=str(running_task_id), title="Running task", status="running")

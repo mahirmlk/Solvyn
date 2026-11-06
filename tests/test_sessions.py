@@ -1,4 +1,5 @@
 import uuid
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -23,6 +24,7 @@ async def test_list_sessions_filters_records_by_current_tenant() -> None:
     tenant_id = uuid.uuid4()
     tenant_context.set(tenant_id, "tenant-a")
     db = AsyncMock()
+    db.get_bind = MagicMock(return_value=SimpleNamespace(dialect=SimpleNamespace(name="sqlite")))
     mock_result = MagicMock()
     mock_result.scalars.return_value.all.return_value = []
     db.execute.return_value = mock_result
@@ -43,6 +45,7 @@ async def test_create_session_assigns_current_tenant() -> None:
     tenant_id = uuid.uuid4()
     tenant_context.set(tenant_id, "tenant-a")
     db = AsyncMock()
+    db.get_bind = MagicMock(return_value=SimpleNamespace(dialect=SimpleNamespace(name="sqlite")))
     try:
         await create_session(db)
     finally:
