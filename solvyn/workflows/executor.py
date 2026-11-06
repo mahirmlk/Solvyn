@@ -99,7 +99,8 @@ class WorkflowExecutor:
                         node.input = resolved_input
                         break
 
-        await self._persist_execution_graph(result, template_name, merged_inputs, tenant_uuid, lease_id)
+        with tenant_context.scoped_tenant(tenant_uuid):
+            await self._persist_execution_graph(result, template_name, merged_inputs, tenant_uuid, lease_id)
         logger.info(f"Workflow '{template_name}' completed: {result.status}")
         return result
 

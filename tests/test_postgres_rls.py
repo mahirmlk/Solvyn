@@ -10,7 +10,7 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from solvyn.db.models import TaskAcceptanceCriterion, TaskWorkspace, TeammateToolInvocation
+from solvyn.db.models import TaskAcceptanceCriterion, TaskDependency, TaskWorkspace, TeammateToolInvocation
 from solvyn.multi_tenant.middleware import tenant_context
 
 
@@ -40,7 +40,7 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                         "SELECT relname, relrowsecurity, relforcerowsecurity "
                         "FROM pg_class WHERE relname IN "
                         "('task_acceptance_criteria', 'task_deliveries', 'task_workspaces', "
-                        "'teammate_tool_invocations')"
+                        "'teammate_tool_invocations', 'task_dependencies')"
                     )
                 )
             ).all()
@@ -49,6 +49,7 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                 "task_deliveries",
                 "task_workspaces",
                 "teammate_tool_invocations",
+                "task_dependencies",
             }
             assert all(row[1] and row[2] for row in protected_tables)
 
@@ -107,6 +108,124 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
             await connection.execute(text("DELETE FROM task_acceptance_criteria WHERE id = :id"), {"id": criterion_b})
             await connection.execute(text("DELETE FROM tasks WHERE id IN (:task_a, :task_b)"), {"task_a": task_a, "task_b": task_b})
             await connection.execute(text("DELETE FROM tenants WHERE id IN (:tenant_a, :tenant_b)"), {"tenant_a": tenant_a, "tenant_b": tenant_b})
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_task_dependency_rls_is_tenant_scoped_and_rejects_cross_tenant_edges() -> None:
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url.startswith("postgresql+"):
+        pytest.skip("RLS behavior requires PostgreSQL and migrations at head")
+
+    engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+    task_a, task_b = uuid.uuid4(), uuid.uuid4()
+    dependency_a, dependency_b = uuid.uuid4(), uuid.uuid4()
+
+    try:
+        async with engine.connect() as connection:
+            role = (
+                await connection.execute(
+                    text("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user")
+                )
+            ).one()
+            assert role == (False, False)
+            protected = (
+                await connection.execute(
+                    text(
+                        "SELECT relrowsecurity, relforcerowsecurity FROM pg_class "
+                        "WHERE relname = 'task_dependencies'"
+                    )
+                )
+            ).one()
+            assert protected == (True, True)
+
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'RLS tenant', :slug, '')"),
+                [
+                    {"id": tenant_a, "slug": f"rls-deps-{tenant_a}"},
+                    {"id": tenant_b, "slug": f"rls-deps-{tenant_b}"},
+                ],
+            )
+            await connection.execute(
+                text("INSERT INTO tasks (id, tenant_id, title) VALUES (:id, :tenant_id, 'RLS dependency task')"),
+                [{"id": task_a, "tenant_id": tenant_a}, {"id": task_b, "tenant_id": tenant_b}],
+            )
+            await connection.execute(
+                text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                {"tenant_id": str(tenant_a)},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO task_dependencies (id, tenant_id, task_id, depends_on_task_id) "
+                    "VALUES (:id, :tenant_id, :task_id, :depends_on_task_id)"
+                ),
+                {
+                    "id": dependency_a,
+                    "tenant_id": tenant_a,
+                    "task_id": task_a,
+                    "depends_on_task_id": task_a,
+                },
+            )
+            await connection.execute(
+                text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                {"tenant_id": str(tenant_b)},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO task_dependencies (id, tenant_id, task_id, depends_on_task_id) "
+                    "VALUES (:id, :tenant_id, :task_id, :depends_on_task_id)"
+                ),
+                {
+                    "id": dependency_b,
+                    "tenant_id": tenant_b,
+                    "task_id": task_b,
+                    "depends_on_task_id": task_b,
+                },
+            )
+
+        tenant_context.clear()
+        async with sessions() as session:
+            assert (await session.execute(select(TaskDependency.id))).scalars().all() == []
+
+        tenant_context.set(tenant_a, "rls-a")
+        async with sessions() as session:
+            assert (await session.execute(select(TaskDependency.id))).scalars().all() == [dependency_a]
+            session.add(
+                TaskDependency(
+                    id=uuid.uuid4(),
+                    tenant_id=tenant_b,
+                    task_id=task_b,
+                    depends_on_task_id=task_b,
+                )
+            )
+            with pytest.raises(DBAPIError):
+                await session.flush()
+            await session.rollback()
+
+        async with sessions() as session:
+            session.add(
+                TaskDependency(
+                    id=uuid.uuid4(),
+                    tenant_id=tenant_a,
+                    task_id=task_a,
+                    depends_on_task_id=task_b,
+                )
+            )
+            with pytest.raises(DBAPIError):
+                await session.flush()
+            await session.rollback()
+    finally:
+        tenant_context.clear()
+        async with engine.begin() as connection:
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
+            await connection.execute(text("DELETE FROM task_dependencies WHERE id = :id"), {"id": dependency_a})
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
+            await connection.execute(text("DELETE FROM task_dependencies WHERE id = :id"), {"id": dependency_b})
+            await connection.execute(text("DELETE FROM tasks WHERE id IN (:a, :b)"), {"a": task_a, "b": task_b})
+            await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
         await engine.dispose()
 
 
