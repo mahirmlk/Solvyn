@@ -54,8 +54,10 @@ def create_credential_vault() -> IntegrationCredentialVault:
     return IntegrationCredentialVault()
 
 
-async def load_organization_github_token(db: AsyncSession, organization_id: uuid.UUID) -> str:
-    """Decrypt the active GitHub token for a single organization."""
+async def load_organization_github_connection(
+    db: AsyncSession, organization_id: uuid.UUID
+) -> tuple[Integration, str]:
+    """Return the active organization integration and its decrypted token."""
     integration = (
         await db.execute(
             select(Integration).where(
@@ -74,4 +76,10 @@ async def load_organization_github_token(db: AsyncSession, organization_id: uuid
     ).scalar_one_or_none()
     if credential is None:
         raise GitHubCredentialNotFoundError("GitHub organization integration is not connected")
-    return create_credential_vault().decrypt(credential.ciphertext)
+    return integration, create_credential_vault().decrypt(credential.ciphertext)
+
+
+async def load_organization_github_token(db: AsyncSession, organization_id: uuid.UUID) -> str:
+    """Decrypt the active GitHub token for a single organization."""
+    _, token = await load_organization_github_connection(db, organization_id)
+    return token

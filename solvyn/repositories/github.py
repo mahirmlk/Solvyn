@@ -476,8 +476,6 @@ class GitHubClient(RepositoryProvider):
 
     async def inspect(self, full_name: str) -> dict[str, Any]:
         metadata = await self.repository_metadata(full_name)
-        if metadata["private"]:
-            raise GitHubRepositoryError(403, "Private repositories are not supported by this provider configuration")
         tree_sha, tree = await self.repository_tree(metadata["full_name"], metadata["default_branch"])
         files = {entry["path"] for entry in tree if entry["type"] == "blob"}
         extension_counts: Counter[str] = Counter()
