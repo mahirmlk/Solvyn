@@ -4,13 +4,20 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from solvyn.db.models import TaskAcceptanceCriterion, TaskDependency, TaskWorkspace, TeammateToolInvocation
+from solvyn.db.models import (
+    TaskAcceptanceCriterion,
+    TaskDependency,
+    TaskWorkspace,
+    TeammateToolInvocation,
+    VerificationRun,
+)
 from solvyn.multi_tenant.middleware import tenant_context
 
 
@@ -40,7 +47,7 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                         "SELECT relname, relrowsecurity, relforcerowsecurity "
                         "FROM pg_class WHERE relname IN "
                         "('task_acceptance_criteria', 'task_deliveries', 'task_workspaces', "
-                        "'teammate_tool_invocations', 'task_dependencies')"
+                        "'teammate_tool_invocations', 'task_dependencies', 'verification_runs')"
                     )
                 )
             ).all()
@@ -50,6 +57,7 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                 "task_workspaces",
                 "teammate_tool_invocations",
                 "task_dependencies",
+                "verification_runs",
             }
             assert all(row[1] and row[2] for row in protected_tables)
 
@@ -224,6 +232,151 @@ async def test_task_dependency_rls_is_tenant_scoped_and_rejects_cross_tenant_edg
             await connection.execute(text("DELETE FROM task_dependencies WHERE id = :id"), {"id": dependency_a})
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
             await connection.execute(text("DELETE FROM task_dependencies WHERE id = :id"), {"id": dependency_b})
+            await connection.execute(text("DELETE FROM tasks WHERE id IN (:a, :b)"), {"a": task_a, "b": task_b})
+            await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url.startswith("postgresql+"):
+        pytest.skip("RLS behavior requires PostgreSQL and migrations at head")
+
+    engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+    task_a, task_b = uuid.uuid4(), uuid.uuid4()
+    workspace_a, workspace_b = uuid.uuid4(), uuid.uuid4()
+    run_a, run_b = uuid.uuid4(), uuid.uuid4()
+    stale_started_at = datetime.now(UTC) - timedelta(minutes=20)
+
+    try:
+        async with engine.connect() as connection:
+            role = (
+                await connection.execute(
+                    text("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user")
+                )
+            ).one()
+            assert role == (False, False)
+            protected = (
+                await connection.execute(
+                    text(
+                        "SELECT relrowsecurity, relforcerowsecurity FROM pg_class "
+                        "WHERE relname = 'verification_runs'"
+                    )
+                )
+            ).one()
+            assert protected == (True, True)
+
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'RLS tenant', :slug, '')"),
+                [
+                    {"id": tenant_a, "slug": f"rls-runs-{tenant_a}"},
+                    {"id": tenant_b, "slug": f"rls-runs-{tenant_b}"},
+                ],
+            )
+            await connection.execute(
+                text("INSERT INTO tasks (id, tenant_id, title) VALUES (:id, :tenant_id, 'RLS verification task')"),
+                [{"id": task_a, "tenant_id": tenant_a}, {"id": task_b, "tenant_id": tenant_b}],
+            )
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
+            await connection.execute(
+                text("INSERT INTO task_workspaces (id, tenant_id, task_id) VALUES (:id, :tenant_id, :task_id)"),
+                {"id": workspace_a, "tenant_id": tenant_a, "task_id": task_a},
+            )
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
+            await connection.execute(
+                text("INSERT INTO task_workspaces (id, tenant_id, task_id) VALUES (:id, :tenant_id, :task_id)"),
+                {"id": workspace_b, "tenant_id": tenant_b, "task_id": task_b},
+            )
+            for tenant_id, task_id, workspace_id, run_id in (
+                (tenant_a, task_a, workspace_a, run_a),
+                (tenant_b, task_b, workspace_b, run_b),
+            ):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO verification_runs "
+                        "(id, tenant_id, task_id, workspace_id, kind, command, status, runner_version, started_at) "
+                        "VALUES (:id, :tenant_id, :task_id, :workspace_id, 'test', '[]', 'running', 'test', :started_at)"
+                    ),
+                    {
+                        "id": run_id,
+                        "tenant_id": tenant_id,
+                        "task_id": task_id,
+                        "workspace_id": workspace_id,
+                        "started_at": stale_started_at,
+                    },
+                )
+
+        tenant_context.clear()
+        async with sessions() as session:
+            assert (await session.execute(select(VerificationRun.id))).scalars().all() == []
+
+        tenant_context.set(tenant_a, "rls-a")
+        async with sessions() as session:
+            assert (await session.execute(select(VerificationRun.id))).scalars().all() == [run_a]
+            session.add(
+                VerificationRun(
+                    id=uuid.uuid4(),
+                    tenant_id=tenant_b,
+                    task_id=task_b,
+                    workspace_id=workspace_b,
+                    kind="test",
+                    command="[]",
+                    runner_version="test",
+                )
+            )
+            with pytest.raises(DBAPIError):
+                await session.flush()
+            await session.rollback()
+
+        async with sessions() as session:
+            session.add(
+                VerificationRun(
+                    id=uuid.uuid4(),
+                    tenant_id=tenant_a,
+                    task_id=task_a,
+                    workspace_id=workspace_b,
+                    kind="test",
+                    command="[]",
+                    runner_version="test",
+                )
+            )
+            with pytest.raises(DBAPIError):
+                await session.flush()
+            await session.rollback()
+
+        tenant_context.clear()
+        from solvyn.workflows import scheduler
+
+        monkeypatch.setattr(scheduler, "async_session_factory", sessions)
+        await scheduler._interrupt_stale_verification_runs()
+
+        tenant_context.set(tenant_a, "rls-a")
+        async with sessions() as session:
+            status_a = (await session.execute(select(VerificationRun.status).where(VerificationRun.id == run_a))).scalar_one()
+            assert status_a == "interrupted"
+        tenant_context.set(tenant_b, "rls-b")
+        async with sessions() as session:
+            status_b = (await session.execute(select(VerificationRun.status).where(VerificationRun.id == run_b))).scalar_one()
+            assert status_b == "interrupted"
+    finally:
+        tenant_context.clear()
+        async with engine.begin() as connection:
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
+            await connection.execute(text("DELETE FROM verification_runs WHERE id = :id"), {"id": run_a})
+            await connection.execute(text("DELETE FROM task_workspaces WHERE id = :id"), {"id": workspace_a})
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
+            await connection.execute(text("DELETE FROM verification_runs WHERE id = :id"), {"id": run_b})
+            await connection.execute(text("DELETE FROM task_workspaces WHERE id = :id"), {"id": workspace_b})
             await connection.execute(text("DELETE FROM tasks WHERE id IN (:a, :b)"), {"a": task_a, "b": task_b})
             await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
         await engine.dispose()
