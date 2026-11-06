@@ -986,10 +986,13 @@ async def _refresh_task_pull_request_statuses(
 
     deliveries_by_number: dict[int, list[TaskDelivery]] = {}
     for item in related_deliveries:
+        pull_request_number = item.pull_request_number
+        if not isinstance(pull_request_number, int):
+            continue
         if item.workspace_id != workspace.id or item.repository_id != workspace.repository_id:
             statuses[item.id] = {"availability": "unavailable", "reason": "repository_mismatch"}
             continue
-        deliveries_by_number.setdefault(item.pull_request_number, []).append(item)
+        deliveries_by_number.setdefault(pull_request_number, []).append(item)
     pull_request_numbers = list(deliveries_by_number)
     if not pull_request_numbers:
         return statuses
@@ -1145,65 +1148,65 @@ async def list_task_activity(
             "details": {"assigned_agent": task.assigned_agent},
         }
     ]
-    for item in invocations:
+    for invocation in invocations:
         events.append(
             {
-                "id": f"tool:{item.id}",
+                "id": f"tool:{invocation.id}",
                 "type": "tool",
-                "status": item.status,
-                "timestamp": _activity_timestamp(item.completed_at or item.started_at),
-                "summary": f"Teammate used {item.tool_name}",
-                "details": {"path": item.path, "error_code": item.error_code},
+                "status": invocation.status,
+                "timestamp": _activity_timestamp(invocation.completed_at or invocation.started_at),
+                "summary": f"Teammate used {invocation.tool_name}",
+                "details": {"path": invocation.path, "error_code": invocation.error_code},
             }
         )
-    for item in runs:
+    for run in runs:
         events.append(
             {
-                "id": f"verification:{item.id}",
+                "id": f"verification:{run.id}",
                 "type": "verification",
-                "status": item.status,
-                "timestamp": _activity_timestamp(item.completed_at or item.started_at),
-                "summary": f"{item.kind.title()} verification {item.status.replace('_', ' ')}",
-                "details": {"exit_code": item.exit_code, "timed_out": item.timed_out},
+                "status": run.status,
+                "timestamp": _activity_timestamp(run.completed_at or run.started_at),
+                "summary": f"{run.kind.title()} verification {run.status.replace('_', ' ')}",
+                "details": {"exit_code": run.exit_code, "timed_out": run.timed_out},
             }
         )
-    for item in deliveries:
-        number = item.pull_request_number
+    for delivery in deliveries:
+        number = delivery.pull_request_number
         events.append(
             {
-                "id": f"delivery:{item.id}",
+                "id": f"delivery:{delivery.id}",
                 "type": "delivery",
-                "status": item.status,
-                "timestamp": _activity_timestamp(item.updated_at or item.created_at),
-                "summary": item.pull_request_title or f"GitHub delivery {item.status.replace('_', ' ')}",
+                "status": delivery.status,
+                "timestamp": _activity_timestamp(delivery.updated_at or delivery.created_at),
+                "summary": delivery.pull_request_title or f"GitHub delivery {delivery.status.replace('_', ' ')}",
                 "details": {
-                    "branch": item.branch_name,
+                    "branch": delivery.branch_name,
                     "pull_request_number": number,
-                    "pull_request_status": live_pr_statuses.get(item.id) if number else None,
+                    "pull_request_status": live_pr_statuses.get(delivery.id) if number else None,
                 },
             }
         )
-    for item in handoffs:
-        direction = "received" if item.child_task_id == task.id else "delegated"
+    for handoff in handoffs:
+        direction = "received" if handoff.child_task_id == task.id else "delegated"
         events.append(
             {
-                "id": f"handoff:{item.id}",
+                "id": f"handoff:{handoff.id}",
                 "type": "handoff",
-                "status": item.status,
-                "timestamp": _activity_timestamp(item.completed_at or item.created_at),
-                "summary": f"Task {direction} by {item.delegated_to}",
-                "details": {"reason": item.reason[:1000]},
+                "status": handoff.status,
+                "timestamp": _activity_timestamp(handoff.completed_at or handoff.created_at),
+                "summary": f"Task {direction} by {handoff.delegated_to}",
+                "details": {"reason": handoff.reason[:1000]},
             }
         )
-    for item in approvals:
+    for approval in approvals:
         events.append(
             {
-                "id": f"approval:{item.id}",
+                "id": f"approval:{approval.id}",
                 "type": "approval",
-                "status": item.status,
-                "timestamp": _activity_timestamp(item.decided_at or item.updated_at or item.created_at),
-                "summary": f"{item.kind.replace('_', ' ').title()} approval {item.status.replace('_', ' ')}",
-                "details": {"summary": item.summary[:1000], "decision_note": (item.decision_note or "")[:1000]},
+                "status": approval.status,
+                "timestamp": _activity_timestamp(approval.decided_at or approval.updated_at or approval.created_at),
+                "summary": f"{approval.kind.replace('_', ' ').title()} approval {approval.status.replace('_', ' ')}",
+                "details": {"summary": approval.summary[:1000], "decision_note": (approval.decision_note or "")[:1000]},
             }
         )
 

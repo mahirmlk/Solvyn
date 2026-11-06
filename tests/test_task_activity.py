@@ -24,6 +24,9 @@ class _Rows:
     def all(self) -> list[Any]:
         return self.rows
 
+    def scalar_one_or_none(self) -> Any | None:
+        return self.rows[0] if self.rows else None
+
 
 class _ActivitySession:
     def __init__(self, results: list[list[Any]]) -> None:
