@@ -187,12 +187,11 @@ async def test_webhook_persists_one_triage_event_per_connected_project() -> None
             if self.execute_count == 1:
                 tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
                 self.tenant_ids = (tenant_a, tenant_b)
-                return SimpleNamespace(
-                    all=lambda: [
-                        (uuid.uuid4(), uuid.uuid4(), tenant_a),
-                        (uuid.uuid4(), uuid.uuid4(), tenant_b),
-                    ]
-                )
+                return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: list(self.tenant_ids)))
+            if self.execute_count in {2, 3}:
+                tenant_id = self.tenant_ids[self.execute_count - 2]
+                matches = [(uuid.uuid4(), uuid.uuid4(), tenant_id)]
+                return SimpleNamespace(all=lambda: matches)
             return SimpleNamespace(scalar_one_or_none=lambda: None)
 
         def add(self, event: ProactiveEvent) -> None:
@@ -256,7 +255,10 @@ async def test_signed_security_alert_is_persisted_without_secret_material() -> N
         async def execute(self, _query: object) -> SimpleNamespace:
             self.execute_count += 1
             if self.execute_count == 1:
-                return SimpleNamespace(all=lambda: [(uuid.uuid4(), uuid.uuid4(), uuid.uuid4())])
+                self.tenant_id = uuid.uuid4()
+                return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [self.tenant_id]))
+            if self.execute_count == 2:
+                return SimpleNamespace(all=lambda: [(uuid.uuid4(), uuid.uuid4(), self.tenant_id)])
             return SimpleNamespace(scalar_one_or_none=lambda: None)
 
         def add(self, event: ProactiveEvent) -> None:
@@ -318,7 +320,10 @@ async def test_replayed_workflow_run_with_new_delivery_id_is_deduplicated() -> N
         async def execute(self, _query: object) -> SimpleNamespace:
             self.execute_count += 1
             if self.execute_count == 1:
-                return SimpleNamespace(all=lambda: [(uuid.uuid4(), uuid.uuid4(), uuid.uuid4())])
+                self.tenant_id = uuid.uuid4()
+                return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [self.tenant_id]))
+            if self.execute_count == 2:
+                return SimpleNamespace(all=lambda: [(uuid.uuid4(), uuid.uuid4(), self.tenant_id)])
             return SimpleNamespace(scalar_one_or_none=lambda: self.existing)
 
         def add(self, _event: ProactiveEvent) -> None:
@@ -371,11 +376,13 @@ async def test_unique_race_retries_missing_project_event_after_rollback() -> Non
         async def execute(self, _query: object) -> SimpleNamespace:
             self.execute_count += 1
             if self.execute_count == 1:
-                tenant_id = uuid.uuid4()
-                return SimpleNamespace(all=lambda: [(project_a, organization_a, tenant_id), (project_b, organization_b, tenant_id)])
-            if self.execute_count <= 3:
+                self.tenant_id = uuid.uuid4()
+                return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [self.tenant_id]))
+            if self.execute_count == 2:
+                return SimpleNamespace(all=lambda: [(project_a, organization_a, self.tenant_id), (project_b, organization_b, self.tenant_id)])
+            if self.execute_count in {3, 4, 5}:
                 return SimpleNamespace(scalar_one_or_none=lambda: None)
-            if self.execute_count == 4:
+            if self.execute_count == 6:
                 return SimpleNamespace(scalar_one_or_none=lambda: existing)
             return SimpleNamespace(scalar_one_or_none=lambda: None)
 

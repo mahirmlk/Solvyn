@@ -19,9 +19,13 @@ from solvyn.db.models import (
     MaintenanceSchedule,
     Memory,
     ProactiveEvent,
+    Project,
+    ProjectKnowledge,
+    Repository,
     Session,
     Task,
     TaskAcceptanceCriterion,
+    TaskDelivery,
     TaskDependency,
     TaskHandoff,
     TaskWorkspace,
@@ -62,7 +66,7 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                         "'teammate_tool_invocations', 'task_dependencies', 'verification_runs', "
                         "'task_handoffs', 'teammate_memory', 'sessions', 'execution_graphs', 'memory', 'token_usage', "
                         "'approvals', 'proactive_events', 'maintenance_schedules', 'integrations', "
-                        "'integration_credentials')"
+                        "'integration_credentials', 'projects', 'repositories', 'project_knowledge')"
                     )
                 )
             ).all()
@@ -85,6 +89,9 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                 "maintenance_schedules",
                 "integrations",
                 "integration_credentials",
+                "projects",
+                "repositories",
+                "project_knowledge",
             }
             assert all(row[1] and row[2] for row in protected_tables)
 
@@ -903,6 +910,248 @@ async def test_integration_credentials_rls_is_tenant_scoped_and_allows_inactive_
             await connection.execute(
                 text("DELETE FROM organizations WHERE id IN (:a, :b)"), {"a": organization_a, "b": organization_b}
             )
+            await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_project_repository_knowledge_rls_is_tenant_and_link_scoped() -> None:
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url.startswith("postgresql+"):
+        pytest.skip("RLS behavior requires PostgreSQL and migrations at head")
+
+    engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+    organization_a, organization_b, organization_a_other = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    project_a, project_b = uuid.uuid4(), uuid.uuid4()
+    integration_a, integration_b, integration_a_other = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    repository_a, repository_b = uuid.uuid4(), uuid.uuid4()
+    knowledge_a, knowledge_b = uuid.uuid4(), uuid.uuid4()
+    task_a, task_b, task_a_other = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    workspace_a, workspace_b = uuid.uuid4(), uuid.uuid4()
+    delivery_a, delivery_b = uuid.uuid4(), uuid.uuid4()
+
+    try:
+        async with engine.connect() as connection:
+            protected = (
+                await connection.execute(
+                    text("SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname IN ('projects', 'repositories', 'project_knowledge')")
+                )
+            ).all()
+            assert {row[0] for row in protected} == {"projects", "repositories", "project_knowledge"}
+            assert all(row[1] and row[2] for row in protected)
+
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'RLS projects', :slug, '')"),
+                [{"id": tenant_a, "slug": f"rls-project-{tenant_a}"}, {"id": tenant_b, "slug": f"rls-project-{tenant_b}"}],
+            )
+            await connection.execute(
+                text("INSERT INTO organizations (id, name, slug, tenant_id) VALUES (:id, 'RLS projects', :slug, :tenant_id)"),
+                [
+                    {"id": organization_a, "slug": f"rls-project-{organization_a}", "tenant_id": tenant_a},
+                    {"id": organization_b, "slug": f"rls-project-{organization_b}", "tenant_id": tenant_b},
+                    {"id": organization_a_other, "slug": f"rls-project-{organization_a_other}", "tenant_id": tenant_a},
+                ],
+            )
+            for tenant_id, organization_id, project_id, integration_id, repository_id, knowledge_id in (
+                (tenant_a, organization_a, project_a, integration_a, repository_a, knowledge_a),
+                (tenant_b, organization_b, project_b, integration_b, repository_b, knowledge_b),
+            ):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO projects (id, organization_id, tenant_id, name, slug) "
+                        "VALUES (:id, :organization_id, :tenant_id, 'RLS project', :slug)"
+                    ),
+                    {
+                        "id": project_id,
+                        "organization_id": organization_id,
+                        "tenant_id": tenant_id,
+                        "slug": f"project-{project_id}",
+                    },
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO integrations (id, organization_id, provider, external_id, name) "
+                        "VALUES (:id, :organization_id, 'github', 'rls-project', 'RLS integration')"
+                    ),
+                    {"id": integration_id, "organization_id": organization_id},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO repositories (id, project_id, integration_id, full_name) "
+                        "VALUES (:id, :project_id, :integration_id, :full_name)"
+                    ),
+                    {
+                        "id": repository_id,
+                        "project_id": project_id,
+                        "integration_id": integration_id,
+                        "full_name": f"owner/repo-{project_id}",
+                    },
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO project_knowledge (id, project_id, category, key, value) "
+                        "VALUES (:id, :project_id, 'architecture', 'overview', 'private context')"
+                    ),
+                    {"id": knowledge_id, "project_id": project_id},
+                )
+                task_id, workspace_id = (task_a, workspace_a) if tenant_id == tenant_a else (task_b, workspace_b)
+                await connection.execute(
+                    text("INSERT INTO tasks (id, tenant_id, title) VALUES (:id, :tenant_id, 'RLS workspace task')"),
+                    {"id": task_id, "tenant_id": tenant_id},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO task_workspaces (id, tenant_id, task_id, repository_id) "
+                        "VALUES (:id, :tenant_id, :task_id, :repository_id)"
+                    ),
+                    {
+                        "id": workspace_id,
+                        "tenant_id": tenant_id,
+                        "task_id": task_id,
+                        "repository_id": repository_id,
+                    },
+                )
+                delivery_id = delivery_a if tenant_id == tenant_a else delivery_b
+                await connection.execute(
+                    text(
+                        "INSERT INTO task_deliveries "
+                        "(id, tenant_id, task_id, workspace_id, repository_id, source_commit_sha, base_branch, diff_digest, branch_name) "
+                        "VALUES (:id, :tenant_id, :task_id, :workspace_id, :repository_id, 'abc123', 'main', :digest, :branch)"
+                    ),
+                    {
+                        "id": delivery_id,
+                        "tenant_id": tenant_id,
+                        "task_id": task_id,
+                        "workspace_id": workspace_id,
+                        "repository_id": repository_id,
+                        "digest": f"digest-{delivery_id}",
+                        "branch": f"codex/rls-{delivery_id}",
+                    },
+                )
+            await connection.execute(
+                text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)}
+            )
+            await connection.execute(
+                text("INSERT INTO tasks (id, tenant_id, title) VALUES (:id, :tenant_id, 'RLS unassigned task')"),
+                {"id": task_a_other, "tenant_id": tenant_a},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO integrations (id, organization_id, provider, external_id, name) "
+                    "VALUES (:id, :organization_id, 'github', 'rls-project-other', 'RLS integration')"
+                ),
+                {"id": integration_a_other, "organization_id": organization_a_other},
+            )
+
+        tenant_context.clear()
+        async with sessions() as db:
+            assert (await db.execute(select(Project.id))).scalars().all() == []
+            assert (await db.execute(select(Repository.id))).scalars().all() == []
+            assert (await db.execute(select(ProjectKnowledge.id))).scalars().all() == []
+            assert (await db.execute(select(TaskDelivery.id))).scalars().all() == []
+            with pytest.raises(DBAPIError):
+                await db.execute(
+                    text("INSERT INTO projects (id, organization_id, tenant_id, name, slug) VALUES (:id, :org, :tenant, 'bad', 'bad')"),
+                    {"id": uuid.uuid4(), "org": organization_a, "tenant": tenant_a},
+                )
+            await db.rollback()
+
+        tenant_context.set(tenant_a, "rls-project-a")
+        async with sessions() as db:
+            assert (await db.execute(select(Project.id))).scalars().all() == [project_a]
+            assert (await db.execute(select(Repository.id))).scalars().all() == [repository_a]
+            assert (await db.execute(select(ProjectKnowledge.id))).scalars().all() == [knowledge_a]
+            assert (await db.execute(select(TaskDelivery.id))).scalars().all() == [delivery_a]
+            hidden_repository_update = await db.execute(
+                text("UPDATE repositories SET full_name = 'hidden/repo' WHERE id = :id"), {"id": repository_b}
+            )
+            hidden_knowledge_update = await db.execute(
+                text("UPDATE project_knowledge SET value = 'hidden' WHERE id = :id"), {"id": knowledge_b}
+            )
+            assert hidden_repository_update.rowcount == hidden_knowledge_update.rowcount == 0
+            await db.rollback()
+
+            with pytest.raises(DBAPIError):
+                await db.execute(
+                    text("INSERT INTO projects (id, organization_id, tenant_id, name, slug) VALUES (:id, :org, :tenant, 'bad', 'wrong-org')"),
+                    {"id": uuid.uuid4(), "org": organization_b, "tenant": tenant_a},
+                )
+            await db.rollback()
+
+            db.add(
+                Repository(
+                    id=uuid.uuid4(),
+                    project_id=project_a,
+                    integration_id=integration_a_other,
+                    full_name="owner/wrong-organization",
+                )
+            )
+            with pytest.raises(DBAPIError):
+                await db.flush()
+            await db.rollback()
+
+            db.add(
+                TaskDelivery(
+                    id=uuid.uuid4(),
+                    tenant_id=tenant_a,
+                    task_id=task_a,
+                    workspace_id=workspace_a,
+                    repository_id=repository_b,
+                    source_commit_sha="abc123",
+                    base_branch="main",
+                    diff_digest=uuid.uuid4().hex,
+                    branch_name=f"codex/rls-invalid-{uuid.uuid4().hex[:8]}",
+                )
+            )
+            with pytest.raises(DBAPIError):
+                await db.flush()
+            await db.rollback()
+
+            db.add(
+                TaskWorkspace(
+                    id=uuid.uuid4(),
+                    tenant_id=tenant_a,
+                    task_id=task_a_other,
+                    repository_id=repository_b,
+                )
+            )
+            with pytest.raises(DBAPIError):
+                await db.flush()
+            await db.rollback()
+    finally:
+        tenant_context.clear()
+        async with engine.begin() as connection:
+            for tenant_id, project_id, integration_id in (
+                (tenant_a, project_a, integration_a),
+                (tenant_b, project_b, integration_b),
+            ):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(text("DELETE FROM project_knowledge WHERE project_id = :id"), {"id": project_id})
+                await connection.execute(text("DELETE FROM task_deliveries WHERE task_id = :id"), {"id": task_a if tenant_id == tenant_a else task_b})
+                await connection.execute(text("DELETE FROM task_workspaces WHERE task_id = :id"), {"id": task_a if tenant_id == tenant_a else task_b})
+                await connection.execute(text("DELETE FROM tasks WHERE id = :id"), {"id": task_a if tenant_id == tenant_a else task_b})
+                await connection.execute(text("DELETE FROM repositories WHERE project_id = :id"), {"id": project_id})
+                await connection.execute(text("DELETE FROM projects WHERE id = :id"), {"id": project_id})
+                await connection.execute(text("DELETE FROM integrations WHERE id = :id"), {"id": integration_id})
+            await connection.execute(
+                text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)}
+            )
+            await connection.execute(text("DELETE FROM integrations WHERE id = :id"), {"id": integration_a_other})
+            await connection.execute(
+                text("DELETE FROM organizations WHERE id IN (:a, :b, :c)"),
+                {"a": organization_a, "b": organization_b, "c": organization_a_other},
+            )
+            await connection.execute(text("DELETE FROM tasks WHERE id = :id"), {"id": task_a_other})
             await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
         await engine.dispose()
 
