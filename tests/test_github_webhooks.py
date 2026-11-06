@@ -225,7 +225,8 @@ async def test_webhook_persists_one_triage_event_per_connected_project() -> None
     assert len(stub_db.added) == 2
     scoped_tenants = [call.args[1] for call in bind_scope.await_args_list]
     assert scoped_tenants[:2] == list(stub_db.tenant_ids)
-    assert scoped_tenants[2:] == list(stub_db.tenant_ids)
+    assert scoped_tenants[2:4] == list(stub_db.tenant_ids)
+    assert scoped_tenants[4:] == list(stub_db.tenant_ids)
     assert stub_db.added[0].delivery_id == delivery_id
     assert stub_db.added[0].source_event_id == "octo/repo:456:1"
     assert stub_db.added[0].status == "pending"

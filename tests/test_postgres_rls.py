@@ -525,6 +525,7 @@ async def test_approval_rls_is_tenant_and_organization_scoped() -> None:
                     {"id": organization_b, "slug": f"rls-approval-{organization_b}", "tenant_id": tenant_b},
                 ],
             )
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
             await connection.execute(
                 text("INSERT INTO projects (id, organization_id, tenant_id, name, slug) VALUES (:id, :organization_id, :tenant_id, 'RLS approvals', :slug)"),
                 [
@@ -643,13 +644,18 @@ async def test_proactive_data_rls_is_tenant_and_organization_scoped() -> None:
                     {"id": organization_b, "slug": f"rls-proactive-{organization_b}", "tenant_id": tenant_b},
                 ],
             )
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
             await connection.execute(
                 text("INSERT INTO projects (id, organization_id, tenant_id, name, slug) VALUES (:id, :organization_id, :tenant_id, 'RLS proactive', :slug)"),
                 [
                     {"id": project_a, "organization_id": organization_a, "tenant_id": tenant_a, "slug": f"rls-proactive-{project_a}"},
                     {"id": project_a_other, "organization_id": organization_a_other, "tenant_id": tenant_a, "slug": f"rls-proactive-{project_a_other}"},
-                    {"id": project_b, "organization_id": organization_b, "tenant_id": tenant_b, "slug": f"rls-proactive-{project_b}"},
                 ],
+            )
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
+            await connection.execute(
+                text("INSERT INTO projects (id, organization_id, tenant_id, name, slug) VALUES (:id, :organization_id, :tenant_id, 'RLS proactive', :slug)"),
+                {"id": project_b, "organization_id": organization_b, "tenant_id": tenant_b, "slug": f"rls-proactive-{project_b}"},
             )
             for tenant_id, organization_id, project_id, event_id, schedule_id in (
                 (tenant_a, organization_a, project_a, event_a, schedule_a),
@@ -1404,13 +1410,18 @@ async def test_teammate_memory_rls_scopes_tenant_and_assignment_relationships() 
                     {"id": org_b, "slug": f"rls-memory-org-{org_b}", "tenant_id": tenant_b},
                 ],
             )
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
             await connection.execute(
                 text("INSERT INTO projects (id, organization_id, tenant_id, name, slug) VALUES (:id, :organization_id, :tenant_id, 'Memory RLS', :slug)"),
                 [
                     {"id": project_a, "organization_id": org_a, "tenant_id": tenant_a, "slug": f"rls-memory-project-{project_a}"},
-                    {"id": project_b, "organization_id": org_b, "tenant_id": tenant_b, "slug": f"rls-memory-project-{project_b}"},
                     {"id": project_unassigned, "organization_id": org_a, "tenant_id": tenant_a, "slug": f"rls-memory-project-{project_unassigned}"},
                 ],
+            )
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
+            await connection.execute(
+                text("INSERT INTO projects (id, organization_id, tenant_id, name, slug) VALUES (:id, :organization_id, :tenant_id, 'Memory RLS', :slug)"),
+                {"id": project_b, "organization_id": org_b, "tenant_id": tenant_b, "slug": f"rls-memory-project-{project_b}"},
             )
             await connection.execute(
                 text("INSERT INTO teammate_profiles (id, organization_id, tenant_id, name, role, agent_type) VALUES (:id, :organization_id, :tenant_id, 'Memory RLS', 'developer', 'developer')"),
@@ -1548,12 +1559,15 @@ async def test_task_handoff_rls_is_tenant_scoped_and_validates_relationships() -
                     {"id": org_b, "slug": f"rls-handoff-org-{org_b}", "tenant_id": tenant_b},
                 ],
             )
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
             await connection.execute(
                 text("INSERT INTO projects (id, organization_id, tenant_id, name, slug) VALUES (:id, :organization_id, :tenant_id, 'Handoff RLS', :slug)"),
-                [
-                    {"id": project_a, "organization_id": org_a, "tenant_id": tenant_a, "slug": f"rls-handoff-project-{project_a}"},
-                    {"id": project_b, "organization_id": org_b, "tenant_id": tenant_b, "slug": f"rls-handoff-project-{project_b}"},
-                ],
+                {"id": project_a, "organization_id": org_a, "tenant_id": tenant_a, "slug": f"rls-handoff-project-{project_a}"},
+            )
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
+            await connection.execute(
+                text("INSERT INTO projects (id, organization_id, tenant_id, name, slug) VALUES (:id, :organization_id, :tenant_id, 'Handoff RLS', :slug)"),
+                {"id": project_b, "organization_id": org_b, "tenant_id": tenant_b, "slug": f"rls-handoff-project-{project_b}"},
             )
             await connection.execute(
                 text("INSERT INTO teammate_profiles (id, organization_id, tenant_id, name, role, agent_type) VALUES (:id, :organization_id, :tenant_id, 'Handoff RLS', 'developer', 'developer')"),

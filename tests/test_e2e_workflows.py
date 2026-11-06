@@ -434,7 +434,7 @@ async def test_acceptance_criteria_require_an_owner_admin_decision(client: Async
     from sqlalchemy import select
 
     from solvyn.db.models import Organization, OrganizationMembership, Tenant, User
-    from solvyn.db.session import async_session_factory
+    from solvyn.db.session import async_session_factory, bind_tenant_scope
 
     workflow = await client.post("/api/v1/workflows/feature/run", json={"requirement": "Track task acceptance criteria"})
     assert workflow.status_code == 200
@@ -459,6 +459,7 @@ async def test_acceptance_criteria_require_an_owner_admin_decision(client: Async
     organization_id = uuid.uuid4()
     async with async_session_factory() as db:
         tenant = (await db.execute(select(Tenant).where(Tenant.slug == "test-tenant"))).scalar_one()
+        await bind_tenant_scope(db, tenant.id)
         organization = Organization(
             id=organization_id,
             name="Acceptance Review",
@@ -558,13 +559,14 @@ async def test_feature_workflow_runs_to_completion(client: AsyncClient) -> None:
         Tenant,
         User,
     )
-    from solvyn.db.session import async_session_factory
+    from solvyn.db.session import async_session_factory, bind_tenant_scope
 
     project_id = uuid.uuid4()
     teammate_id = uuid.uuid4()
     user_id = uuid.uuid4()
     async with async_session_factory() as db:
         tenant = (await db.execute(select(Tenant).where(Tenant.slug == "test-tenant"))).scalar_one()
+        await bind_tenant_scope(db, tenant.id)
         organization = Organization(
             id=uuid.uuid4(),
             name="Handoff Test Org",
