@@ -77,4 +77,4 @@ async def test_owned_task_binds_resolved_shared_secret_tenant_before_query(monke
     owned = await verification._owned_task(execution_id, task_id, db)
 
     assert owned is task
-    assert events == ["bind", "query"]
+    assert events == ["bind", "query", "bind"]
