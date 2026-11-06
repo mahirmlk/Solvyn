@@ -131,8 +131,13 @@ async def test_due_maintenance_schedule_adds_one_human_triage_event_and_advances
         def __init__(self) -> None:
             self.events: list[ProactiveEvent] = []
             self.commits = 0
+            self.execute_count = 0
+            self.tenant_id = uuid.uuid4()
 
         async def execute(self, _query: object) -> Results:
+            self.execute_count += 1
+            if self.execute_count == 1:
+                return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [self.tenant_id]))
             return Results()
 
         def add(self, event: ProactiveEvent) -> None:
@@ -142,7 +147,9 @@ async def test_due_maintenance_schedule_adds_one_human_triage_event_and_advances
             self.commits += 1
 
     stub_db = StubDB()
-    count = await _queue_due_maintenance_events(cast(AsyncSession, stub_db))
+    with patch("solvyn.workflows.scheduler.bind_tenant_scope", new_callable=AsyncMock) as bind_scope:
+        count = await _queue_due_maintenance_events(cast(AsyncSession, stub_db))
+    bind_scope.assert_awaited_once_with(cast(AsyncSession, stub_db), stub_db.tenant_id)
 
     assert count == 1
     assert stub_db.commits == 1
