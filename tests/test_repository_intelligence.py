@@ -321,6 +321,54 @@ async def test_pull_request_detail_returns_bounded_diff_and_latest_review_state(
 
 
 @pytest.mark.asyncio
+async def test_pull_request_status_does_not_fetch_diff_or_unbounded_review_history() -> None:
+    requests: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/repos/octo/example/pulls/42":
+            return httpx.Response(
+                200,
+                json={
+                    "number": 42,
+                    "title": "Current title",
+                    "state": "open",
+                    "draft": True,
+                    "merged_at": None,
+                    "html_url": "https://github.com/octo/example/pull/42",
+                    "head": {"ref": "solvyn/task-42", "sha": "abc123"},
+                    "base": {"ref": "main"},
+                    "requested_reviewers": [],
+                },
+            )
+        if request.url.path == "/repos/octo/example/pulls/42/reviews":
+            assert request.url.params["page"] == "1"
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "user": {"login": f"reviewer-{index}"},
+                        "state": "APPROVED",
+                        "submitted_at": "2026-11-06T08:00:00Z",
+                    }
+                    for index in range(100)
+                ],
+            )
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    async with GitHubClient(http) as github:
+        result = await github.pull_request_status("octo/example", 42)
+    await http.aclose()
+
+    assert result["state"] == "open"
+    assert result["draft"] is True
+    assert result["review_status"]["state"] == "incomplete_history"
+    assert result["review_status"]["history_truncated"] is True
+    assert requests == ["/repos/octo/example/pulls/42", "/repos/octo/example/pulls/42/reviews"]
+
+
+@pytest.mark.asyncio
 async def test_pull_request_diff_rejects_oversized_responses() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/reviews"):

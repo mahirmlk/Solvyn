@@ -72,6 +72,59 @@
   gap: 10px;
 }
 
+.activityList {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--line-light);
+}
+
+.activityItem {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 15px 2px;
+  border-bottom: 1px solid var(--line-light);
+}
+
+.activityMeta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--color-muted);
+  font-size: 10px;
+}
+
+.activityMeta time {
+  margin-left: auto;
+}
+
+.activityType {
+  color: var(--color-ink);
+  font-weight: 650;
+  text-transform: capitalize;
+}
+
+.activitySummary {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.activityItem p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+
+.activityError {
+  margin: 0;
+  color: var(--color-error);
+  font-size: 12px;
+}
+
 .file {
   min-width: 0;
   border: 1px solid var(--line-light);
