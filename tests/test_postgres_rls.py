@@ -30,6 +30,9 @@ from solvyn.db.models import (
     TaskHandoff,
     TaskWorkspace,
     TeammateMemory,
+    TeammatePermission,
+    TeammateProfile,
+    TeammateProjectAssignment,
     TeammateToolInvocation,
     TokenUsage,
     VerificationRun,
@@ -66,7 +69,8 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                         "'teammate_tool_invocations', 'task_dependencies', 'verification_runs', "
                         "'task_handoffs', 'teammate_memory', 'sessions', 'execution_graphs', 'memory', 'token_usage', "
                         "'approvals', 'proactive_events', 'maintenance_schedules', 'integrations', "
-                        "'integration_credentials', 'projects', 'repositories', 'project_knowledge')"
+                        "'integration_credentials', 'projects', 'repositories', 'project_knowledge', "
+                        "'teammate_profiles', 'teammate_permissions', 'teammate_project_assignments')"
                     )
                 )
             ).all()
@@ -92,6 +96,9 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                 "projects",
                 "repositories",
                 "project_knowledge",
+                "teammate_profiles",
+                "teammate_permissions",
+                "teammate_project_assignments",
             }
             assert all(row[1] and row[2] for row in protected_tables)
 
@@ -1428,20 +1435,22 @@ async def test_teammate_memory_rls_scopes_tenant_and_assignment_relationships() 
                 text("INSERT INTO projects (id, organization_id, tenant_id, name, slug) VALUES (:id, :organization_id, :tenant_id, 'Memory RLS', :slug)"),
                 {"id": project_b, "organization_id": org_b, "tenant_id": tenant_b, "slug": f"rls-memory-project-{project_b}"},
             )
-            await connection.execute(
-                text("INSERT INTO teammate_profiles (id, organization_id, tenant_id, name, role, agent_type) VALUES (:id, :organization_id, :tenant_id, 'Memory RLS', 'developer', 'developer')"),
-                [
-                    {"id": teammate_a, "organization_id": org_a, "tenant_id": tenant_a},
-                    {"id": teammate_b, "organization_id": org_b, "tenant_id": tenant_b},
-                ],
-            )
-            await connection.execute(
-                text("INSERT INTO teammate_project_assignments (id, teammate_id, project_id) VALUES (:id, :teammate_id, :project_id)"),
-                [
-                    {"id": uuid.uuid4(), "teammate_id": teammate_a, "project_id": project_a},
-                    {"id": uuid.uuid4(), "teammate_id": teammate_b, "project_id": project_b},
-                ],
-            )
+            for tenant_id, organization_id, teammate_id, project_id in (
+                (tenant_a, org_a, teammate_a, project_a),
+                (tenant_b, org_b, teammate_b, project_b),
+            ):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(
+                    text("INSERT INTO teammate_profiles (id, organization_id, tenant_id, name, role, agent_type) VALUES (:id, :organization_id, :tenant_id, 'Memory RLS', 'developer', 'developer')"),
+                    {"id": teammate_id, "organization_id": organization_id, "tenant_id": tenant_id},
+                )
+                await connection.execute(
+                    text("INSERT INTO teammate_project_assignments (id, teammate_id, project_id) VALUES (:id, :teammate_id, :project_id)"),
+                    {"id": uuid.uuid4(), "teammate_id": teammate_id, "project_id": project_id},
+                )
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
             await connection.execute(
                 text("INSERT INTO teammate_memory (id, tenant_id, teammate_id, project_id, key, value) VALUES (:id, :tenant_id, :teammate_id, :project_id, 'context', 'private')"),
@@ -1508,8 +1517,10 @@ async def test_teammate_memory_rls_scopes_tenant_and_assignment_relationships() 
             await connection.execute(text("DELETE FROM teammate_memory WHERE id = :id"), {"id": memory_a})
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
             await connection.execute(text("DELETE FROM teammate_memory WHERE id = :id"), {"id": memory_b})
-            await connection.execute(text("DELETE FROM teammate_project_assignments WHERE teammate_id IN (:a, :b)"), {"a": teammate_a, "b": teammate_b})
-            await connection.execute(text("DELETE FROM teammate_profiles WHERE id IN (:a, :b)"), {"a": teammate_a, "b": teammate_b})
+            for tenant_id, teammate_id in ((tenant_a, teammate_a), (tenant_b, teammate_b)):
+                await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_id)})
+                await connection.execute(text("DELETE FROM teammate_project_assignments WHERE teammate_id = :id"), {"id": teammate_id})
+                await connection.execute(text("DELETE FROM teammate_profiles WHERE id = :id"), {"id": teammate_id})
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
             await connection.execute(text("DELETE FROM projects WHERE id IN (:a, :b, :unassigned)"), {"a": project_a, "b": project_b, "unassigned": project_unassigned})
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
@@ -1577,20 +1588,22 @@ async def test_task_handoff_rls_is_tenant_scoped_and_validates_relationships() -
                 text("INSERT INTO projects (id, organization_id, tenant_id, name, slug) VALUES (:id, :organization_id, :tenant_id, 'Handoff RLS', :slug)"),
                 {"id": project_b, "organization_id": org_b, "tenant_id": tenant_b, "slug": f"rls-handoff-project-{project_b}"},
             )
-            await connection.execute(
-                text("INSERT INTO teammate_profiles (id, organization_id, tenant_id, name, role, agent_type) VALUES (:id, :organization_id, :tenant_id, 'Handoff RLS', 'developer', 'developer')"),
-                [
-                    {"id": teammate_a, "organization_id": org_a, "tenant_id": tenant_a},
-                    {"id": teammate_b, "organization_id": org_b, "tenant_id": tenant_b},
-                ],
-            )
-            await connection.execute(
-                text("INSERT INTO teammate_project_assignments (id, teammate_id, project_id) VALUES (:id, :teammate_id, :project_id)"),
-                [
-                    {"id": uuid.uuid4(), "teammate_id": teammate_a, "project_id": project_a},
-                    {"id": uuid.uuid4(), "teammate_id": teammate_b, "project_id": project_b},
-                ],
-            )
+            for tenant_id, organization_id, teammate_id, project_id in (
+                (tenant_a, org_a, teammate_a, project_a),
+                (tenant_b, org_b, teammate_b, project_b),
+            ):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(
+                    text("INSERT INTO teammate_profiles (id, organization_id, tenant_id, name, role, agent_type) VALUES (:id, :organization_id, :tenant_id, 'Handoff RLS', 'developer', 'developer')"),
+                    {"id": teammate_id, "organization_id": organization_id, "tenant_id": tenant_id},
+                )
+                await connection.execute(
+                    text("INSERT INTO teammate_project_assignments (id, teammate_id, project_id) VALUES (:id, :teammate_id, :project_id)"),
+                    {"id": uuid.uuid4(), "teammate_id": teammate_id, "project_id": project_id},
+                )
             for tenant_id, parent_id, child_id in (
                 (tenant_a, parent_a, child_a),
                 (tenant_b, parent_b, child_b),
@@ -1663,12 +1676,16 @@ async def test_task_handoff_rls_is_tenant_scoped_and_validates_relationships() -
             await connection.execute(text("DELETE FROM task_handoffs WHERE id = :id"), {"id": handoff_a})
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
             await connection.execute(text("DELETE FROM task_handoffs WHERE id = :id"), {"id": handoff_b})
-            await connection.execute(text("DELETE FROM teammate_project_assignments WHERE teammate_id IN (:a, :b)"), {"a": teammate_a, "b": teammate_b})
+            for tenant_id, teammate_id in ((tenant_a, teammate_a), (tenant_b, teammate_b)):
+                await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_id)})
+                await connection.execute(text("DELETE FROM teammate_project_assignments WHERE teammate_id = :id"), {"id": teammate_id})
             for tenant_id, parent_id, child_id in ((tenant_a, parent_a, child_a), (tenant_b, parent_b, child_b)):
                 await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_id)})
                 await connection.execute(text("DELETE FROM tasks WHERE id = :id"), {"id": child_id})
                 await connection.execute(text("DELETE FROM tasks WHERE id = :id"), {"id": parent_id})
-            await connection.execute(text("DELETE FROM teammate_profiles WHERE id IN (:a, :b)"), {"a": teammate_a, "b": teammate_b})
+            for tenant_id, teammate_id in ((tenant_a, teammate_a), (tenant_b, teammate_b)):
+                await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_id)})
+                await connection.execute(text("DELETE FROM teammate_profiles WHERE id = :id"), {"id": teammate_id})
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
             await connection.execute(text("DELETE FROM projects WHERE id = :id"), {"id": project_a})
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
@@ -1993,17 +2010,22 @@ async def test_teammate_tool_invocation_rls_is_tenant_scoped() -> None:
                 text("INSERT INTO task_workspaces (id, tenant_id, task_id) VALUES (:id, :tenant_id, :task_id)"),
                 {"id": workspace_b, "tenant_id": tenant_b, "task_id": task_b},
             )
-            await connection.execute(
-                text(
-                    "INSERT INTO teammate_profiles "
-                    "(id, organization_id, tenant_id, name, role, agent_type) "
-                    "VALUES (:id, :organization_id, :tenant_id, 'RLS teammate', 'software_engineer', 'engineer')"
-                ),
-                [
-                    {"id": teammate_a, "organization_id": organization_a, "tenant_id": tenant_a},
-                    {"id": teammate_b, "organization_id": organization_b, "tenant_id": tenant_b},
-                ],
-            )
+            for tenant_id, organization_id, teammate_id in (
+                (tenant_a, organization_a, teammate_a),
+                (tenant_b, organization_b, teammate_b),
+            ):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO teammate_profiles "
+                        "(id, organization_id, tenant_id, name, role, agent_type) "
+                        "VALUES (:id, :organization_id, :tenant_id, 'RLS teammate', 'software_engineer', 'engineer')"
+                    ),
+                    {"id": teammate_id, "organization_id": organization_id, "tenant_id": tenant_id},
+                )
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
             await connection.execute(
                 text(
@@ -2067,12 +2089,212 @@ async def test_teammate_tool_invocation_rls_is_tenant_scoped() -> None:
             await connection.execute(text("DELETE FROM teammate_tool_invocations WHERE id = :id"), {"id": invocation_a})
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
             await connection.execute(text("DELETE FROM teammate_tool_invocations WHERE id = :id"), {"id": invocation_b})
-            await connection.execute(text("DELETE FROM teammate_profiles WHERE id IN (:a, :b)"), {"a": teammate_a, "b": teammate_b})
+            for tenant_id, teammate_id in ((tenant_a, teammate_a), (tenant_b, teammate_b)):
+                await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_id)})
+                await connection.execute(text("DELETE FROM teammate_profiles WHERE id = :id"), {"id": teammate_id})
             for tenant_id, task_id in ((tenant_a, task_a), (tenant_b, task_b)):
                 await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_id)})
                 await connection.execute(text("DELETE FROM tasks WHERE id = :id"), {"id": task_id})
             await connection.execute(text("DELETE FROM organizations WHERE id IN (:a, :b)"), {"a": organization_a, "b": organization_b})
             await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_teammate_authorization_rls_is_tenant_and_organization_scoped() -> None:
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url.startswith("postgresql+"):
+        pytest.skip("RLS behavior requires PostgreSQL and migrations at head")
+
+    engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+    org_a, org_a_other, org_b = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    project_a, project_a_other_org, project_b = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    teammate_a, teammate_b = uuid.uuid4(), uuid.uuid4()
+    permission_a, permission_b = uuid.uuid4(), uuid.uuid4()
+    assignment_a, assignment_b = uuid.uuid4(), uuid.uuid4()
+
+    try:
+        async with engine.connect() as connection:
+            protected = (
+                await connection.execute(
+                    text(
+                        "SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class "
+                        "WHERE relname IN ('teammate_profiles', 'teammate_permissions', "
+                        "'teammate_project_assignments') ORDER BY relname"
+                    )
+                )
+            ).all()
+            assert [row[0] for row in protected] == [
+                "teammate_permissions",
+                "teammate_profiles",
+                "teammate_project_assignments",
+            ]
+            assert all(row[1] and row[2] for row in protected)
+
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'Teammate RLS', :slug, '')"),
+                [
+                    {"id": tenant_a, "slug": f"rls-teammate-{tenant_a}"},
+                    {"id": tenant_b, "slug": f"rls-teammate-{tenant_b}"},
+                ],
+            )
+            await connection.execute(
+                text("INSERT INTO organizations (id, name, slug, tenant_id) VALUES (:id, 'Teammate RLS', :slug, :tenant_id)"),
+                [
+                    {"id": org_a, "slug": f"rls-teammate-org-{org_a}", "tenant_id": tenant_a},
+                    {"id": org_a_other, "slug": f"rls-teammate-org-{org_a_other}", "tenant_id": tenant_a},
+                    {"id": org_b, "slug": f"rls-teammate-org-{org_b}", "tenant_id": tenant_b},
+                ],
+            )
+            for tenant_id, organization_id, project_id in (
+                (tenant_a, org_a, project_a),
+                (tenant_a, org_a_other, project_a_other_org),
+                (tenant_b, org_b, project_b),
+            ):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO projects (id, organization_id, tenant_id, name, slug) "
+                        "VALUES (:id, :organization_id, :tenant_id, 'Teammate RLS', :slug)"
+                    ),
+                    {
+                        "id": project_id,
+                        "organization_id": organization_id,
+                        "tenant_id": tenant_id,
+                        "slug": f"rls-teammate-project-{project_id}",
+                    },
+                )
+                if project_id in (project_a, project_b):
+                    teammate_id = teammate_a if tenant_id == tenant_a else teammate_b
+                    permission_id = permission_a if tenant_id == tenant_a else permission_b
+                    assignment_id = assignment_a if tenant_id == tenant_a else assignment_b
+                    await connection.execute(
+                        text(
+                            "INSERT INTO teammate_profiles "
+                            "(id, organization_id, tenant_id, name, role, agent_type) "
+                            "VALUES (:id, :organization_id, :tenant_id, 'Teammate RLS', 'developer', 'developer')"
+                        ),
+                        {"id": teammate_id, "organization_id": organization_id, "tenant_id": tenant_id},
+                    )
+                    await connection.execute(
+                        text(
+                            "INSERT INTO teammate_permissions (id, teammate_id, permission) "
+                            "VALUES (:id, :teammate_id, 'READ_ONLY')"
+                        ),
+                        {"id": permission_id, "teammate_id": teammate_id},
+                    )
+                    await connection.execute(
+                        text(
+                            "INSERT INTO teammate_project_assignments (id, teammate_id, project_id) "
+                            "VALUES (:id, :teammate_id, :project_id)"
+                        ),
+                        {"id": assignment_id, "teammate_id": teammate_id, "project_id": project_id},
+                    )
+
+        tenant_context.clear()
+        async with sessions() as session:
+            assert (await session.execute(select(TeammateProfile.id))).scalars().all() == []
+            assert (await session.execute(select(TeammatePermission.id))).scalars().all() == []
+            assert (await session.execute(select(TeammateProjectAssignment.id))).scalars().all() == []
+            with pytest.raises(DBAPIError):
+                session.add(
+                    TeammateProfile(
+                        id=uuid.uuid4(), organization_id=org_a, tenant_id=tenant_a,
+                        name="Unscoped", role="developer", agent_type="developer",
+                    )
+                )
+                await session.flush()
+            await session.rollback()
+
+        tenant_context.set(tenant_a, "rls-teammate-a")
+        async with sessions() as session:
+            assert (await session.execute(select(TeammateProfile.id))).scalars().all() == [teammate_a]
+            assert (await session.execute(select(TeammatePermission.id))).scalars().all() == [permission_a]
+            assert (await session.execute(select(TeammateProjectAssignment.id))).scalars().all() == [assignment_a]
+            await session.execute(
+                text("DELETE FROM teammate_profiles WHERE id = :id"), {"id": teammate_b}
+            )
+            await session.execute(
+                text("DELETE FROM teammate_permissions WHERE id = :id"), {"id": permission_b}
+            )
+            await session.execute(
+                text("DELETE FROM teammate_project_assignments WHERE id = :id"), {"id": assignment_b}
+            )
+
+            invalid_profiles = (
+                {"id": uuid.uuid4(), "organization_id": org_b, "tenant_id": tenant_b},
+                {"id": uuid.uuid4(), "organization_id": org_a, "tenant_id": tenant_b},
+            )
+            for values in invalid_profiles:
+                session.add(
+                    TeammateProfile(
+                        **values, name="Invalid", role="developer", agent_type="developer"
+                    )
+                )
+                with pytest.raises(DBAPIError):
+                    await session.flush()
+                await session.rollback()
+
+            session.add(
+                TeammatePermission(
+                    id=uuid.uuid4(), teammate_id=teammate_b, permission="MODIFY_FILES"
+                )
+            )
+            with pytest.raises(DBAPIError):
+                await session.flush()
+            await session.rollback()
+
+            for project_id in (project_b, project_a_other_org):
+                session.add(
+                    TeammateProjectAssignment(
+                        id=uuid.uuid4(), teammate_id=teammate_a, project_id=project_id
+                    )
+                )
+                with pytest.raises(DBAPIError):
+                    await session.flush()
+                await session.rollback()
+    finally:
+        tenant_context.clear()
+        async with engine.begin() as connection:
+            for tenant_id, teammate_id, permission_id, assignment_id in (
+                (tenant_a, teammate_a, permission_a, assignment_a),
+                (tenant_b, teammate_b, permission_b, assignment_b),
+            ):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(
+                    text("DELETE FROM teammate_project_assignments WHERE id = :id"),
+                    {"id": assignment_id},
+                )
+                await connection.execute(
+                    text("DELETE FROM teammate_permissions WHERE id = :id"),
+                    {"id": permission_id},
+                )
+                await connection.execute(
+                    text("DELETE FROM teammate_profiles WHERE id = :id"),
+                    {"id": teammate_id},
+                )
+                for project_id in (
+                    (project_a, project_a_other_org) if tenant_id == tenant_a else (project_b,)
+                ):
+                    await connection.execute(
+                        text("DELETE FROM projects WHERE id = :id"), {"id": project_id}
+                    )
+            await connection.execute(
+                text("DELETE FROM organizations WHERE id IN (:a, :a_other, :b)"),
+                {"a": org_a, "a_other": org_a_other, "b": org_b},
+            )
+            await connection.execute(
+                text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b}
+            )
         await engine.dispose()
 
 
