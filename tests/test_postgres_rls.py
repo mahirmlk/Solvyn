@@ -19,6 +19,7 @@ from solvyn.db.models import (
     MaintenanceSchedule,
     Memory,
     Organization,
+    OrganizationMembership,
     ProactiveEvent,
     Project,
     ProjectKnowledge,
@@ -2495,6 +2496,150 @@ async def test_organization_workspace_rls_is_tenant_scoped_and_preserves_project
             await connection.execute(
                 text("DELETE FROM organizations WHERE id = :id"), {"id": organization_a_other}
             )
+            await connection.execute(
+                text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b}
+            )
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_organization_membership_rls_preserves_first_membership_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url.startswith("postgresql+"):
+        pytest.skip("RLS behavior requires PostgreSQL and migrations at head")
+
+    from solvyn.multi_tenant import auth as tenant_auth
+
+    engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+    organization_a, organization_b = uuid.uuid4(), uuid.uuid4()
+    membership_a, membership_b = uuid.uuid4(), uuid.uuid4()
+    user_id = uuid.uuid4()
+    monkeypatch.setattr(tenant_auth, "async_session_factory", sessions)
+
+    try:
+        async with engine.connect() as connection:
+            protected = (
+                await connection.execute(
+                    text(
+                        "SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class "
+                        "WHERE relname = 'organization_memberships'"
+                    )
+                )
+            ).all()
+            assert {row[0] for row in protected} == {"organization_memberships"}
+            assert all(row[1] and row[2] for row in protected)
+
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'Membership RLS', :slug, '')"),
+                [
+                    {"id": tenant_a, "slug": f"rls-membership-{tenant_a}"},
+                    {"id": tenant_b, "slug": f"rls-membership-{tenant_b}"},
+                ],
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO users (id, email, password_hash, display_name) "
+                    "VALUES (:id, :email, 'test-hash', 'Membership RLS')"
+                ),
+                {"id": user_id, "email": f"membership-{user_id}@example.com"},
+            )
+            await _seed_organizations(
+                connection,
+                [
+                    (organization_a, tenant_a, f"rls-membership-org-{organization_a}", "Membership RLS"),
+                    (organization_b, tenant_b, f"rls-membership-org-{organization_b}", "Membership RLS"),
+                ],
+            )
+            for tenant_id, membership_id, organization_id, role in (
+                (tenant_a, membership_a, organization_a, "owner"),
+                (tenant_b, membership_b, organization_b, "admin"),
+            ):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO organization_memberships (id, user_id, organization_id, role) "
+                        "VALUES (:id, :user_id, :organization_id, :role)"
+                    ),
+                    {
+                        "id": membership_id,
+                        "user_id": user_id,
+                        "organization_id": organization_id,
+                        "role": role,
+                    },
+                )
+
+        tenant_context.clear()
+        async with sessions() as session:
+            assert (await session.execute(select(OrganizationMembership.id))).scalars().all() == []
+            session.add(
+                OrganizationMembership(
+                    id=uuid.uuid4(), user_id=user_id, organization_id=organization_a, role="owner"
+                )
+            )
+            with pytest.raises(DBAPIError):
+                await session.flush()
+            await session.rollback()
+
+        tenant_context.set(tenant_a, "rls-membership-a")
+        async with sessions() as session:
+            assert (await session.execute(select(OrganizationMembership.id))).scalars().all() == [membership_a]
+            assert (
+                await session.execute(
+                    update(OrganizationMembership)
+                    .where(OrganizationMembership.id == membership_b)
+                    .values(role="owner")
+                )
+            ).rowcount == 0
+            assert (
+                await session.execute(
+                    text("DELETE FROM organization_memberships WHERE id = :id"), {"id": membership_b}
+                )
+            ).rowcount == 0
+            session.add(
+                OrganizationMembership(
+                    id=uuid.uuid4(), user_id=user_id, organization_id=organization_b, role="owner"
+                )
+            )
+            with pytest.raises(DBAPIError):
+                await session.flush()
+            await session.rollback()
+
+        tenant_context.clear()
+        membership = await tenant_auth._first_membership(user_id)
+        assert membership in (
+            (tenant_a, f"rls-membership-org-{organization_a}", "owner"),
+            (tenant_b, f"rls-membership-org-{organization_b}", "admin"),
+        )
+
+        tenant_context.set(tenant_b, "rls-membership-b")
+        async with sessions() as session:
+            assert (await session.execute(select(OrganizationMembership.id))).scalars().all() == [membership_b]
+    finally:
+        tenant_context.clear()
+        async with engine.begin() as connection:
+            for tenant_id, membership_id, organization_id in (
+                (tenant_a, membership_a, organization_a),
+                (tenant_b, membership_b, organization_b),
+            ):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(
+                    text("DELETE FROM organization_memberships WHERE id = :id"), {"id": membership_id}
+                )
+                await connection.execute(
+                    text("DELETE FROM organizations WHERE id = :id"), {"id": organization_id}
+                )
+            await connection.execute(text("DELETE FROM users WHERE id = :id"), {"id": user_id})
             await connection.execute(
                 text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b}
             )
