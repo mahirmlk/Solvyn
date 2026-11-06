@@ -534,6 +534,7 @@ async def _require_acceptance_reviewer(db: AsyncSession, task: Task) -> tuple[uu
 
 
 async def _finish_run(db: AsyncSession, run: VerificationRun, values: dict[str, Any]) -> dict[str, Any]:
+    await bind_tenant_scope(db, run.tenant_id)
     completed = await db.execute(
         update(VerificationRun)
         .where(VerificationRun.id == run.id, VerificationRun.tenant_id == run.tenant_id, VerificationRun.status == "running")
@@ -541,10 +542,12 @@ async def _finish_run(db: AsyncSession, run: VerificationRun, values: dict[str, 
         .returning(VerificationRun.id)
     )
     if completed.scalar_one_or_none() is None:
+        await bind_tenant_scope(db, run.tenant_id)
         await db.refresh(run)
         evidence = await _verification_history_for_task(db, run.tenant_id, run.task_id)
         return next(item for item in evidence if item["id"] == str(run.id))
     await db.commit()
+    await bind_tenant_scope(db, run.tenant_id)
     await db.refresh(run)
     evidence = await _verification_history_for_task(db, run.tenant_id, run.task_id)
     return next(item for item in evidence if item["id"] == str(run.id))
@@ -767,6 +770,7 @@ async def run_task_verification(
     await db.flush()
     db.add(approval)
     await db.commit()
+    await bind_tenant_scope(db, task.tenant_id)
     await db.refresh(run)
     await db.refresh(approval)
     return {
@@ -832,6 +836,7 @@ async def _execute_approved_verification(
         await db.rollback()
         raise HTTPException(status_code=409, detail="Verification approval has already been used")
     await db.commit()
+    await bind_tenant_scope(db, task.tenant_id)
     await db.refresh(run)
     command = json.loads(run.command)
     try:

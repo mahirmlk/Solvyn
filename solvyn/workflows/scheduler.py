@@ -18,10 +18,11 @@ from solvyn.db.models import (
     ProactiveEvent,
     Project,
     Session,
+    Tenant,
     VerificationRun,
     WorkflowWorkerHeartbeat,
 )
-from solvyn.db.session import async_session_factory
+from solvyn.db.session import async_session_factory, bind_tenant_scope
 from solvyn.workflows.executor import workflow_executor
 
 logger = logging.getLogger(__name__)
@@ -112,25 +113,36 @@ async def _queue_due_maintenance_events(db: AsyncSession) -> int:
     return len(due)
 
 
+async def _interrupt_stale_verification_runs() -> None:
+    """Mark interrupted runs for each tenant under that tenant's RLS scope."""
+    async with async_session_factory() as db:
+        tenant_ids = (await db.execute(select(Tenant.id))).scalars().all()
+        for tenant_id in tenant_ids:
+            await bind_tenant_scope(db, tenant_id)
+            await db.execute(
+                update(VerificationRun)
+                .where(
+                    VerificationRun.tenant_id == tenant_id,
+                    VerificationRun.status == "running",
+                    VerificationRun.started_at < func.now() - _VERIFICATION_STALE_AFTER,
+                )
+                .values(
+                    status="interrupted",
+                    error="Worker stopped before persisting the verification result",
+                    completed_at=func.now(),
+                )
+            )
+            await db.commit()
+
+
 async def run_scheduled_workflows() -> None:
     """Execute due schedules; the executor's conditional lease makes polling multi-worker safe."""
     heartbeat_task = asyncio.create_task(_worker_heartbeat_loop(), name="workflow-worker-heartbeat")
     try:
         while True:
             try:
+                await _interrupt_stale_verification_runs()
                 async with async_session_factory() as db:
-                    await db.execute(
-                        update(VerificationRun)
-                        .where(
-                            VerificationRun.status == "running",
-                            VerificationRun.started_at < func.now() - _VERIFICATION_STALE_AFTER,
-                        )
-                        .values(
-                            status="interrupted",
-                            error="Worker stopped before persisting the verification result",
-                            completed_at=func.now(),
-                        )
-                    )
                     await db.commit()
                     await _queue_due_maintenance_events(db)
                     due = (
