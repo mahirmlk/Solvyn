@@ -54,3 +54,21 @@ def test_tenantless_jwt_cannot_use_default_workflow_tenant() -> None:
         assert exc_info.value.status_code == 403
     finally:
         tenant_context.clear()
+
+
+@pytest.mark.asyncio
+async def test_scoped_tenant_is_inherited_by_worker_tasks_and_reset() -> None:
+    from solvyn.multi_tenant.middleware import tenant_context
+
+    tenant_id = uuid.uuid4()
+
+    async def observe_tenant() -> uuid.UUID | None:
+        await asyncio.sleep(0)
+        return tenant_context.tenant_id
+
+    assert tenant_context.tenant_id is None
+    with tenant_context.scoped_tenant(tenant_id):
+        child = asyncio.create_task(observe_tenant())
+        assert await child == tenant_id
+        assert tenant_context.tenant_id == tenant_id
+    assert tenant_context.tenant_id is None
