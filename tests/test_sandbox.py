@@ -57,6 +57,34 @@ def test_workspace_fingerprint_tracks_paths_and_content(tmp_path: Path) -> None:
     assert manager.fingerprint(workspace) != changed_content
 
 
+def test_workspace_deletes_only_confined_regular_files(tmp_path: Path) -> None:
+    manager = WorkspaceManager(tmp_path / "workspaces")
+    workspace = manager.create()
+    manager.write_file(workspace, "src/main.py", b"remove me")
+
+    manager.delete_file(workspace, "src/main.py")
+    assert manager.list_files(workspace) == []
+    with pytest.raises(WorkspaceError):
+        manager.delete_file(workspace, "../outside.txt")
+    with pytest.raises(WorkspaceError, match="not found"):
+        manager.delete_file(workspace, "src/main.py")
+
+
+def test_workspace_delete_rejects_symlinks(tmp_path: Path) -> None:
+    manager = WorkspaceManager(tmp_path / "workspaces")
+    workspace = manager.create()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep", encoding="utf-8")
+    try:
+        (workspace.path / "link.txt").symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable")
+
+    with pytest.raises(WorkspaceError):
+        manager.delete_file(workspace, "link.txt")
+    assert outside.read_text(encoding="utf-8") == "keep"
+
+
 def test_workspace_rejects_symlink_traversal(tmp_path: Path) -> None:
     manager = WorkspaceManager(tmp_path / "workspaces")
     workspace = manager.create()

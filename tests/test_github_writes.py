@@ -103,6 +103,41 @@ async def test_commit_files_checks_expected_head_and_updates_ref_without_force()
 
 
 @pytest.mark.asyncio
+async def test_commit_files_encodes_deletions_as_null_tree_entries() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith("/git/ref/heads/solvyn/task-12"):
+            return httpx.Response(200, json={"object": {"sha": "head-sha"}})
+        if request.method == "GET" and request.url.path.endswith("/git/commits/head-sha"):
+            return httpx.Response(200, json={"tree": {"sha": "tree-base"}})
+        if request.method == "POST" and request.url.path.endswith("/git/trees"):
+            assert request.read() == (
+                b'{"base_tree":"tree-base","tree":[{"path":"src/keep.py","mode":"100644",'
+                b'"type":"blob","content":"keep"},{"path":"src/remove.py","mode":"100644",'
+                b'"type":"blob","sha":null}]}'
+            )
+            return httpx.Response(201, json={"sha": "tree-next"})
+        if request.method == "POST" and request.url.path.endswith("/git/commits"):
+            return httpx.Response(201, json={"sha": "commit-sha"})
+        if request.method == "PATCH" and request.url.path.endswith("/git/refs/heads/solvyn/task-12"):
+            return httpx.Response(200, json={"ref": "refs/heads/solvyn/task-12"})
+        raise AssertionError(f"Unexpected GitHub request: {request.method} {request.url}")
+
+    http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    async with GitHubClient(http, token="secret-token") as github:
+        result = await github.commit_files(
+            "octo/repo",
+            "solvyn/task-12",
+            expected_head_sha="head-sha",
+            message="Remove unused source",
+            files=[{"path": "src/keep.py", "content": "keep"}],
+            deleted_paths=["src/remove.py"],
+        )
+    await http.aclose()
+
+    assert result == {"branch": "solvyn/task-12", "sha": "commit-sha"}
+
+
+@pytest.mark.asyncio
 async def test_commit_files_rejects_stale_head_before_writing() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
@@ -169,6 +204,14 @@ def test_commit_validation_rejects_traversal_and_duplicate_paths() -> None:
         GitHubClient._validate_commit_files(
             [{"path": "same.txt", "content": "one"}, {"path": "same.txt", "content": "two"}]
         )
+    with pytest.raises(GitHubRepositoryError, match="invalid or duplicate"):
+        GitHubClient._validate_commit_files([{"path": "same.txt", "content": "one"}], ["same.txt"])
+
+
+def test_commit_validation_accepts_deletion_only_but_requires_a_change() -> None:
+    GitHubClient._validate_commit_files([], ["src/remove.py"])
+    with pytest.raises(GitHubRepositoryError, match="between 1 and 50"):
+        GitHubClient._validate_commit_files([], [])
 
 
 def test_commit_validation_enforces_file_and_total_byte_caps() -> None:

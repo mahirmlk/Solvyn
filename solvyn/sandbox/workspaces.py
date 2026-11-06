@@ -99,6 +99,17 @@ class WorkspaceManager:
             raise WorkspaceError("File exceeds the read limit")
         return target.read_bytes()
 
+    def delete_file(self, workspace: ManagedWorkspace, relative_path: str) -> None:
+        """Delete one regular file without following links or removing directories."""
+        target = self._resolve_path(workspace, relative_path)
+        try:
+            mode = target.lstat().st_mode
+        except FileNotFoundError as exc:
+            raise WorkspaceError("File not found") from exc
+        if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+            raise WorkspaceError("Only regular workspace files can be deleted")
+        target.unlink()
+
     def list_files(
         self,
         workspace: ManagedWorkspace,

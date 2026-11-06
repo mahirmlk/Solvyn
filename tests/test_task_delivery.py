@@ -52,6 +52,29 @@ class CollidingSourceTreeGitHub(FakeGitHub):
         return "tree-sha", self.entries
 
 
+class MissingSourceTreeGitHub(FakeGitHub):
+    async def repository_tree(self, _full_name: str, _revision: str) -> tuple[str, list[dict[str, Any]]]:
+        return "tree-sha", []
+
+
+class UnsafeDeletionSourceGitHub(FakeGitHub):
+    async def repository_tree(self, _full_name: str, _revision: str) -> tuple[str, list[dict[str, Any]]]:
+        return "tree-sha", [{"path": "src/main.py", "type": "blob", "mode": "120000"}]
+
+
+class OversizedDeletionSourceGitHub(FakeGitHub):
+    async def text_file(
+        self,
+        _full_name: str,
+        _path: str,
+        _revision: str,
+        *,
+        max_bytes: int,
+    ) -> str | None:
+        assert max_bytes == 1_000_000
+        return "x" * 500_001
+
+
 class FakeDeliveryGitHub(FakeGitHub):
     def __init__(self) -> None:
         self.writes: list[str] = []
@@ -69,6 +92,7 @@ class FakeDeliveryGitHub(FakeGitHub):
     async def commit_files(self, _repo: str, branch: str, **kwargs: Any) -> dict[str, str]:
         assert kwargs["expected_head_sha"] == "a" * 40
         assert kwargs["files"] == [{"path": "src/main.py", "content": "print('after')\n"}]
+        assert kwargs["deleted_paths"] == []
         self.writes.append("commit")
         return {"branch": branch, "sha": "b" * 40}
 
@@ -82,6 +106,14 @@ class AmbiguousPullRequestGitHub(FakeDeliveryGitHub):
     async def create_pull_request(self, _repo: str, **_kwargs: str) -> dict[str, Any]:
         self.writes.append("pull-request")
         raise GitHubRepositoryError(504, "GitHub request timed out")
+
+
+class DeletionOnlyDeliveryGitHub(FakeDeliveryGitHub):
+    async def commit_files(self, _repo: str, branch: str, **kwargs: Any) -> dict[str, str]:
+        assert kwargs["files"] == []
+        assert kwargs["deleted_paths"] == ["src/main.py"]
+        self.writes.append("commit")
+        return {"branch": branch, "sha": "b" * 40}
 
 
 class FakeDeliverySession:
@@ -154,7 +186,7 @@ async def test_delivery_preview_is_bounded_and_digest_binds_workspace_contents(t
 
 
 @pytest.mark.asyncio
-async def test_delivery_preview_blocks_missing_source_files_instead_of_implying_deletion(tmp_path: Any) -> None:
+async def test_delivery_preview_represents_missing_selected_source_as_a_deletion(tmp_path: Any) -> None:
     verification_api = _verification_api()
     manager = WorkspaceManager(tmp_path / "workspaces")
     workspace = manager.create()
@@ -165,8 +197,52 @@ async def test_delivery_preview_blocks_missing_source_files_instead_of_implying_
         repository, record, ["src/main.py"], manager, workspace, FakeGitHub()  # type: ignore[arg-type]
     )
 
-    assert preview["unsupported_missing_source_paths"] == ["src/main.py"]
-    assert preview["can_deliver"] is False
+    assert preview["unsupported_missing_source_paths"] == []
+    assert preview["deleted_paths"] == ["src/main.py"]
+    assert "-print('before')" in preview["diffs"][0]["diff"]
+    assert preview["can_deliver"] is True
+
+
+@pytest.mark.asyncio
+async def test_delivery_preview_keeps_unknown_or_nonregular_deletions_blocked(tmp_path: Any) -> None:
+    verification_api = _verification_api()
+    manager = WorkspaceManager(tmp_path / "workspaces")
+    workspace = manager.create()
+    record = SimpleNamespace(source_commit_sha="a" * 40)
+    repository = SimpleNamespace(id="repo-id", full_name="octo/repo")
+
+    missing = await verification_api._build_delivery_preview(
+        repository, record, ["src/main.py"], manager, workspace, MissingSourceTreeGitHub()  # type: ignore[arg-type]
+    )
+    unsafe = await verification_api._build_delivery_preview(
+        repository, record, ["src/main.py"], manager, workspace, UnsafeDeletionSourceGitHub()  # type: ignore[arg-type]
+    )
+
+    assert missing["unsupported_missing_source_paths"] == ["src/main.py"]
+    assert unsafe["unsupported_missing_source_paths"] == ["src/main.py"]
+    assert missing["can_deliver"] is False
+    assert unsafe["can_deliver"] is False
+
+
+@pytest.mark.asyncio
+async def test_delivery_preview_applies_changed_content_byte_limit_to_deletions(tmp_path: Any) -> None:
+    verification_api = _verification_api()
+    manager = WorkspaceManager(tmp_path / "workspaces")
+    workspace = manager.create()
+    record = SimpleNamespace(source_commit_sha="a" * 40)
+    repository = SimpleNamespace(id="repo-id", full_name="octo/repo")
+
+    with pytest.raises(HTTPException) as error:
+        await verification_api._build_delivery_preview(
+            repository,
+            record,
+            ["src/main.py"],
+            manager,
+            workspace,
+            OversizedDeletionSourceGitHub(),  # type: ignore[arg-type]
+        )
+
+    assert error.value.status_code == 413
 
 
 @pytest.mark.asyncio
@@ -307,6 +383,42 @@ async def test_delivery_creates_pinned_branch_commit_and_draft_pr(
     assert len(db.records) == 1
     assert db.records[0].status == "pull_request_open"
     assert db.records[0].pull_request_number == 12
+
+
+@pytest.mark.asyncio
+async def test_deletion_only_delivery_creates_a_reviewable_draft_pr(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verification_api = _verification_api()
+    context = _delivery_fixture(tmp_path)
+    context[5].delete_file(context[6], "src/main.py")
+    github = DeletionOnlyDeliveryGitHub()
+    db = FakeDeliverySession()
+    preview = await verification_api._build_delivery_preview(
+        context[2], context[1], context[4], context[5], context[6], FakeGitHub()  # type: ignore[arg-type]
+    )
+
+    async def load_context(*_args: Any) -> tuple[Any, ...]:
+        return context
+
+    monkeypatch.setattr(verification_api, "_task_delivery_context", load_context)
+    monkeypatch.setattr(verification_api, "GitHubClient", lambda **_kwargs: github)
+    result = await verification_api.deliver_task_workspace(
+        execution_id=uuid.uuid4(),
+        task_id=uuid.uuid4(),
+        payload=verification_api.TaskDeliveryRequest(
+            expected_diff_digest=preview["diff_digest"],
+            branch_name="solvyn/task-12",
+            commit_message="Remove unused source",
+            pull_request_title="Remove unused source",
+        ),
+        db=db,  # type: ignore[arg-type]
+    )
+
+    assert github.writes == ["branch", "commit", "pull-request"]
+    assert preview["deleted_paths"] == ["src/main.py"]
+    assert result["pull_request"]["draft"] is True
+    assert result["merged"] is False
 
 
 @pytest.mark.asyncio
