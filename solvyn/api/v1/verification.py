@@ -364,6 +364,7 @@ async def _owned_task(
         tenant_id = await workflow_executor._resolve_tenant_uuid(_tenant_ref())
     except ValueError as exc:
         raise HTTPException(status_code=401, detail="Workflow tenant is not configured") from exc
+    await bind_tenant_scope(db, tenant_id)
     task = (
         await db.execute(
             select(Task).where(
