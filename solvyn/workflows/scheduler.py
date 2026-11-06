@@ -34,6 +34,7 @@ _WORKER_STARTED_AT = datetime.now(UTC)
 _WORKER_NAME = "workflow-scheduler"
 _WORKER_HEARTBEAT_INTERVAL_SECONDS = 5
 _WORKER_HEARTBEAT_RETENTION = timedelta(days=30)
+_MAINTENANCE_TENANT_OFFSET = 0
 
 
 async def _write_worker_heartbeat(status: str) -> None:
@@ -67,50 +68,69 @@ async def _worker_heartbeat_loop() -> None:
 
 
 async def _queue_due_maintenance_events(db: AsyncSession) -> int:
-    """Atomically queue a bounded batch of due maintenance reminders."""
-    due = (
-        await db.execute(
-            select(MaintenanceSchedule)
-            .join(Project, Project.id == MaintenanceSchedule.project_id)
-            .join(Organization, Organization.id == MaintenanceSchedule.organization_id)
-            .where(
-                MaintenanceSchedule.enabled == True,  # noqa: E712
-                MaintenanceSchedule.next_run_at <= func.now(),
-                Project.organization_id == MaintenanceSchedule.organization_id,
-                Project.is_active == True,  # noqa: E712
-                Organization.is_active == True,  # noqa: E712
+    """Queue a bounded batch of due maintenance reminders per tenant scope."""
+    global _MAINTENANCE_TENANT_OFFSET
+    tenant_ids = list((
+        await db.execute(select(Tenant.id).where(Tenant.is_active.is_(True)).order_by(Tenant.id))
+    ).scalars().all())
+    if tenant_ids:
+        start = _MAINTENANCE_TENANT_OFFSET % len(tenant_ids)
+        tenant_ids = tenant_ids[start:] + tenant_ids[:start]
+        _MAINTENANCE_TENANT_OFFSET = (start + 1) % len(tenant_ids)
+    queued = 0
+    for tenant_id in tenant_ids:
+        remaining = _BATCH_SIZE - queued
+        if remaining <= 0:
+            break
+        await bind_tenant_scope(db, tenant_id)
+        due = (
+            await db.execute(
+                select(MaintenanceSchedule)
+                .join(Project, Project.id == MaintenanceSchedule.project_id)
+                .join(Organization, Organization.id == MaintenanceSchedule.organization_id)
+                .where(
+                    MaintenanceSchedule.enabled.is_(True),
+                    MaintenanceSchedule.next_run_at <= func.now(),
+                    MaintenanceSchedule.organization_id == Organization.id,
+                    Organization.tenant_id == tenant_id,
+                    Project.organization_id == MaintenanceSchedule.organization_id,
+                    Project.tenant_id == tenant_id,
+                    Project.is_active.is_(True),
+                    Organization.is_active.is_(True),
+                )
+                .order_by(MaintenanceSchedule.next_run_at, MaintenanceSchedule.created_at)
+                .with_for_update(skip_locked=True)
+                .limit(remaining)
             )
-            .order_by(MaintenanceSchedule.next_run_at, MaintenanceSchedule.created_at)
-            .with_for_update(skip_locked=True)
-            .limit(_BATCH_SIZE)
-        )
-    ).scalars().all()
-    if not due:
-        return 0
+        ).scalars().all()
+        if not due:
+            await db.commit()
+            continue
 
-    now = datetime.now(UTC)
-    for schedule in due:
-        scheduled_for = schedule.next_run_at.isoformat()
-        db.add(
-            ProactiveEvent(
-                organization_id=schedule.organization_id,
-                project_id=schedule.project_id,
-                delivery_id=str(uuid.uuid4()),
-                source_event_id=f"maintenance:{schedule.id}:{scheduled_for}"[:320],
-                event_type="scheduled_maintenance",
-                action="due",
-                repository_name="",
-                workflow_name=f"{schedule.maintenance_type.replace('_', ' ').title()}: {schedule.title}"[:255],
-                conclusion="scheduled",
-                branch="",
-                details_url="",
-                status="pending",
+        now = datetime.now(UTC)
+        for schedule in due:
+            scheduled_for = schedule.next_run_at.isoformat()
+            db.add(
+                ProactiveEvent(
+                    organization_id=schedule.organization_id,
+                    project_id=schedule.project_id,
+                    delivery_id=str(uuid.uuid4()),
+                    source_event_id=f"maintenance:{schedule.id}:{scheduled_for}"[:320],
+                    event_type="scheduled_maintenance",
+                    action="due",
+                    repository_name="",
+                    workflow_name=f"{schedule.maintenance_type.replace('_', ' ').title()}: {schedule.title}"[:255],
+                    conclusion="scheduled",
+                    branch="",
+                    details_url="",
+                    status="pending",
+                )
             )
-        )
-        # Skip missed intervals rather than flooding the inbox after downtime.
-        schedule.next_run_at = now + timedelta(days=schedule.interval_days)
-    await db.commit()
-    return len(due)
+            # Skip missed intervals rather than flooding the inbox after downtime.
+            schedule.next_run_at = now + timedelta(days=schedule.interval_days)
+        await db.commit()
+        queued += len(due)
+    return queued
 
 
 async def _fetch_due_scheduled_workflows(db: AsyncSession) -> list[tuple[uuid.UUID, uuid.UUID]]:

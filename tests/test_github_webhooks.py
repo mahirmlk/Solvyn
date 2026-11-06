@@ -185,7 +185,14 @@ async def test_webhook_persists_one_triage_event_per_connected_project() -> None
         async def execute(self, _query: object) -> SimpleNamespace:
             self.execute_count += 1
             if self.execute_count == 1:
-                return SimpleNamespace(all=lambda: [(uuid.uuid4(), uuid.uuid4())])
+                tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+                self.tenant_ids = (tenant_a, tenant_b)
+                return SimpleNamespace(
+                    all=lambda: [
+                        (uuid.uuid4(), uuid.uuid4(), tenant_a),
+                        (uuid.uuid4(), uuid.uuid4(), tenant_b),
+                    ]
+                )
             return SimpleNamespace(scalar_one_or_none=lambda: None)
 
         def add(self, event: ProactiveEvent) -> None:
@@ -196,21 +203,30 @@ async def test_webhook_persists_one_triage_event_per_connected_project() -> None
         async def commit(self) -> None:
             return None
 
+        async def flush(self) -> None:
+            return None
+
         async def refresh(self, _event: ProactiveEvent) -> None:
             return None
 
     stub_db = StubDB()
     db = cast(AsyncSession, stub_db)
     delivery_id = str(uuid.uuid4())
-    with patch("solvyn.api.v1.webhooks.settings.github_webhook_secret", "webhook-secret"):
+    with (
+        patch("solvyn.api.v1.webhooks.settings.github_webhook_secret", "webhook-secret"),
+        patch("solvyn.api.v1.webhooks.bind_tenant_scope", new_callable=AsyncMock) as bind_scope,
+    ):
         response = await receive_github_webhook(
             _request(body, delivery=delivery_id, signature=_signature("webhook-secret", body)),
             db=db,
         )
 
-    assert response["created_count"] == 1
+    assert response["created_count"] == 2
     assert response["duplicate_count"] == 0
-    assert len(stub_db.added) == 1
+    assert len(stub_db.added) == 2
+    scoped_tenants = [call.args[1] for call in bind_scope.await_args_list]
+    assert scoped_tenants[:2] == list(stub_db.tenant_ids)
+    assert scoped_tenants[2:] == list(stub_db.tenant_ids)
     assert stub_db.added[0].delivery_id == delivery_id
     assert stub_db.added[0].source_event_id == "octo/repo:456:1"
     assert stub_db.added[0].status == "pending"
@@ -240,7 +256,7 @@ async def test_signed_security_alert_is_persisted_without_secret_material() -> N
         async def execute(self, _query: object) -> SimpleNamespace:
             self.execute_count += 1
             if self.execute_count == 1:
-                return SimpleNamespace(all=lambda: [(uuid.uuid4(), uuid.uuid4())])
+                return SimpleNamespace(all=lambda: [(uuid.uuid4(), uuid.uuid4(), uuid.uuid4())])
             return SimpleNamespace(scalar_one_or_none=lambda: None)
 
         def add(self, event: ProactiveEvent) -> None:
@@ -251,12 +267,18 @@ async def test_signed_security_alert_is_persisted_without_secret_material() -> N
         async def commit(self) -> None:
             return None
 
+        async def flush(self) -> None:
+            return None
+
         async def refresh(self, _event: ProactiveEvent) -> None:
             return None
 
     stub_db = StubDB()
     db = cast(AsyncSession, stub_db)
-    with patch("solvyn.api.v1.webhooks.settings.github_webhook_secret", "webhook-secret"):
+    with (
+        patch("solvyn.api.v1.webhooks.settings.github_webhook_secret", "webhook-secret"),
+        patch("solvyn.api.v1.webhooks.bind_tenant_scope", new_callable=AsyncMock),
+    ):
         result = await receive_github_webhook(
             _request(body, event="secret_scanning_alert", signature=_signature("webhook-secret", body)),
             db=db,
@@ -296,7 +318,7 @@ async def test_replayed_workflow_run_with_new_delivery_id_is_deduplicated() -> N
         async def execute(self, _query: object) -> SimpleNamespace:
             self.execute_count += 1
             if self.execute_count == 1:
-                return SimpleNamespace(all=lambda: [(uuid.uuid4(), uuid.uuid4())])
+                return SimpleNamespace(all=lambda: [(uuid.uuid4(), uuid.uuid4(), uuid.uuid4())])
             return SimpleNamespace(scalar_one_or_none=lambda: self.existing)
 
         def add(self, _event: ProactiveEvent) -> None:
@@ -305,12 +327,18 @@ async def test_replayed_workflow_run_with_new_delivery_id_is_deduplicated() -> N
         async def commit(self) -> None:
             return None
 
+        async def flush(self) -> None:
+            return None
+
         async def refresh(self, _event: object) -> None:
             return None
 
     stub_db = StubDB()
     db = cast(AsyncSession, stub_db)
-    with patch("solvyn.api.v1.webhooks.settings.github_webhook_secret", "webhook-secret"):
+    with (
+        patch("solvyn.api.v1.webhooks.settings.github_webhook_secret", "webhook-secret"),
+        patch("solvyn.api.v1.webhooks.bind_tenant_scope", new_callable=AsyncMock),
+    ):
         result = await receive_github_webhook(
             _request(body, delivery=str(uuid.uuid4()), signature=_signature("webhook-secret", body)),
             db=db,
@@ -343,7 +371,8 @@ async def test_unique_race_retries_missing_project_event_after_rollback() -> Non
         async def execute(self, _query: object) -> SimpleNamespace:
             self.execute_count += 1
             if self.execute_count == 1:
-                return SimpleNamespace(all=lambda: [(project_a, organization_a), (project_b, organization_b)])
+                tenant_id = uuid.uuid4()
+                return SimpleNamespace(all=lambda: [(project_a, organization_a, tenant_id), (project_b, organization_b, tenant_id)])
             if self.execute_count <= 3:
                 return SimpleNamespace(scalar_one_or_none=lambda: None)
             if self.execute_count == 4:
@@ -360,6 +389,9 @@ async def test_unique_race_retries_missing_project_event_after_rollback() -> Non
             if self.commit_count == 1:
                 raise IntegrityError("insert", {}, RuntimeError("unique collision"))
 
+        async def flush(self) -> None:
+            return None
+
         async def rollback(self) -> None:
             self.rolled_back = True
 
@@ -368,7 +400,10 @@ async def test_unique_race_retries_missing_project_event_after_rollback() -> Non
 
     stub_db = StubDB()
     db = cast(AsyncSession, stub_db)
-    with patch("solvyn.api.v1.webhooks.settings.github_webhook_secret", "webhook-secret"):
+    with (
+        patch("solvyn.api.v1.webhooks.settings.github_webhook_secret", "webhook-secret"),
+        patch("solvyn.api.v1.webhooks.bind_tenant_scope", new_callable=AsyncMock),
+    ):
         result = await receive_github_webhook(
             _request(body, signature=_signature("webhook-secret", body)),
             db=db,

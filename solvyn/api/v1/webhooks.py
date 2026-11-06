@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from solvyn.api.v1._rbac import ANY_ROLE, OWNER_ADMIN, require_org_membership
 from solvyn.config import settings
 from solvyn.db.models import Organization, ProactiveEvent, Project, Repository
-from solvyn.db.session import get_session
+from solvyn.db.session import bind_tenant_scope, get_session
 from solvyn.repositories.github import GitHubRepositoryError, validate_full_name
 
 router = APIRouter(tags=["webhooks", "proactive engineering"])
@@ -206,7 +206,7 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
 
     project_matches = (
         await db.execute(
-            select(Project.id, Project.organization_id)
+            select(Project.id, Project.organization_id, Organization.tenant_id)
             .join(Repository, Repository.project_id == Project.id)
             .join(Organization, Organization.id == Project.organization_id)
             .where(
@@ -225,49 +225,16 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
     if not project_matches:
         return {"accepted": True, "ignored": True, "reason": "repository_not_connected"}
 
-    events: list[ProactiveEvent] = []
-    duplicate_count = 0
-    for project_id, organization_id in project_matches:
-        existing = (
-            await db.execute(
-                select(ProactiveEvent).where(
-                    ProactiveEvent.organization_id == organization_id,
-                    ProactiveEvent.project_id == project_id,
-                    (ProactiveEvent.delivery_id == normalized_delivery_id)
-                    | (ProactiveEvent.source_event_id == signal["source_event_id"]),
-                )
-            )
-        ).scalar_one_or_none()
-        if existing is not None:
-            duplicate_count += 1
-            events.append(existing)
-            continue
-        event = ProactiveEvent(
-            organization_id=organization_id,
-            project_id=project_id,
-            delivery_id=normalized_delivery_id,
-            source_event_id=signal["source_event_id"],
-            event_type=event_type,
-            action=signal.get("action", "completed"),
-            repository_name=signal["repository_name"],
-            workflow_name=signal["workflow_name"],
-            conclusion=signal["conclusion"],
-            branch=signal["branch"],
-            details_url=signal["details_url"],
-            status="pending",
-        )
-        db.add(event)
-        events.append(event)
-    try:
-        await db.commit()
-    except IntegrityError:
-        await db.rollback()
-        # Rebuild the fan-out after a unique-key race. The failed transaction
-        # may have rolled back other projects' rows, so retry every missing one.
-        for attempt in range(3):
-            events = []
-            duplicate_count = 0
-            for project_id, organization_id in project_matches:
+    matches_by_tenant: dict[uuid.UUID, list[tuple[uuid.UUID, uuid.UUID]]] = {}
+    for project_id, organization_id, tenant_id in project_matches:
+        matches_by_tenant.setdefault(tenant_id, []).append((project_id, organization_id))
+
+    async def _record_events() -> tuple[list[tuple[uuid.UUID, ProactiveEvent]], int]:
+        events: list[tuple[uuid.UUID, ProactiveEvent]] = []
+        duplicates = 0
+        for tenant_id, matches in matches_by_tenant.items():
+            await bind_tenant_scope(db, tenant_id)
+            for project_id, organization_id in matches:
                 existing = (
                     await db.execute(
                         select(ProactiveEvent).where(
@@ -279,8 +246,8 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
                     )
                 ).scalar_one_or_none()
                 if existing is not None:
-                    duplicate_count += 1
-                    events.append(existing)
+                    duplicates += 1
+                    events.append((tenant_id, existing))
                     continue
                 event = ProactiveEvent(
                     organization_id=organization_id,
@@ -297,8 +264,21 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
                     status="pending",
                 )
                 db.add(event)
-                events.append(event)
+                events.append((tenant_id, event))
+            # Flush each tenant's inserts while its transaction-local RLS scope is active.
+            await db.flush()
+        return events, duplicates
+
+    try:
+        events, duplicate_count = await _record_events()
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        # Rebuild the fan-out after a unique-key race. The failed transaction
+        # may have rolled back other projects' rows, so retry every missing one.
+        for attempt in range(3):
             try:
+                events, duplicate_count = await _record_events()
                 await db.commit()
                 break
             except IntegrityError:
@@ -306,13 +286,14 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
         else:
             raise HTTPException(status_code=503, detail="GitHub delivery could not be recorded; retry the webhook")
     for event in events:
-        await db.refresh(event)
+        await bind_tenant_scope(db, event[0])
+        await db.refresh(event[1])
     return {
         "accepted": True,
         "ignored": False,
         "created_count": max(0, len(events) - duplicate_count),
         "duplicate_count": duplicate_count,
-        "event_ids": [str(event.id) for event in events],
+        "event_ids": [str(event.id) for _, event in events],
     }
 
 
