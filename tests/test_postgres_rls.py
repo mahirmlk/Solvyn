@@ -238,7 +238,9 @@ async def test_task_dependency_rls_is_tenant_scoped_and_rejects_cross_tenant_edg
 
 
 @pytest.mark.asyncio
-async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped() -> None:
+async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     database_url = os.environ.get("DATABASE_URL", "")
     if not database_url.startswith("postgresql+"):
         pytest.skip("RLS behavior requires PostgreSQL and migrations at head")
@@ -353,9 +355,10 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped() -
             await session.rollback()
 
         tenant_context.clear()
-        from solvyn.workflows.scheduler import _interrupt_stale_verification_runs
+        from solvyn.workflows import scheduler
 
-        await _interrupt_stale_verification_runs()
+        monkeypatch.setattr(scheduler, "async_session_factory", sessions)
+        await scheduler._interrupt_stale_verification_runs()
 
         tenant_context.set(tenant_a, "rls-a")
         async with sessions() as session:
