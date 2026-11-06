@@ -47,7 +47,7 @@ class CostTracker:
             db.add(record)
             await db.commit()
 
-    async def get_session_totals(self, session_id: str) -> dict[str, Any]:
+    async def get_session_totals(self, session_id: str, tenant_id: str) -> dict[str, Any]:
         async with async_session_factory() as db:
             result = await db.execute(
                 select(
@@ -55,7 +55,10 @@ class CostTracker:
                     sqlfunc.sum(TokenUsage.cost).label("total_cost"),
                     sqlfunc.sum(TokenUsage.prompt_tokens).label("prompt_tokens"),
                     sqlfunc.sum(TokenUsage.completion_tokens).label("completion_tokens"),
-                ).where(TokenUsage.session_id == _to_uuid(session_id)),
+                ).where(
+                    TokenUsage.session_id == _to_uuid(session_id),
+                    TokenUsage.tenant_id == _to_uuid(tenant_id),
+                ),
             )
             row = result.one_or_none()
             if row is None:
@@ -83,7 +86,7 @@ class CostTracker:
                 "total_cost": float(row.total_cost or 0.0),
             }
 
-    async def get_agent_breakdown(self, session_id: str) -> list[dict[str, Any]]:
+    async def get_agent_breakdown(self, session_id: str, tenant_id: str) -> list[dict[str, Any]]:
         async with async_session_factory() as db:
             result = await db.execute(
                 select(
@@ -92,7 +95,10 @@ class CostTracker:
                     sqlfunc.sum(TokenUsage.cost).label("cost"),
                     sqlfunc.count(TokenUsage.id).label("calls"),
                 )
-                .where(TokenUsage.session_id == _to_uuid(session_id))
+                .where(
+                    TokenUsage.session_id == _to_uuid(session_id),
+                    TokenUsage.tenant_id == _to_uuid(tenant_id),
+                )
                 .group_by(TokenUsage.agent_type),
             )
             return [{"agent_type": r.agent_type, "tokens": r.tokens or 0, "cost": float(r.cost or 0.0), "calls": r.calls or 0} for r in result.all()]

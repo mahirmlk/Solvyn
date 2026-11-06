@@ -113,6 +113,37 @@ async def _queue_due_maintenance_events(db: AsyncSession) -> int:
     return len(due)
 
 
+async def _fetch_due_scheduled_workflows(db: AsyncSession) -> list[tuple[uuid.UUID, uuid.UUID]]:
+    """Read due executions one tenant at a time under forced Session RLS."""
+    tenant_ids = (
+        await db.execute(select(Tenant.id).where(Tenant.is_active.is_(True)).order_by(Tenant.id))
+    ).scalars().all()
+    due_rows: list[tuple[uuid.UUID, uuid.UUID, datetime, datetime]] = []
+    for tenant_id in tenant_ids:
+        await bind_tenant_scope(db, tenant_id)
+        rows = (
+            await db.execute(
+                select(ExecutionGraph.id, Session.tenant_id, ExecutionGraph.scheduled_at, ExecutionGraph.created_at)
+                .join(Session, Session.id == ExecutionGraph.session_id)
+                .where(
+                    Session.tenant_id == tenant_id,
+                    ExecutionGraph.status == "scheduled",
+                    ExecutionGraph.scheduled_at <= func.now(),
+                )
+                .order_by(ExecutionGraph.scheduled_at, ExecutionGraph.created_at, ExecutionGraph.id)
+                .limit(_BATCH_SIZE)
+            )
+        ).all()
+        for row in rows:
+            if row.scheduled_at is None or row.created_at is None:
+                continue
+            due_rows.append((row.id, row.tenant_id, row.scheduled_at, row.created_at))
+        await db.commit()
+
+    due_rows.sort(key=lambda row: (row[2], row[3], row[0]))
+    return [(execution_id, tenant_id) for execution_id, tenant_id, _, _ in due_rows[:_BATCH_SIZE]]
+
+
 async def _interrupt_stale_verification_runs() -> None:
     """Mark interrupted runs for each tenant under that tenant's RLS scope."""
     async with async_session_factory() as db:
@@ -145,18 +176,7 @@ async def run_scheduled_workflows() -> None:
                 async with async_session_factory() as db:
                     await db.commit()
                     await _queue_due_maintenance_events(db)
-                    due = (
-                        await db.execute(
-                            select(ExecutionGraph.id, Session.tenant_id)
-                            .join(Session, Session.id == ExecutionGraph.session_id)
-                            .where(
-                                ExecutionGraph.status == "scheduled",
-                                ExecutionGraph.scheduled_at <= func.now(),
-                            )
-                            .order_by(ExecutionGraph.scheduled_at, ExecutionGraph.created_at)
-                            .limit(_BATCH_SIZE)
-                        )
-                    ).all()
+                    due = await _fetch_due_scheduled_workflows(db)
             except Exception:
                 logger.exception("Unable to fetch scheduled workflow executions")
                 await asyncio.sleep(_POLL_INTERVAL_SECONDS)

@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.db.models import ApiKey, Tenant, TenantRole, TokenUsage
 from solvyn.db.models import Session as SessionModel
-from solvyn.db.session import get_session
+from solvyn.db.session import bind_tenant_scope, get_session
 from solvyn.multi_tenant.auth import RequireRole
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -171,7 +171,8 @@ async def _load_tenant_or_404(db: AsyncSession, tenant_id: uuid.UUID) -> Tenant:
 
 
 async def _tenant_aggregates(db: AsyncSession, tenant_id: uuid.UUID) -> dict[str, int | float]:
-    """Return aggregate token/session/api-key counts for a tenant in one round trip."""
+    """Return aggregate token/session/api-key counts for one authorized tenant."""
+    await bind_tenant_scope(db, tenant_id)
     token_row = (
         await db.execute(
             select(
@@ -263,14 +264,17 @@ async def list_tenants(db: AsyncSession = Depends(get_session)) -> dict[str, Any
         row.tenant_id: (int(row.total_tokens or 0), float(row.total_cost or 0.0)) for row in tokens_rows
     }
 
-    sessions_rows = (
-        await db.execute(
-            select(SessionModel.tenant_id, sqlfunc.count(SessionModel.id))
-            .where(SessionModel.tenant_id.in_(tenant_ids))
-            .group_by(SessionModel.tenant_id)
+    sessions_by_tenant: dict[uuid.UUID, int] = {}
+    for tenant_id in tenant_ids:
+        await bind_tenant_scope(db, tenant_id)
+        sessions_by_tenant[tenant_id] = int(
+            (
+                await db.execute(
+                    select(sqlfunc.count(SessionModel.id)).where(SessionModel.tenant_id == tenant_id)
+                )
+            ).scalar_one()
+            or 0
         )
-    ).all()
-    sessions_by_tenant = {row[0]: int(row[1] or 0) for row in sessions_rows}
 
     api_keys_rows = (
         await db.execute(

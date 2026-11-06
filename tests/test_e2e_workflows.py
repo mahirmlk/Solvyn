@@ -927,6 +927,24 @@ async def test_feature_workflow_returns_resolvable_session_id(client: AsyncClien
 
 
 @pytest.mark.asyncio
+async def test_shared_secret_workflow_reads_bind_the_resolved_default_tenant(client: AsyncClient) -> None:
+    workflow = await client.post(
+        "/api/v1/workflows/feature/run",
+        json={"requirement": "Read a workflow under the default tenant"},
+    )
+    assert workflow.status_code == 200
+    execution_id = workflow.json()["execution_id"]
+
+    snapshot = await client.get(f"/api/v1/workflows/executions/{execution_id}")
+    recent_tasks = await client.get("/api/v1/workflows/tasks")
+
+    assert snapshot.status_code == 200
+    assert snapshot.json()["execution_id"] == execution_id
+    assert recent_tasks.status_code == 200
+    assert any(task["execution_id"] == execution_id for task in recent_tasks.json()["tasks"])
+
+
+@pytest.mark.asyncio
 async def test_feature_workflow_outputs_include_provider_and_cost(client: AsyncClient) -> None:
     """Each executed agent node carries provider/model/cost info through to the response."""
     response = await client.post(

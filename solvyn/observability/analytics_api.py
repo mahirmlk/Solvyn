@@ -15,15 +15,21 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.agents.cost_tracker import cost_tracker
 from solvyn.api_metadata import COMMON_RESPONSES
 from solvyn.config import settings
+from solvyn.db.models import Session as SessionModel
+from solvyn.db.models import Tenant
+from solvyn.db.session import bind_tenant_scope, get_session
 from solvyn.multi_tenant.auth import verify_api_key
-from solvyn.multi_tenant.middleware import tenant_context
+from solvyn.multi_tenant.middleware import SHARED_SECRET_PRINCIPAL_ID, tenant_context
 from solvyn.observability.audit import audit_logger
 from solvyn.observability.metrics import Metrics, MetricsMiddleware
 from solvyn.observability.tracing import tracing_manager
@@ -151,12 +157,53 @@ async def get_audit_logs(
     response_description="Cost totals and per-agent breakdown for the session.",
     responses=COMMON_RESPONSES,
 )
-async def get_session_analytics(session_id: str) -> dict[str, Any]:
+async def get_session_analytics(session_id: str, db: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     """Return the cost analytics for a single session."""
-    current_tenant = str(tenant_context.tenant_id) if tenant_context.tenant_id else settings.default_tenant_id
-    totals = await cost_tracker.get_session_totals(session_id)
-    breakdown = await cost_tracker.get_agent_breakdown(session_id)
-    return {"session_id": session_id, "totals": totals, "agent_breakdown": breakdown, "tenant_id": current_tenant}
+    try:
+        session_uuid = uuid.UUID(session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Session not found") from exc
+
+    current_tenant = tenant_context.tenant_id
+    if current_tenant is None:
+        if (
+            tenant_context.authenticated_tenant_id != SHARED_SECRET_PRINCIPAL_ID
+            or tenant_context.user_id is not None
+        ):
+            raise HTTPException(status_code=401, detail="Analytics tenant is not configured")
+        tenant_ref = settings.default_tenant_id
+        try:
+            tenant_uuid = uuid.UUID(tenant_ref)
+        except ValueError:
+            tenant = (
+                await db.execute(
+                    select(Tenant).where(Tenant.slug == tenant_ref, Tenant.is_active.is_(True))
+                )
+            ).scalar_one_or_none()
+        else:
+            tenant = (
+                await db.execute(select(Tenant).where(Tenant.id == tenant_uuid, Tenant.is_active.is_(True)))
+            ).scalar_one_or_none()
+        if tenant is None:
+            raise HTTPException(status_code=401, detail="Analytics tenant is not configured")
+        current_tenant = tenant.id
+
+    await bind_tenant_scope(db, current_tenant)
+    owned_session = (
+        await db.execute(
+            select(SessionModel.id).where(
+                SessionModel.id == session_uuid,
+                SessionModel.tenant_id == current_tenant,
+            )
+        )
+    ).scalar_one_or_none()
+    if owned_session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    tenant_id = str(current_tenant)
+    totals = await cost_tracker.get_session_totals(session_id, tenant_id)
+    breakdown = await cost_tracker.get_agent_breakdown(session_id, tenant_id)
+    return {"session_id": session_id, "totals": totals, "agent_breakdown": breakdown, "tenant_id": tenant_id}
 
 
 @router.get(

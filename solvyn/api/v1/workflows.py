@@ -361,6 +361,7 @@ async def list_recent_workflow_tasks(
         tenant_id = await workflow_executor._resolve_tenant_uuid(tenant_ref)
     except ValueError as exc:
         raise HTTPException(status_code=401, detail="Workflow tenant is not configured") from exc
+    await bind_tenant_scope(db, tenant_id)
 
     query = (
         select(Task)
@@ -521,6 +522,7 @@ async def get_workflow_execution(
         tenant_id = await workflow_executor._resolve_tenant_uuid(tenant_ref)
     except ValueError as exc:
         raise HTTPException(status_code=401, detail="Workflow tenant is not configured") from exc
+    await bind_tenant_scope(db, tenant_id)
     result = await db.execute(
         select(ExecutionGraphModel)
         .join(Session, Session.id == ExecutionGraphModel.session_id)
