@@ -8,27 +8,32 @@ import socket
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.db.models import (
+    Approval,
     ExecutionGraph,
     MaintenanceSchedule,
     Organization,
     ProactiveEvent,
     Project,
     Session,
+    Task,
     Tenant,
     VerificationRun,
     WorkflowWorkerHeartbeat,
 )
 from solvyn.db.session import async_session_factory, bind_tenant_scope
+from solvyn.multi_tenant.middleware import tenant_context
 from solvyn.workflows.executor import workflow_executor
 
 logger = logging.getLogger(__name__)
 _POLL_INTERVAL_SECONDS = 5
 _BATCH_SIZE = 20
+_VERIFICATION_BATCH_SIZE = 2
 _VERIFICATION_STALE_AFTER = timedelta(minutes=10)
+_VERIFICATION_MAX_ATTEMPTS = 3
 _WORKER_ID = uuid.uuid4()
 _WORKER_STARTED_AT = datetime.now(UTC)
 _WORKER_NAME = "workflow-scheduler"
@@ -143,44 +148,168 @@ async def _fetch_due_scheduled_workflows(db: AsyncSession) -> list[tuple[uuid.UU
         await bind_tenant_scope(db, tenant_id)
         rows = (
             await db.execute(
-                select(ExecutionGraph.id, Session.tenant_id, ExecutionGraph.scheduled_at, ExecutionGraph.created_at)
+                select(
+                    ExecutionGraph.id,
+                    Session.tenant_id,
+                    func.coalesce(ExecutionGraph.scheduled_at, ExecutionGraph.created_at).label("due_at"),
+                    ExecutionGraph.created_at,
+                )
                 .join(Session, Session.id == ExecutionGraph.session_id)
                 .where(
                     Session.tenant_id == tenant_id,
-                    ExecutionGraph.status == "scheduled",
-                    ExecutionGraph.scheduled_at <= func.now(),
+                    or_(
+                        and_(
+                            ExecutionGraph.status == "scheduled",
+                            ExecutionGraph.scheduled_at <= func.now(),
+                        ),
+                        and_(
+                            ExecutionGraph.status.in_(["running", "resuming"]),
+                            or_(
+                                ExecutionGraph.lease_expires_at.is_(None),
+                                ExecutionGraph.lease_expires_at < func.now(),
+                            ),
+                        ),
+                    ),
                 )
                 .order_by(ExecutionGraph.scheduled_at, ExecutionGraph.created_at, ExecutionGraph.id)
                 .limit(_BATCH_SIZE)
             )
         ).all()
         for row in rows:
-            if row.scheduled_at is None or row.created_at is None:
+            if row.due_at is None or row.created_at is None:
                 continue
-            due_rows.append((row.id, row.tenant_id, row.scheduled_at, row.created_at))
+            due_rows.append((row.id, row.tenant_id, row.due_at, row.created_at))
         await db.commit()
 
     due_rows.sort(key=lambda row: (row[2], row[3], row[0]))
     return [(execution_id, tenant_id) for execution_id, tenant_id, _, _ in due_rows[:_BATCH_SIZE]]
 
 
+async def _fetch_due_verification_runs(db: AsyncSession) -> list[tuple[uuid.UUID, uuid.UUID]]:
+    """Discover approved work and interrupted attempts under each tenant scope."""
+    tenant_ids = (
+        await db.execute(select(Tenant.id).where(Tenant.is_active.is_(True)).order_by(Tenant.id))
+    ).scalars().all()
+    due_rows: list[tuple[uuid.UUID, uuid.UUID, datetime]] = []
+    for tenant_id in tenant_ids:
+        await bind_tenant_scope(db, tenant_id)
+        rows = (
+            await db.execute(
+                select(VerificationRun.id, VerificationRun.tenant_id, VerificationRun.started_at)
+                .join(Task, Task.id == VerificationRun.task_id)
+                .join(Approval, Approval.verification_run_id == VerificationRun.id)
+                .where(
+                    VerificationRun.tenant_id == tenant_id,
+                    VerificationRun.status.in_(["approved", "interrupted"]),
+                    or_(
+                        VerificationRun.status != "interrupted",
+                        VerificationRun.lease_expires_at.is_(None),
+                        VerificationRun.lease_expires_at <= func.now(),
+                    ),
+                    VerificationRun.attempt_count < _VERIFICATION_MAX_ATTEMPTS,
+                    Approval.status.in_(["approved", "consumed"]),
+                    Task.tenant_id == tenant_id,
+                )
+                .order_by(VerificationRun.started_at, VerificationRun.id)
+                .limit(_VERIFICATION_BATCH_SIZE)
+            )
+        ).all()
+        due_rows.extend((row.id, row.tenant_id, row.started_at) for row in rows)
+        await db.commit()
+
+    due_rows.sort(key=lambda row: (row[2], row[0]))
+    return [(run_id, tenant_id) for run_id, tenant_id, _ in due_rows[:_VERIFICATION_BATCH_SIZE]]
+
+
+async def _execute_due_verification(run_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
+    """Claim and execute one persisted, already-approved verification."""
+    from fastapi import HTTPException
+
+    from solvyn.api.v1.verification import _execute_approved_verification
+
+    async with async_session_factory() as db:
+        await bind_tenant_scope(db, tenant_id)
+        run = (
+            await db.execute(
+                select(VerificationRun).where(
+                    VerificationRun.id == run_id,
+                    VerificationRun.tenant_id == tenant_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if run is None:
+            return
+        task = (
+            await db.execute(
+                select(Task).where(Task.id == run.task_id, Task.tenant_id == tenant_id)
+            )
+        ).scalar_one_or_none()
+        approval = (
+            await db.execute(
+                select(Approval).where(Approval.verification_run_id == run.id)
+            )
+        ).scalar_one_or_none()
+        if task is None or approval is None:
+            logger.error("Approved verification %s has no tenant-owned task or approval", run_id)
+            return
+        with tenant_context.scoped_tenant(tenant_id):
+            try:
+                await _execute_approved_verification(
+                    db,
+                    task,
+                    run,
+                    approval,
+                    recover_interrupted=True,
+                )
+            except HTTPException as exc:
+                if exc.status_code == 409:
+                    logger.info("Verification %s was claimed elsewhere or is not retryable", run_id)
+                else:
+                    raise
+
+
 async def _interrupt_stale_verification_runs() -> None:
-    """Mark interrupted runs for each tenant under that tenant's RLS scope."""
+    """Release expired claims, and dead-letter runs that exhausted retries."""
     async with async_session_factory() as db:
         tenant_ids = (await db.execute(select(Tenant.id))).scalars().all()
         for tenant_id in tenant_ids:
             await bind_tenant_scope(db, tenant_id)
+            stale = and_(
+                VerificationRun.tenant_id == tenant_id,
+                VerificationRun.status == "running",
+                func.coalesce(VerificationRun.attempt_started_at, VerificationRun.started_at)
+                < func.now() - _VERIFICATION_STALE_AFTER,
+                or_(
+                    VerificationRun.lease_expires_at.is_(None),
+                    VerificationRun.lease_expires_at < func.now(),
+                ),
+            )
             await db.execute(
                 update(VerificationRun)
                 .where(
-                    VerificationRun.tenant_id == tenant_id,
-                    VerificationRun.status == "running",
-                    VerificationRun.started_at < func.now() - _VERIFICATION_STALE_AFTER,
+                    stale,
+                    VerificationRun.attempt_count < _VERIFICATION_MAX_ATTEMPTS,
                 )
                 .values(
                     status="interrupted",
                     error="Worker stopped before persisting the verification result",
                     completed_at=func.now(),
+                    lease_owner=None,
+                    lease_expires_at=None,
+                )
+            )
+            await db.execute(
+                update(VerificationRun)
+                .where(
+                    stale,
+                    VerificationRun.attempt_count >= _VERIFICATION_MAX_ATTEMPTS,
+                )
+                .values(
+                    status="dead_letter",
+                    error="Verification exceeded the maximum number of recovery attempts",
+                    completed_at=func.now(),
+                    lease_owner=None,
+                    lease_expires_at=None,
                 )
             )
             await db.commit()
@@ -197,6 +326,7 @@ async def run_scheduled_workflows() -> None:
                     await db.commit()
                     await _queue_due_maintenance_events(db)
                     due = await _fetch_due_scheduled_workflows(db)
+                    due_verifications = await _fetch_due_verification_runs(db)
             except Exception:
                 logger.exception("Unable to fetch scheduled workflow executions")
                 await asyncio.sleep(_POLL_INTERVAL_SECONDS)
@@ -210,6 +340,18 @@ async def run_scheduled_workflows() -> None:
                     logger.info("Scheduled workflow %s was not claimed: %s", execution_id, exc)
                 except Exception:
                     logger.exception("Scheduled workflow %s failed", execution_id)
+
+            outcomes = await asyncio.gather(
+                *(_execute_due_verification(run_id, tenant_id) for run_id, tenant_id in due_verifications),
+                return_exceptions=True,
+            )
+            for (run_id, _), outcome in zip(due_verifications, outcomes, strict=True):
+                if isinstance(outcome, Exception):
+                    logger.exception(
+                        "Approved verification %s failed in the recovery worker",
+                        run_id,
+                        exc_info=outcome,
+                    )
 
             await asyncio.sleep(_POLL_INTERVAL_SECONDS)
     finally:

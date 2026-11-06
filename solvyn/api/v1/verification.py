@@ -7,13 +7,13 @@ import difflib
 import hashlib
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -64,6 +64,8 @@ _ACTIVITY_TOTAL_LIMIT = 200
 _ACTIVITY_TASK_TREE_LIMIT = 500
 _ACTIVITY_TASK_TREE_DEPTH_LIMIT = 32
 _MAX_LIVE_PULL_REQUESTS = 5
+_VERIFICATION_LEASE_DURATION = timedelta(minutes=10)
+_VERIFICATION_MAX_ATTEMPTS = 3
 VerificationKind = Literal["test", "build", "lint", "typecheck", "security"]
 
 
@@ -401,6 +403,8 @@ def _verification_dict(run: VerificationRun) -> dict[str, Any]:
         "duration_seconds": float(run.duration_seconds) if run.duration_seconds is not None else None,
         "runner_version": run.runner_version,
         "source_digest": run.source_digest,
+        "attempt_count": run.attempt_count,
+        "attempt_started_at": run.attempt_started_at.isoformat() if run.attempt_started_at else None,
         "started_at": run.started_at.isoformat() if run.started_at else None,
         "completed_at": run.completed_at.isoformat() if run.completed_at else None,
     }
@@ -537,12 +541,22 @@ async def _require_acceptance_reviewer(db: AsyncSession, task: Task) -> tuple[uu
     return user_id, membership
 
 
-async def _finish_run(db: AsyncSession, run: VerificationRun, values: dict[str, Any]) -> dict[str, Any]:
+async def _finish_run(
+    db: AsyncSession,
+    run: VerificationRun,
+    lease_owner: uuid.UUID,
+    values: dict[str, Any],
+) -> dict[str, Any]:
     await bind_tenant_scope(db, run.tenant_id)
     completed = await db.execute(
         update(VerificationRun)
-        .where(VerificationRun.id == run.id, VerificationRun.tenant_id == run.tenant_id, VerificationRun.status == "running")
-        .values(**values)
+        .where(
+            VerificationRun.id == run.id,
+            VerificationRun.tenant_id == run.tenant_id,
+            VerificationRun.status == "running",
+            VerificationRun.lease_owner == lease_owner,
+        )
+        .values(lease_owner=None, lease_expires_at=None, **values)
         .returning(VerificationRun.id)
     )
     if completed.scalar_one_or_none() is None:
@@ -789,9 +803,64 @@ async def _execute_approved_verification(
     task: Task,
     run: VerificationRun,
     approval: Approval,
+    *,
+    recover_interrupted: bool = False,
 ) -> dict[str, Any]:
-    if run.status != "approved" or approval.status != "approved":
+    allowed_run_statuses = ("approved", "interrupted") if recover_interrupted else ("approved",)
+    allowed_approval_statuses = ("approved", "consumed") if recover_interrupted else ("approved",)
+    if run.status not in allowed_run_statuses or approval.status not in allowed_approval_statuses:
         raise HTTPException(status_code=409, detail="Verification run does not have an unused approval")
+
+    lease_owner = uuid.uuid4()
+    run_claim = await db.execute(
+        update(VerificationRun)
+        .where(
+            VerificationRun.id == run.id,
+            VerificationRun.tenant_id == task.tenant_id,
+            VerificationRun.status.in_(allowed_run_statuses),
+            or_(
+                VerificationRun.status != "interrupted",
+                VerificationRun.lease_expires_at.is_(None),
+                VerificationRun.lease_expires_at <= func.now(),
+            ),
+            VerificationRun.attempt_count < _VERIFICATION_MAX_ATTEMPTS,
+        )
+        .values(
+            status="running",
+            attempt_count=VerificationRun.attempt_count + 1,
+            attempt_started_at=func.now(),
+            lease_owner=lease_owner,
+            lease_expires_at=func.now() + _VERIFICATION_LEASE_DURATION,
+            completed_at=None,
+            error=None,
+            exit_code=None,
+            timed_out=False,
+            output_truncated=False,
+            stdout="",
+            stderr="",
+            duration_seconds=None,
+        )
+        .returning(VerificationRun.id)
+    )
+    if run_claim.scalar_one_or_none() is None:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="Verification run is already claimed or exhausted its retry limit")
+
+    approval_claim = await db.execute(
+        update(Approval)
+        .where(Approval.id == approval.id, Approval.status.in_(allowed_approval_statuses))
+        .values(status="consumed", updated_at=datetime.now(UTC))
+        .returning(Approval.id)
+    )
+    if approval_claim.scalar_one_or_none() is None:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="Verification approval has already been used")
+    await db.commit()
+    await bind_tenant_scope(db, task.tenant_id)
+    await db.refresh(run)
+
+    # Claim first so workspace tools observe the running state and cannot race
+    # a digest check while an interrupted, already-approved run is recovering.
     try:
         workspace = _workspace_manager().get(run.workspace_id)
         current_digest = _workspace_manager().fingerprint(workspace)
@@ -800,9 +869,16 @@ async def _execute_approved_verification(
     if current_digest != run.source_digest:
         stale_run = await db.execute(
             update(VerificationRun)
-            .where(VerificationRun.id == run.id, VerificationRun.status == "approved")
+            .where(
+                VerificationRun.id == run.id,
+                VerificationRun.tenant_id == task.tenant_id,
+                VerificationRun.status == "running",
+                VerificationRun.lease_owner == lease_owner,
+            )
             .values(
                 status="stale",
+                lease_owner=None,
+                lease_expires_at=None,
                 error="Workspace changed after this verification request was approved",
                 completed_at=datetime.now(UTC),
             )
@@ -810,7 +886,7 @@ async def _execute_approved_verification(
         )
         stale_approval = await db.execute(
             update(Approval)
-            .where(Approval.id == approval.id, Approval.status == "approved")
+            .where(Approval.id == approval.id, Approval.status == "consumed")
             .values(status="stale", updated_at=datetime.now(UTC))
             .returning(Approval.id)
         )
@@ -820,28 +896,6 @@ async def _execute_approved_verification(
         await db.commit()
         raise HTTPException(status_code=409, detail="Workspace changed after approval; request a new verification approval") from None
 
-    approval_claim = await db.execute(
-        update(Approval)
-        .where(Approval.id == approval.id, Approval.status == "approved")
-        .values(status="consumed", updated_at=datetime.now(UTC))
-        .returning(Approval.id)
-    )
-    run_claim = await db.execute(
-        update(VerificationRun)
-        .where(
-            VerificationRun.id == run.id,
-            VerificationRun.tenant_id == task.tenant_id,
-            VerificationRun.status == "approved",
-        )
-        .values(status="running")
-        .returning(VerificationRun.id)
-    )
-    if approval_claim.scalar_one_or_none() is None or run_claim.scalar_one_or_none() is None:
-        await db.rollback()
-        raise HTTPException(status_code=409, detail="Verification approval has already been used")
-    await db.commit()
-    await bind_tenant_scope(db, task.tenant_id)
-    await db.refresh(run)
     command = json.loads(run.command)
     try:
         result: SandboxResult | RemoteSandboxResult = await _sandbox_runner().run(workspace, command)
@@ -849,9 +903,14 @@ async def _execute_approved_verification(
         await _finish_run(
             db,
             run,
+            lease_owner,
             {
-                "status": "interrupted",
-                "error": "Sandbox verification was interrupted before completion",
+                "status": "dead_letter" if run.attempt_count >= _VERIFICATION_MAX_ATTEMPTS else "interrupted",
+                "error": (
+                    "Verification exceeded the maximum number of recovery attempts"
+                    if run.attempt_count >= _VERIFICATION_MAX_ATTEMPTS
+                    else "Sandbox verification was interrupted before completion"
+                ),
                 "completed_at": datetime.now(UTC),
             },
         )
@@ -860,12 +919,14 @@ async def _execute_approved_verification(
         return await _finish_run(
             db,
             run,
+            lease_owner,
             {"status": "failed", "error": str(exc)[:_MAX_STORED_OUTPUT_CHARS], "completed_at": datetime.now(UTC)},
         )
     except Exception as exc:
         return await _finish_run(
             db,
             run,
+            lease_owner,
             {
                 "status": "failed",
                 "error": f"Sandbox execution failed unexpectedly ({type(exc).__name__})",
@@ -875,6 +936,7 @@ async def _execute_approved_verification(
     return await _finish_run(
         db,
         run,
+        lease_owner,
         {
             "status": "timed_out" if result.timed_out else ("passed" if result.exit_code == 0 else "failed"),
             "exit_code": result.exit_code,
