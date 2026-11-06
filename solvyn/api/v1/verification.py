@@ -238,8 +238,8 @@ async def _build_delivery_preview(
     total_diff_bytes = 0
     unsupported_missing_source_paths: list[str] = []
     for path in missing_source_paths:
-        entry = source_tree_blob_entries.get(path)
-        if entry is None or entry.get("mode") != "100644":
+        source_entry = source_tree_blob_entries.get(path)
+        if source_entry is None or source_entry.get("mode") != "100644":
             unsupported_missing_source_paths.append(path)
             continue
         baseline = await github.text_file(
