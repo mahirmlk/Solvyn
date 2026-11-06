@@ -6,7 +6,7 @@ from typing import Any, cast
 from sqlalchemy import select
 
 from solvyn.db.models import Memory as MemoryModel
-from solvyn.db.session import async_session_factory
+from solvyn.db.session import async_session_factory, bind_tenant_scope
 
 logger = logging.getLogger(__name__)
 
@@ -27,11 +27,15 @@ class CheckpointManager:
     async def save(self, session_id: str, agent_type: str, state: dict[str, Any], tenant_id: str) -> str:
         checkpoint_id = self.CHECKPOINT_PREFIX + str(uuid.uuid4())
         value = json.dumps(state)
+        tenant_uuid = _to_uuid(tenant_id)
+        if tenant_uuid is None:
+            raise ValueError("Checkpoint operations require a tenant ID")
 
         async with async_session_factory() as db:
+            await bind_tenant_scope(db, tenant_uuid)
             record = MemoryModel(
                 id=uuid.uuid4(),
-                tenant_id=_to_uuid(tenant_id),
+                tenant_id=tenant_uuid,
                 session_id=_to_uuid(session_id),
                 agent_type=agent_type,
                 key=checkpoint_id,
@@ -43,17 +47,33 @@ class CheckpointManager:
         logger.info(f"Checkpoint saved: {checkpoint_id}")
         return checkpoint_id
 
-    async def load(self, checkpoint_id: str) -> dict[str, Any] | None:
+    async def load(self, checkpoint_id: str, tenant_id: str) -> dict[str, Any] | None:
+        tenant_uuid = _to_uuid(tenant_id)
+        if tenant_uuid is None:
+            raise ValueError("Checkpoint operations require a tenant ID")
         async with async_session_factory() as db:
-            result = await db.execute(select(MemoryModel).where(MemoryModel.key == checkpoint_id))
+            await bind_tenant_scope(db, tenant_uuid)
+            result = await db.execute(
+                select(MemoryModel).where(
+                    MemoryModel.tenant_id == tenant_uuid,
+                    MemoryModel.key == checkpoint_id,
+                )
+            )
             record = result.scalar_one_or_none()
             if record is None:
                 return None
             return cast("dict[str, Any]", json.loads(record.value))
 
-    async def list_for_session(self, session_id: str) -> list[dict[str, Any]]:
+    async def list_for_session(self, session_id: str, tenant_id: str) -> list[dict[str, Any]]:
+        tenant_uuid = _to_uuid(tenant_id)
+        if tenant_uuid is None:
+            raise ValueError("Checkpoint operations require a tenant ID")
         async with async_session_factory() as db:
-            query = select(MemoryModel).where(MemoryModel.key.like(f"{self.CHECKPOINT_PREFIX}%"))
+            await bind_tenant_scope(db, tenant_uuid)
+            query = select(MemoryModel).where(
+                MemoryModel.tenant_id == tenant_uuid,
+                MemoryModel.key.like(f"{self.CHECKPOINT_PREFIX}%"),
+            )
             if session_id:
                 try:
                     query = query.where(MemoryModel.session_id == uuid.UUID(session_id))
@@ -71,9 +91,18 @@ class CheckpointManager:
                 for r in records
             ]
 
-    async def delete(self, checkpoint_id: str) -> bool:
+    async def delete(self, checkpoint_id: str, tenant_id: str) -> bool:
+        tenant_uuid = _to_uuid(tenant_id)
+        if tenant_uuid is None:
+            raise ValueError("Checkpoint operations require a tenant ID")
         async with async_session_factory() as db:
-            result = await db.execute(select(MemoryModel).where(MemoryModel.key == checkpoint_id))
+            await bind_tenant_scope(db, tenant_uuid)
+            result = await db.execute(
+                select(MemoryModel).where(
+                    MemoryModel.tenant_id == tenant_uuid,
+                    MemoryModel.key == checkpoint_id,
+                )
+            )
             record = result.scalar_one_or_none()
             if record:
                 await db.delete(record)

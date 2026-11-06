@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from solvyn.db.models import (
     ExecutionGraph,
+    Memory,
     Session,
     Task,
     TaskAcceptanceCriterion,
@@ -53,7 +54,7 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                         "FROM pg_class WHERE relname IN "
                         "('tasks', 'task_acceptance_criteria', 'task_deliveries', 'task_workspaces', "
                         "'teammate_tool_invocations', 'task_dependencies', 'verification_runs', "
-                        "'task_handoffs', 'teammate_memory', 'sessions', 'execution_graphs')"
+                        "'task_handoffs', 'teammate_memory', 'sessions', 'execution_graphs', 'memory')"
                     )
                 )
             ).all()
@@ -69,6 +70,7 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                 "teammate_memory",
                 "sessions",
                 "execution_graphs",
+                "memory",
             }
             assert all(row[1] and row[2] for row in protected_tables)
 
@@ -257,6 +259,106 @@ async def test_task_rls_is_tenant_scoped_and_validates_ownership_links() -> None
                 graph_id = graph_a if tenant_id == tenant_a else graph_b
                 await connection.execute(text("DELETE FROM execution_graphs WHERE id = :id"), {"id": graph_id})
                 session_id = session_a if tenant_id == tenant_a else session_b
+                await connection.execute(text("DELETE FROM sessions WHERE id = :id"), {"id": session_id})
+            await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_legacy_memory_rls_is_tenant_scoped_and_validates_session_owner() -> None:
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url.startswith("postgresql+"):
+        pytest.skip("RLS behavior requires PostgreSQL and migrations at head")
+
+    engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+    session_a, session_b = uuid.uuid4(), uuid.uuid4()
+    memory_a, memory_b = uuid.uuid4(), uuid.uuid4()
+    shared_key = f"memory:rls-{uuid.uuid4()}"
+
+    try:
+        async with engine.connect() as connection:
+            protected = (
+                await connection.execute(
+                    text("SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'memory'")
+                )
+            ).one()
+            assert protected == (True, True)
+
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'RLS memory', :slug, '')"),
+                [
+                    {"id": tenant_a, "slug": f"rls-memory-{tenant_a}"},
+                    {"id": tenant_b, "slug": f"rls-memory-{tenant_b}"},
+                ],
+            )
+            for tenant_id, session_id, memory_id, value in (
+                (tenant_a, session_a, memory_a, "tenant-a"),
+                (tenant_b, session_b, memory_b, "tenant-b"),
+            ):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(
+                    text("INSERT INTO sessions (id, tenant_id, title) VALUES (:id, :tenant_id, 'RLS memory session')"),
+                    {"id": session_id, "tenant_id": tenant_id},
+                )
+                await connection.execute(
+                    text("INSERT INTO memory (id, tenant_id, session_id, agent_type, key, value) VALUES (:id, :tenant_id, :session_id, 'rls-test', :key, :value)"),
+                    {
+                        "id": memory_id,
+                        "tenant_id": tenant_id,
+                        "session_id": session_id,
+                        "key": shared_key,
+                        "value": value,
+                    },
+                )
+
+        tenant_context.clear()
+        async with sessions() as db:
+            assert (await db.execute(select(Memory.id))).scalars().all() == []
+            with pytest.raises(DBAPIError):
+                await db.execute(
+                    text("INSERT INTO memory (id, tenant_id, agent_type, key, value) VALUES (:id, :tenant_id, 'rls-test', :key, 'unscoped')"),
+                    {"id": uuid.uuid4(), "tenant_id": tenant_a, "key": shared_key},
+                )
+            await db.rollback()
+
+        tenant_context.set(tenant_a, "rls-memory-a")
+        async with sessions() as db:
+            values = (await db.execute(select(Memory.value).where(Memory.key == shared_key))).scalars().all()
+            assert values == ["tenant-a"]
+            hidden_update = await db.execute(
+                text("UPDATE memory SET value = 'hidden' WHERE id = :id"), {"id": memory_b}
+            )
+            assert hidden_update.rowcount == 0
+            await db.rollback()
+
+        async with sessions() as db:
+            db.add(
+                Memory(
+                    id=uuid.uuid4(), tenant_id=tenant_a, session_id=session_b,
+                    agent_type="rls-test", key=shared_key, value="foreign session",
+                )
+            )
+            with pytest.raises(DBAPIError):
+                await db.flush()
+            await db.rollback()
+    finally:
+        tenant_context.clear()
+        async with engine.begin() as connection:
+            for tenant_id, session_id, memory_id in (
+                (tenant_a, session_a, memory_a),
+                (tenant_b, session_b, memory_b),
+            ):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(text("DELETE FROM memory WHERE id = :id"), {"id": memory_id})
                 await connection.execute(text("DELETE FROM sessions WHERE id = :id"), {"id": session_id})
             await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
         await engine.dispose()
