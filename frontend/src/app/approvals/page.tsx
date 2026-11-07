@@ -124,12 +124,15 @@ export default function ApprovalsPage() {
           <span className="eyebrow">Human oversight</span>
           <h1 className="page-title">Approvals</h1>
         </div>
-        <label className={styles.approvalFilter}>
-          <span className="field-label">View</span>
-          <select className="editorial-input" onChange={(event) => setStatus(event.target.value as ApprovalStatus)} value={status}>
-            {STATUS_OPTIONS.map((option) => <option key={option} value={option}>{option[0].toUpperCase() + option.slice(1)}</option>)}
-          </select>
-        </label>
+        <div className={styles.approvalHead}>
+          <Link className="action-button secondary" href="/admin/verification-queue">Worker queue</Link>
+          <label className={styles.approvalFilter}>
+            <span className="field-label">View</span>
+            <select className="editorial-input" onChange={(event) => setStatus(event.target.value as ApprovalStatus)} value={status}>
+              {STATUS_OPTIONS.map((option) => <option key={option} value={option}>{option[0].toUpperCase() + option.slice(1)}</option>)}
+            </select>
+          </label>
+        </div>
       </header>
 
       {error && (
