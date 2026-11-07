@@ -10,7 +10,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0051_verification_queue_concurrency"
+revision: str = "0051_verif_queue_concurrency"
 down_revision: str | None = "0050_verification_queue_controls"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
