@@ -8,6 +8,7 @@ import logging
 import socket
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -168,11 +169,12 @@ async def _queue_due_maintenance_events(db: AsyncSession) -> int:
                     action = "blocked"
                 else:
                     task, workspace_record, handoff, teammate = target
-                    from solvyn.api.v1.verification import _DEFAULT_VERIFICATION_COMMANDS, _workspace_manager
+                    from solvyn.api.v1.verification import _DEFAULT_VERIFICATION_COMMANDS, VerificationKind, _workspace_manager
                     from solvyn.config import settings
                     from solvyn.sandbox.workspaces import WorkspaceError
 
-                    verification_kind = schedule.verification_kind
+                    # The API validator and database constraint bound this persisted value.
+                    verification_kind = cast(VerificationKind, schedule.verification_kind)
                     command = _DEFAULT_VERIFICATION_COMMANDS[verification_kind]
                     manager = _workspace_manager()
                     try:
