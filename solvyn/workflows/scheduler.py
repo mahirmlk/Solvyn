@@ -172,6 +172,8 @@ async def _queue_due_maintenance_events(db: AsyncSession) -> int:
                     from solvyn.config import settings
                     from solvyn.sandbox.workspaces import WorkspaceError
 
+                    verification_kind = schedule.verification_kind
+                    command = _DEFAULT_VERIFICATION_COMMANDS[verification_kind]
                     manager = _workspace_manager()
                     try:
                         workspace = manager.get(workspace_record.id)
@@ -188,8 +190,8 @@ async def _queue_due_maintenance_events(db: AsyncSession) -> int:
                             workspace_id=workspace_record.id,
                             maintenance_schedule_id=schedule.id,
                             maintenance_scheduled_for=schedule.next_run_at,
-                            kind="lint",
-                            command=json.dumps(_DEFAULT_VERIFICATION_COMMANDS["lint"]),
+                            kind=verification_kind,
+                            command=json.dumps(command),
                             status="pending_approval",
                             runner_version="sandbox-service/1" if settings.sandbox_runtime_url else "docker-sandbox/1",
                             source_digest=source_digest,
@@ -205,7 +207,7 @@ async def _queue_due_maintenance_events(db: AsyncSession) -> int:
                                 verification_run_id=run.id,
                                 kind="verification_run",
                                 status="pending",
-                                summary=f"Scheduled code quality check: {schedule.title}",
+                                summary=f"Scheduled {verification_kind} check: {schedule.title}",
                                 payload=json.dumps(
                                     {
                                         "execution_id": str(task.execution_id) if task.execution_id else None,
@@ -214,8 +216,8 @@ async def _queue_due_maintenance_events(db: AsyncSession) -> int:
                                         "workspace_id": str(workspace_record.id),
                                         "maintenance_schedule_id": str(schedule.id),
                                         "scheduled_for": scheduled_for,
-                                        "kind": run.kind,
-                                        "command": _DEFAULT_VERIFICATION_COMMANDS["lint"],
+                                        "kind": verification_kind,
+                                        "command": command,
                                         "source_digest": source_digest,
                                     }
                                 ),

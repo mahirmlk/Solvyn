@@ -32,6 +32,7 @@ export default function MaintenancePage() {
   const [tasks, setTasks] = useState<MaintenanceTaskTarget[]>([]);
   const [title, setTitle] = useState("");
   const [intervalDays, setIntervalDays] = useState(7);
+  const [verificationKind, setVerificationKind] = useState<MaintenanceScheduleInfo["verification_kind"]>("lint");
 
   const loadSchedules = useCallback(async () => {
     setLoading(true);
@@ -126,6 +127,7 @@ export default function MaintenancePage() {
         project_id: projectId,
         task_id: taskId,
         maintenance_type: "code_quality",
+        verification_kind: verificationKind,
         title: title.trim(),
         interval_days: intervalDays,
       });
@@ -158,7 +160,7 @@ export default function MaintenancePage() {
           <span className="eyebrow">Proactive engineering</span>
           <h1 className="page-title">Maintenance</h1>
         </div>
-        <span className="status-pill">{loading ? "Loading" : `${visibleSchedules.length} Code quality checks`}</span>
+        <span className="status-pill">{loading ? "Loading" : `${visibleSchedules.length} Scheduled checks`}</span>
       </header>
 
       {error && (
@@ -172,7 +174,7 @@ export default function MaintenancePage() {
 
       <section className={`${styles.explainer} pearl-pane`} aria-label="How scheduled checks work">
         <span className="eyebrow">Approval stays in control</span>
-        <p>A due schedule requests a fixed <code>ruff check .</code> verification for its selected task and current workspace. It appears in approvals and waits for an owner or admin to approve before the worker runs it.</p>
+        <p>A due schedule requests its selected fixed verification profile for the assigned task and current workspace. It appears in approvals with the exact command and workspace digest, and waits for an owner or admin before the worker runs it.</p>
         <Link className="action-button secondary" href="/approvals">Review approvals</Link>
       </section>
 
@@ -181,7 +183,7 @@ export default function MaintenancePage() {
           <div className="section-head">
             <div>
               <span className="eyebrow">Recurring check</span>
-              <h2 className={styles.sectionTitle} id="create-maintenance-title">Schedule a code quality check</h2>
+              <h2 className={styles.sectionTitle} id="create-maintenance-title">Schedule a verification check</h2>
             </div>
           </div>
           <form className={styles.form} onSubmit={createSchedule}>
@@ -223,6 +225,16 @@ export default function MaintenancePage() {
               </label>
             </div>
             <label className="field">
+              <span className="field-label">Verification profile</span>
+              <select className="editorial-input" onChange={(event) => setVerificationKind(event.target.value as MaintenanceScheduleInfo["verification_kind"])} value={verificationKind}>
+                <option value="lint">Lint · ruff check</option>
+                <option value="test">Tests · pytest</option>
+                <option value="build">Build · Python compile check</option>
+                <option value="typecheck">Type check · mypy</option>
+                <option value="security">Static security · Ruff S rules</option>
+              </select>
+            </label>
+            <label className="field">
               <span className="field-label">Schedule name</span>
               <input className="editorial-input" maxLength={255} onChange={(event) => setTitle(event.target.value)} required value={title} />
             </label>
@@ -245,9 +257,9 @@ export default function MaintenancePage() {
         <p className={styles.readOnly}>Create a project before scheduling a code quality check.</p>
       )}
 
-      <section className={styles.scheduleList} aria-label="Code quality schedules">
+      <section className={styles.scheduleList} aria-label="Scheduled verification checks">
         {loading ? <div className="skeleton" style={{ minHeight: 160 }} /> : visibleSchedules.length === 0 ? (
-          <div className={styles.empty}>No code quality schedules yet.</div>
+          <div className={styles.empty}>No scheduled verification checks yet.</div>
         ) : visibleSchedules.map(({ organization, project, schedule, canManage }) => (
           <article className={`${styles.scheduleCard} pearl-pane`} key={schedule.id}>
             <div className={styles.cardHeading}>
@@ -258,6 +270,7 @@ export default function MaintenancePage() {
               <span className={`status-pill${schedule.enabled ? " success" : " light"}`}>{schedule.enabled ? "Enabled" : "Paused"}</span>
             </div>
             <dl className={styles.metadata}>
+              <div><dt>Profile</dt><dd>{schedule.verification_kind}</dd></div>
               <div><dt>Frequency</dt><dd>Every {schedule.interval_days} day{schedule.interval_days === 1 ? "" : "s"}</dd></div>
               <div><dt>Next request</dt><dd>{new Date(schedule.next_run_at).toLocaleString()}</dd></div>
               <div><dt>Task</dt><dd>{schedule.task_title || (schedule.task_id ? "Assigned workspace task" : "Legacy reminder")}</dd></div>

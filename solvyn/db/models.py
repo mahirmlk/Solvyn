@@ -795,6 +795,10 @@ class MaintenanceSchedule(Base):
             "maintenance_type IN ('code_quality', 'dependency_review', 'documentation_review')",
             name="ck_maintenance_schedules_type",
         ),
+        CheckConstraint(
+            "verification_kind IN ('test', 'build', 'lint', 'typecheck', 'security')",
+            name="ck_maintenance_schedules_verification_kind",
+        ),
         CheckConstraint("interval_days BETWEEN 1 AND 30", name="ck_maintenance_schedules_interval"),
     )
 
@@ -805,6 +809,7 @@ class MaintenanceSchedule(Base):
     task_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
     created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     maintenance_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    verification_kind: Mapped[str] = mapped_column(String(32), default="lint", server_default="lint", nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     interval_days: Mapped[int] = mapped_column(Integer, nullable=False)
     next_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
