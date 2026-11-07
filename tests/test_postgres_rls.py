@@ -2915,9 +2915,9 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                 await connection.execute(
                     text(
                         "INSERT INTO approvals "
-                        "(id, organization_id, project_id, teammate_id, task_handoff_id, verification_run_id, "
+                        "(id, organization_id, project_id, teammate_id, verification_run_id, "
                         "kind, summary, status, requested_by) "
-                        "VALUES (:id, :organization_id, :project_id, :teammate_id, :handoff_id, :run_id, "
+                        "VALUES (:id, :organization_id, :project_id, :teammate_id, :run_id, "
                         "'verification', 'Process restart recovery', 'approved', 'owner')"
                     ),
                     {
@@ -2925,7 +2925,6 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                         "organization_id": org_a,
                         "project_id": project_a,
                         "teammate_id": teammate_a,
-                        "handoff_id": handoff_a,
                         "run_id": restart_run_id,
                     },
                 )
