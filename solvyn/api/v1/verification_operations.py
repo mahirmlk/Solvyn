@@ -135,7 +135,9 @@ async def get_verification_queue(
                 VerificationRun.redriven_from_run_id.in_([run.id for run, *_ in rows]),
             )
         )
-        redriven_to_by_run = {source_id: child_id for source_id, child_id in child_links.all()}
+        redriven_to_by_run = {
+            source_id: child_id for source_id, child_id in child_links.all() if source_id is not None
+        }
 
     return {
         "counts": {queue_status: int(count) for queue_status, count in counts if queue_status in _QUEUE_STATUSES},
