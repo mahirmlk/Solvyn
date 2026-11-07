@@ -36,6 +36,7 @@ from solvyn.db.models import (
     TeammateToolInvocation,
     User,
     VerificationAttemptEvent,
+    VerificationQueueControl,
     VerificationRun,
 )
 from solvyn.db.session import bind_tenant_scope, get_session
@@ -1050,6 +1051,22 @@ async def _execute_approved_verification(
     allowed_approval_statuses = ("approved", "consumed") if recover_interrupted else ("approved",)
     if run.status not in allowed_run_statuses or approval.status not in allowed_approval_statuses:
         raise HTTPException(status_code=409, detail="Verification run does not have an unused approval")
+
+    # Serialize claims with the administrator's pause transaction. The second
+    # check after discovery makes a committed pause authoritative for every new
+    # claim; already-running sandbox work is left untouched.
+    await db.execute(
+        select(func.pg_advisory_xact_lock(func.hashtextextended(str(approval.organization_id), 0)))
+    )
+    queue_paused = await db.scalar(
+        select(VerificationQueueControl.paused).where(
+            VerificationQueueControl.organization_id == approval.organization_id,
+            VerificationQueueControl.tenant_id == task.tenant_id,
+        )
+    )
+    if queue_paused:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="Verification queue is paused for this organization")
 
     lease_owner = uuid.uuid4()
     run_claim = await db.execute(

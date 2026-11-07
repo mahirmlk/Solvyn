@@ -45,6 +45,7 @@ from solvyn.db.models import (
     TenantRole,
     TokenUsage,
     VerificationAttemptEvent,
+    VerificationQueueControl,
     VerificationRun,
     Workspace,
 )
@@ -109,7 +110,7 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                         "('tasks', 'task_acceptance_criteria', 'task_deliveries', 'task_workspaces', "
                         "'teammate_tool_invocations', 'task_dependencies', 'verification_runs', 'verification_attempt_events', "
                         "'task_handoffs', 'teammate_memory', 'sessions', 'execution_graphs', 'memory', 'token_usage', "
-                        "'approvals', 'proactive_events', 'maintenance_schedules', 'integrations', "
+                        "'approvals', 'proactive_events', 'maintenance_schedules', 'verification_queue_controls', 'integrations', "
                         "'integration_credentials', 'projects', 'repositories', 'project_knowledge', "
                         "'teammate_profiles', 'teammate_permissions', 'teammate_project_assignments', "
                         "'organizations', 'workspaces')"
@@ -134,6 +135,7 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                 "approvals",
                 "proactive_events",
                 "maintenance_schedules",
+                "verification_queue_controls",
                 "integrations",
                 "integration_credentials",
                 "projects",
@@ -837,11 +839,19 @@ async def test_proactive_data_rls_is_tenant_and_organization_scoped() -> None:
                     ),
                     {"id": schedule_id, "tenant_id": tenant_id, "organization_id": organization_id, "project_id": project_id},
                 )
+                await connection.execute(
+                    text(
+                        "INSERT INTO verification_queue_controls (organization_id, tenant_id, paused) "
+                        "VALUES (:organization_id, :tenant_id, true)"
+                    ),
+                    {"organization_id": organization_id, "tenant_id": tenant_id},
+                )
 
         tenant_context.clear()
         async with sessions() as db:
             assert (await db.execute(select(ProactiveEvent.id))).scalars().all() == []
             assert (await db.execute(select(MaintenanceSchedule.id))).scalars().all() == []
+            assert (await db.execute(select(VerificationQueueControl.organization_id))).scalars().all() == []
             with pytest.raises(DBAPIError):
                 await db.execute(
                     text(
@@ -865,13 +875,18 @@ async def test_proactive_data_rls_is_tenant_and_organization_scoped() -> None:
         async with sessions() as db:
             assert (await db.execute(select(ProactiveEvent.id))).scalars().all() == [event_a]
             assert (await db.execute(select(MaintenanceSchedule.id))).scalars().all() == [schedule_a]
+            assert (await db.execute(select(VerificationQueueControl.organization_id))).scalars().all() == [organization_a]
             hidden_event_update = await db.execute(
                 text("UPDATE proactive_events SET status = 'acknowledged' WHERE id = :id"), {"id": event_b}
             )
             hidden_schedule_update = await db.execute(
                 text("UPDATE maintenance_schedules SET enabled = false WHERE id = :id"), {"id": schedule_b}
             )
-            assert hidden_event_update.rowcount == hidden_schedule_update.rowcount == 0
+            hidden_control_update = await db.execute(
+                text("UPDATE verification_queue_controls SET paused = false WHERE organization_id = :id"),
+                {"id": organization_b},
+            )
+            assert hidden_event_update.rowcount == hidden_schedule_update.rowcount == hidden_control_update.rowcount == 0
             await db.rollback()
 
         async with sessions() as db:
@@ -912,13 +927,20 @@ async def test_proactive_data_rls_is_tenant_and_organization_scoped() -> None:
     finally:
         tenant_context.clear()
         async with engine.begin() as connection:
-            for tenant_id, event_id, schedule_id in ((tenant_a, event_a, schedule_a), (tenant_b, event_b, schedule_b)):
+            for tenant_id, organization_id, event_id, schedule_id in (
+                (tenant_a, organization_a, event_a, schedule_a),
+                (tenant_b, organization_b, event_b, schedule_b),
+            ):
                 await connection.execute(
                     text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
                     {"tenant_id": str(tenant_id)},
                 )
                 await connection.execute(text("DELETE FROM proactive_events WHERE id = :id"), {"id": event_id})
                 await connection.execute(text("DELETE FROM maintenance_schedules WHERE id = :id"), {"id": schedule_id})
+                await connection.execute(
+                    text("DELETE FROM verification_queue_controls WHERE organization_id = :id"),
+                    {"id": organization_id},
+                )
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
             await connection.execute(
                 text("DELETE FROM projects WHERE id IN (:a, :other)"),

@@ -40,6 +40,7 @@ export default function VerificationQueuePage() {
   const [error, setError] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [redrivingId, setRedrivingId] = useState<string | null>(null);
+  const [controlUpdatingId, setControlUpdatingId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -78,6 +79,22 @@ export default function VerificationQueuePage() {
     setQueue(null);
     setLoading(true);
     setOffset(nextOffset);
+  }
+
+  async function toggleQueuePause(control: VerificationQueueResponse["controls"][number]) {
+    setControlUpdatingId(control.organization_id);
+    setActionMessage(null);
+    try {
+      await api.setVerificationQueuePaused(control.organization_id, !control.paused);
+      setActionMessage(control.paused
+        ? `New verification claims resumed for ${control.organization_name}.`
+        : `New claims paused for ${control.organization_name}. Running verifications will continue.`);
+      await refresh();
+    } catch (reason) {
+      setActionMessage(reason instanceof Error ? reason.message : "Could not update the queue control.");
+    } finally {
+      setControlUpdatingId(null);
+    }
   }
 
   async function redrive(itemId: string) {
@@ -132,6 +149,34 @@ export default function VerificationQueuePage() {
         </div>
       )}
       {actionMessage && <p className={styles.actionMessage} role="status">{actionMessage}</p>}
+
+      <section className={styles.controlSection} aria-labelledby="queue-controls-title">
+        <div className={styles.controlIntro}>
+          <div>
+            <span className="eyebrow">Organization controls</span>
+            <h2 id="queue-controls-title">New verification claims</h2>
+          </div>
+          <p>Pausing blocks new worker claims after the change is saved. Running verifications continue, and approval requests remain available.</p>
+        </div>
+        <div className={styles.controlList}>
+          {queue?.controls.map((control) => (
+            <article className={`${styles.controlCard} pearl-pane`} key={control.organization_id}>
+              <div>
+                <strong>{control.organization_name}</strong>
+                <span className={styles.subtle}>{control.paused ? "New claims are paused" : "New claims are allowed"}</span>
+              </div>
+              <button
+                className={`action-button${control.paused ? "" : " secondary"}`}
+                disabled={loading || controlUpdatingId !== null}
+                onClick={() => void toggleQueuePause(control)}
+                type="button"
+              >
+                {controlUpdatingId === control.organization_id ? "Saving…" : control.paused ? "Resume claims" : "Pause new claims"}
+              </button>
+            </article>
+          ))}
+        </div>
+      </section>
 
       <section className={styles.summaryGrid} aria-label="Queue status counts">
         {summary.map((item) => (
@@ -195,7 +240,7 @@ export default function VerificationQueuePage() {
                 <td>{formatStatus(item.approval_status)}</td>
                 <td>
                   {item.attempt_count} / {item.max_attempts}
-                  <span className={styles.subtle}>{item.retryable ? "Eligible for worker claim" : "Not claimable now"}</span>
+                  <span className={styles.subtle}>{item.claimable ? "Eligible for worker claim" : item.organization_paused ? "Organization queue paused" : "Not claimable now"}</span>
                 </td>
                 <td>{formatDate(item.lease_expires_at)}</td>
                 <td>{formatDate(item.started_at)}</td>

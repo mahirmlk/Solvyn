@@ -332,7 +332,10 @@ async def test_task_verification_is_sandboxed_and_durable(
             f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs/{response.json()['verification_run']['id']}/execute"
         )
 
+    verification_calls: list[list[str]] = []
+
     async def fake_run(self: DockerSandboxRunner, managed_workspace: Any, command: list[str]) -> SandboxResult:
+        verification_calls.append(command)
         return SandboxResult(uuid.uuid4(), tuple(command), 0, False, "1 passed", "", False, 0.05)
 
     monkeypatch.setattr(DockerSandboxRunner, "run", fake_run)
@@ -344,7 +347,45 @@ async def test_task_verification_is_sandboxed_and_durable(
     assert verification.json()["verification_run"]["status"] == "pending_approval"
     assert verification.json()["verification_run"]["command"] == ["pytest", "-q"]
     assert len(verification.json()["verification_run"]["source_digest"]) == 64
-    first_result = await approve_and_execute(verification)
+    approval_id = verification.json()["approval_id"]
+    approval = await client.post(f"/api/v1/approvals/{approval_id}/approve", json={"note": "Approved verification"})
+    assert approval.status_code == 200
+    from solvyn.workflows import scheduler
+
+    async with async_session_factory() as db:
+        due_before_pause = await scheduler._fetch_due_verification_runs(db)
+    run_id = uuid.UUID(verification.json()["verification_run"]["id"])
+    assert (run_id, tenant.id) in due_before_pause
+
+    paused = await client.patch(
+        f"/api/v1/verification-queue/organizations/{organization_id}/control",
+        json={"paused": True},
+    )
+    assert paused.status_code == 200 and paused.json()["paused"] is True
+    queue = await client.get("/api/v1/verification-queue?status=approved")
+    assert queue.status_code == 200
+    control = next(item for item in queue.json()["controls"] if item["organization_id"] == str(organization_id))
+    assert control["paused"] is True
+    queue_item = next(item for item in queue.json()["items"] if item["id"] == verification.json()["verification_run"]["id"])
+    assert queue_item["retryable"] is True and queue_item["claimable"] is False
+    assert queue_item["organization_paused"] is True
+
+    await scheduler._execute_due_verification(run_id, tenant.id)
+    blocked = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs/{verification.json()['verification_run']['id']}/execute"
+    )
+    assert blocked.status_code == 409
+    assert "queue is paused" in blocked.json()["detail"].lower()
+    assert verification_calls == []
+
+    resumed = await client.patch(
+        f"/api/v1/verification-queue/organizations/{organization_id}/control",
+        json={"paused": False},
+    )
+    assert resumed.status_code == 200 and resumed.json()["paused"] is False
+    first_result = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs/{verification.json()['verification_run']['id']}/execute"
+    )
     assert first_result.status_code == 200
     assert first_result.json()["status"] == "passed"
     assert first_result.json()["stdout"] == "1 passed"
