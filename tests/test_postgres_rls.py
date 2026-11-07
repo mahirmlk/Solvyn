@@ -248,6 +248,7 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
             assert history[1].payload["previous_text"] == "criterion"
             assert history[1].payload["previous_decision_note"] is None
             assert history[1].actor_user_id == actor_id
+            created_event_id = history[0].id
             with pytest.raises(DBAPIError):
                 await session.execute(
                     text(
@@ -261,7 +262,7 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
             with pytest.raises(DBAPIError):
                 await session.execute(
                     text("DELETE FROM orchestration_events WHERE id = :id"),
-                    {"id": history[0].id},
+                    {"id": created_event_id},
                 )
             await session.rollback()
     finally:
@@ -2253,7 +2254,7 @@ async def test_task_dependency_rls_is_tenant_scoped_and_rejects_cross_tenant_edg
             ]
             assert history[1].payload == {
                 "depends_on_task_id": str(task_a_other),
-                "previous_task_id": None,
+                "previous_task_id": str(task_a),
                 "previous_depends_on_task_id": str(task_a),
             }
             with pytest.raises(DBAPIError):
