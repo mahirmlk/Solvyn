@@ -147,7 +147,7 @@ async def test_runner_applies_container_policy_and_returns_workspace_changes(tmp
     assert "--memory" in create and "512m" in create
     assert "--cpus" in create and "1.0" in create
     assert "--pids-limit" in create and "128" in create
-    assert "--tmpfs" in create and "/workspace:rw,nosuid,nodev,size=67108864,nr_inodes=10000" in create
+    assert "--tmpfs" in create and "/workspace:rw,nosuid,nodev,size=134217728,nr_inodes=10000" in create
     assert calls[3] == ["exec", "--user", "0", "a" * 64, "chmod", "-R", "a+rwX", "/workspace"]
     assert calls[4] == ["exec", "a" * 64, "python", "-c", "print('safe')"]
     assert calls[-1][:2] == ["rm", "--force"]

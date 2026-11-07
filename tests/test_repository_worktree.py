@@ -67,8 +67,8 @@ class _WorkspaceGitHub:
 def test_repository_tree_accepts_bounded_regular_files() -> None:
     entries = [
         {"path": "src", "type": "tree", "mode": "040000"},
-        {"path": "src/main.py", "type": "blob", "mode": "100644", "size": 16},
-        {"path": "scripts/run.sh", "type": "blob", "mode": "100755", "size": 32},
+        {"path": "src/main.py", "type": "blob", "mode": "100644", "size": 16, "sha": "a" * 40},
+        {"path": "scripts/run.sh", "type": "blob", "mode": "100755", "size": 32, "sha": "b" * 40},
     ]
 
     assert validate_repository_tree(entries) == 48
@@ -181,9 +181,17 @@ def test_raw_git_blob_materialization_ignores_gitattributes(tmp_path: Path) -> N
     git("add", ".")
     git("commit", "--quiet", "-m", "fixture")
 
-    git("checkout-index", "--force", "--all")
-    assert (tmp_path / "sample.txt").read_bytes() == b"line one\r\n"
-    assert (tmp_path / "ident.txt").read_bytes() != b"$Id$\n"
+    attributes = subprocess.run(
+        ["git", "check-attr", "--all", "--", "sample.txt", "ident.txt"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+        shell=False,
+    ).stdout
+    assert "sample.txt: text: set" in attributes
+    assert "sample.txt: eol: crlf" in attributes
+    assert "ident.txt: ident: set" in attributes
 
     (tmp_path / "sample.txt").unlink()
     (tmp_path / "ident.txt").unlink()
