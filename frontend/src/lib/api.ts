@@ -304,9 +304,9 @@ export interface TaskActivityEvent {
     source?: string;
     actor_user_id?: string | null;
     execution_id?: string | null;
-    entity_type?: "approval" | "handoff" | "acceptance_criterion" | "dependency";
+    entity_type?: "approval" | "handoff" | "acceptance_criterion" | "dependency" | "workflow_execution";
     entity_id?: string;
-    event_type?: "created" | "status_changed" | "updated" | "deleted";
+    event_type?: "created" | "status_changed" | "updated" | "deleted" | "claimed";
     previous_status?: string | null;
     path?: string | null;
     error_code?: string | null;
