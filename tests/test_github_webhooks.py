@@ -18,6 +18,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from solvyn.api.v1.webhooks import (
+    _parse_github_work_item,
     _parse_security_alert,
     _parse_workflow_failure,
     _valid_signature,
@@ -126,6 +127,60 @@ def test_workflow_failure_parser_keeps_only_bounded_safe_fields() -> None:
         "details_url": "https://github.com/Octo/Repo/actions/runs/123",
     }
     assert _parse_workflow_failure({"action": "completed", "workflow_run": {"conclusion": "success"}}) is None
+
+
+@pytest.mark.parametrize(
+    ("event_type", "item_key", "number", "expected_branch"),
+    [("issues", "issue", 27, ""), ("pull_request", "pull_request", 28, "feature/safe")],
+)
+def test_github_work_item_parser_keeps_only_bounded_safe_fields(
+    event_type: str,
+    item_key: str,
+    number: int,
+    expected_branch: str,
+) -> None:
+    item: dict[str, object] = {
+        "number": number,
+        "state": "open",
+        "title": "  Add safe behavior\u0000  ",
+        "html_url": f"https://github.com/Octo/Repo/{'pull' if event_type == 'pull_request' else 'issues'}/{number}",
+    }
+    if event_type == "pull_request":
+        item["head"] = {"ref": expected_branch}
+    parsed = _parse_github_work_item(
+        event_type,
+        {"action": "opened", "repository": {"full_name": "Octo/Repo"}, item_key: item},
+    )
+
+    assert parsed == {
+        "repository_name": "Octo/Repo",
+        "source_event_id": f"{event_type}:octo/repo:{number}:opened",
+        "workflow_name": "Add safe behavior",
+        "conclusion": "open",
+        "branch": expected_branch,
+        "details_url": item["html_url"],
+        "action": "opened",
+    }
+    assert _parse_github_work_item(
+        event_type,
+        {"action": "edited", "repository": {"full_name": "Octo/Repo"}, item_key: item},
+    ) is None
+    item["title"] = {"untrusted": "object"}
+    item["number"] = True
+    assert _parse_github_work_item(
+        event_type,
+        {"action": "opened", "repository": {"full_name": "Octo/Repo"}, item_key: item},
+    ) is None
+    assert _parse_github_work_item(
+        event_type,
+        {"action": [], "repository": {"full_name": "Octo/Repo"}, item_key: {}},
+    ) is None
+    if event_type == "issues":
+        pull_request_issue = {"number": 27, "state": "open", "pull_request": {}}
+        assert _parse_github_work_item(
+            event_type,
+            {"action": "opened", "repository": {"full_name": "Octo/Repo"}, "issue": pull_request_issue},
+        ) is None
 
 
 def test_security_alert_parser_keeps_bounded_metadata_and_never_secret_values() -> None:
@@ -334,6 +389,77 @@ async def test_signed_security_alert_is_persisted_without_secret_material() -> N
     assert event.workflow_name == "Example token"
     assert event.status == "pending"
     assert "must-never-reach-the-database" not in repr(event.__dict__)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_type", "item_key", "number"),
+    [("issues", "issue", 38), ("pull_request", "pull_request", 39)],
+)
+async def test_signed_github_work_item_is_persisted_as_triage_signal(
+    event_type: str,
+    item_key: str,
+    number: int,
+) -> None:
+    item: dict[str, object] = {
+        "number": number,
+        "state": "open",
+        "title": "Review this change",
+        "html_url": f"https://github.com/octo/repo/{'pull' if event_type == 'pull_request' else 'issues'}/{number}",
+    }
+    if event_type == "pull_request":
+        item["head"] = {"ref": "feature/review"}
+    body = json.dumps(
+        {"action": "opened", "repository": {"full_name": "octo/repo"}, item_key: item}
+    ).encode()
+
+    class StubDB:
+        def __init__(self) -> None:
+            self.execute_count = 0
+            self.added: list[ProactiveEvent] = []
+
+        async def execute(self, _query: object) -> SimpleNamespace:
+            self.execute_count += 1
+            if self.execute_count == 1:
+                self.tenant_id = uuid.uuid4()
+                return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [self.tenant_id]))
+            if self.execute_count == 2:
+                return SimpleNamespace(all=lambda: [(uuid.uuid4(), uuid.uuid4(), self.tenant_id)])
+            return SimpleNamespace(scalar_one_or_none=lambda: None)
+
+        def add(self, event: ProactiveEvent) -> None:
+            if event.id is None:
+                event.id = uuid.uuid4()
+            self.added.append(event)
+
+        async def commit(self) -> None:
+            return None
+
+        async def flush(self) -> None:
+            return None
+
+        async def refresh(self, _event: ProactiveEvent) -> None:
+            return None
+
+    stub_db = StubDB()
+    with (
+        patch("solvyn.api.v1.webhooks.settings.github_webhook_secret", "webhook-secret"),
+        patch("solvyn.api.v1.webhooks.bind_tenant_scope", new_callable=AsyncMock),
+    ):
+        result = await receive_github_webhook(
+            _request(body, event=event_type, signature=_signature("webhook-secret", body)),
+            db=cast(AsyncSession, stub_db),
+        )
+
+    assert result["created_count"] == 1
+    assert len(stub_db.added) == 1
+    event = stub_db.added[0]
+    assert event.event_type == event_type
+    assert event.workflow_name == "Review this change"
+    assert event.source_event_id == f"{event_type}:octo/repo:{number}:opened"
+    assert event.status == "pending"
+    assert event.conclusion == "open"
+    assert event.details_url == item["html_url"]
 
 
 @pytest.mark.asyncio
