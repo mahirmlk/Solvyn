@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,7 +46,16 @@ _MAX_ATTEMPTS = 3
 
 
 class VerificationQueueControlUpdate(BaseModel):
-    paused: bool
+    model_config = ConfigDict(extra="forbid")
+
+    paused: bool | None = None
+    max_concurrent_runs: int | None = Field(default=None, ge=1, le=5)
+
+    @model_validator(mode="after")
+    def require_control_update(self) -> VerificationQueueControlUpdate:
+        if self.paused is None and self.max_concurrent_runs is None:
+            raise ValueError("Provide paused or max_concurrent_runs")
+        return self
 
 
 @router.get("", summary="Inspect verification queue and dead-letter state")
@@ -98,6 +107,7 @@ async def get_verification_queue(
             select(
                 VerificationQueueControl.organization_id,
                 VerificationQueueControl.paused,
+                VerificationQueueControl.max_concurrent_runs,
                 VerificationQueueControl.updated_at,
             ).where(
                 VerificationQueueControl.tenant_id == tenant_id,
@@ -105,7 +115,24 @@ async def get_verification_queue(
             )
         )
     ).all()
-    paused_by_organization = {organization_id: paused for organization_id, paused, _ in control_rows}
+    paused_by_organization = {organization_id: paused for organization_id, paused, _, _ in control_rows}
+    concurrency_by_organization = {
+        organization_id: maximum for organization_id, _, maximum, _ in control_rows
+    }
+    running_by_organization = dict(
+        (
+            await db.execute(
+                select(Approval.organization_id, func.count())
+                .join(VerificationRun, VerificationRun.id == Approval.verification_run_id)
+                .where(
+                    VerificationRun.tenant_id == tenant_id,
+                    VerificationRun.status == "running",
+                    Approval.organization_id.in_(organization_ids),
+                )
+                .group_by(Approval.organization_id)
+            )
+        ).all()
+    )
 
     queue_filters = (
         VerificationRun.tenant_id == tenant_id,
@@ -214,8 +241,10 @@ async def get_verification_queue(
                 "organization_id": str(organization_id),
                 "organization_name": organization_names[organization_id],
                 "paused": paused_by_organization.get(organization_id, False),
+                "max_concurrent_runs": concurrency_by_organization.get(organization_id, 2),
+                "active_runs": int(running_by_organization.get(organization_id, 0)),
                 "updated_at": next(
-                    (updated_at.isoformat() for control_org_id, _, updated_at in control_rows if control_org_id == organization_id),
+                    (updated_at.isoformat() for control_org_id, _, _, updated_at in control_rows if control_org_id == organization_id),
                     None,
                 ),
             }
@@ -230,7 +259,7 @@ async def update_verification_queue_control(
     payload: VerificationQueueControlUpdate,
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """Persist an organization pause; running sandbox jobs continue unchanged."""
+    """Persist organization queue controls; running sandbox jobs continue unchanged."""
     tenant_id = require_tenant()
     await bind_tenant_scope(db, tenant_id)
     membership = await require_org_membership(db, organization_id, roles=OWNER_ADMIN)
@@ -249,18 +278,23 @@ async def update_verification_queue_control(
         control = VerificationQueueControl(
             organization_id=organization_id,
             tenant_id=tenant_id,
-            paused=payload.paused,
+            paused=payload.paused if payload.paused is not None else False,
+            max_concurrent_runs=payload.max_concurrent_runs if payload.max_concurrent_runs is not None else 2,
             updated_by_user_id=tenant_context.user_id,
         )
         db.add(control)
     else:
-        control.paused = payload.paused
+        if payload.paused is not None:
+            control.paused = payload.paused
+        if payload.max_concurrent_runs is not None:
+            control.max_concurrent_runs = payload.max_concurrent_runs
         control.updated_by_user_id = tenant_context.user_id
     await db.commit()
     await db.refresh(control)
     return {
         "organization_id": str(organization_id),
         "paused": control.paused,
+        "max_concurrent_runs": control.max_concurrent_runs,
         "updated_at": control.updated_at.isoformat(),
         "updated_by_user_id": str(control.updated_by_user_id) if control.updated_by_user_id else None,
         "membership_role": membership.role,

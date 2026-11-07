@@ -817,6 +817,9 @@ class VerificationQueueControl(Base):
     """Persistent organization-level pause state for new verification claims."""
 
     __tablename__ = "verification_queue_controls"
+    __table_args__ = (
+        CheckConstraint("max_concurrent_runs BETWEEN 1 AND 5", name="ck_verification_queue_controls_concurrency"),
+    )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), primary_key=True
@@ -825,6 +828,7 @@ class VerificationQueueControl(Base):
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
     )
     paused: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
+    max_concurrent_runs: Mapped[int] = mapped_column(Integer, default=2, server_default=text("2"), nullable=False)
     updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )

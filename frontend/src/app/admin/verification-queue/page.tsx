@@ -97,6 +97,20 @@ export default function VerificationQueuePage() {
     }
   }
 
+  async function updateConcurrency(control: VerificationQueueResponse["controls"][number], value: number) {
+    setControlUpdatingId(control.organization_id);
+    setActionMessage(null);
+    try {
+      await api.setVerificationQueueConcurrency(control.organization_id, value);
+      setActionMessage(`Verification concurrency limit updated for ${control.organization_name}. Running verifications will continue.`);
+      await refresh();
+    } catch (reason) {
+      setActionMessage(reason instanceof Error ? reason.message : "Could not update the concurrency limit.");
+    } finally {
+      setControlUpdatingId(null);
+    }
+  }
+
   async function redrive(itemId: string) {
     setRedrivingId(itemId);
     setActionMessage(null);
@@ -156,7 +170,7 @@ export default function VerificationQueuePage() {
             <span className="eyebrow">Organization controls</span>
             <h2 id="queue-controls-title">New verification claims</h2>
           </div>
-          <p>Pausing blocks new worker claims after the change is saved. Running verifications continue, and approval requests remain available.</p>
+          <p>Pausing blocks new worker claims after the change is saved. The concurrency cap also blocks claims at its limit; lowering it leaves current runs active until they finish. Approval requests remain available.</p>
         </div>
         <div className={styles.controlList}>
           {queue?.controls.map((control) => (
@@ -164,15 +178,30 @@ export default function VerificationQueuePage() {
               <div>
                 <strong>{control.organization_name}</strong>
                 <span className={styles.subtle}>{control.paused ? "New claims are paused" : "New claims are allowed"}</span>
+                <span className={styles.subtle}>{control.active_runs} running / {control.max_concurrent_runs} allowed</span>
               </div>
-              <button
-                className={`action-button${control.paused ? "" : " secondary"}`}
-                disabled={loading || controlUpdatingId !== null}
-                onClick={() => void toggleQueuePause(control)}
-                type="button"
-              >
-                {controlUpdatingId === control.organization_id ? "Saving…" : control.paused ? "Resume claims" : "Pause new claims"}
-              </button>
+              <div className={styles.controlActions}>
+                <label className={styles.concurrencyControl}>
+                  <span className="field-label">Max concurrent runs</span>
+                  <select
+                    className="editorial-input"
+                    aria-label={`Maximum concurrent verification runs for ${control.organization_name}`}
+                    disabled={loading || controlUpdatingId !== null}
+                    onChange={(event) => void updateConcurrency(control, Number(event.target.value))}
+                    value={control.max_concurrent_runs}
+                  >
+                    {[1, 2, 3, 4, 5].map((value) => <option key={value} value={value}>{value}</option>)}
+                  </select>
+                </label>
+                <button
+                  className={`action-button${control.paused ? "" : " secondary"}`}
+                  disabled={loading || controlUpdatingId !== null}
+                  onClick={() => void toggleQueuePause(control)}
+                  type="button"
+                >
+                  {controlUpdatingId === control.organization_id ? "Saving…" : control.paused ? "Resume claims" : "Pause new claims"}
+                </button>
+              </div>
             </article>
           ))}
         </div>

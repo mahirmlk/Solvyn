@@ -55,6 +55,31 @@
   font-weight: 600;
 }
 
+.controlActions {
+  display: flex;
+  align-items: end;
+  gap: 10px;
+}
+
+.concurrencyControl {
+  display: grid;
+  min-width: 105px;
+  gap: 6px;
+}
+
+@media (max-width: 680px) {
+  .controlIntro,
+  .controlCard,
+  .controlActions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .controlActions {
+    width: 100%;
+  }
+}
+
 .summaryCard {
   display: grid;
   gap: 8px;

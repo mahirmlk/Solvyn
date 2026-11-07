@@ -242,11 +242,13 @@ async def test_task_verification_is_sandboxed_and_durable(
     assert workspace.status_code == 201
 
     from solvyn.db.models import (
+        Approval,
         Organization,
         OrganizationMembership,
         Project,
         Task,
         TaskHandoff,
+        TaskWorkspace,
         TeammateProfile,
         TeammateProjectAssignment,
         TeammateStatus,
@@ -357,6 +359,47 @@ async def test_task_verification_is_sandboxed_and_durable(
     run_id = uuid.UUID(verification.json()["verification_run"]["id"])
     assert (run_id, tenant.id) in due_before_pause
 
+    limited = await client.patch(
+        f"/api/v1/verification-queue/organizations/{organization_id}/control",
+        json={"max_concurrent_runs": 1},
+    )
+    assert limited.status_code == 200
+    assert limited.json()["max_concurrent_runs"] == 1
+    async with async_session_factory() as db:
+        await bind_tenant_scope(db, tenant.id)
+        source_approval = (
+            await db.execute(select(Approval).where(Approval.id == uuid.UUID(approval_id)))
+        ).scalar_one()
+        task_workspace = (
+            await db.execute(select(TaskWorkspace).where(TaskWorkspace.task_id == uuid.UUID(task_id)))
+        ).scalar_one()
+        already_running = VerificationRun(
+            id=uuid.uuid4(),
+            tenant_id=tenant.id,
+            task_id=uuid.UUID(task_id),
+            execution_id=uuid.UUID(execution_id),
+            workspace_id=task_workspace.id,
+            kind="test",
+            command='["pytest", "-q"]',
+            status="running",
+            runner_version="test",
+            source_digest=verification.json()["verification_run"]["source_digest"],
+            attempt_count=1,
+        )
+        db.add(already_running)
+        await db.flush()
+        running_approval = Approval(
+            organization_id=organization_id,
+            project_id=source_approval.project_id,
+            teammate_id=source_approval.teammate_id,
+            verification_run_id=already_running.id,
+            kind="verification_run",
+            summary="Existing active verification",
+            status="consumed",
+        )
+        db.add(running_approval)
+        await db.commit()
+
     paused = await client.patch(
         f"/api/v1/verification-queue/organizations/{organization_id}/control",
         json={"paused": True},
@@ -366,6 +409,8 @@ async def test_task_verification_is_sandboxed_and_durable(
     assert queue.status_code == 200
     control = next(item for item in queue.json()["controls"] if item["organization_id"] == str(organization_id))
     assert control["paused"] is True
+    assert control["max_concurrent_runs"] == 1
+    assert control["active_runs"] == 1
     queue_item = next(item for item in queue.json()["items"] if item["id"] == verification.json()["verification_run"]["id"])
     assert queue_item["retryable"] is True and queue_item["claimable"] is False
     assert queue_item["organization_paused"] is True
@@ -383,6 +428,17 @@ async def test_task_verification_is_sandboxed_and_durable(
         json={"paused": False},
     )
     assert resumed.status_code == 200 and resumed.json()["paused"] is False
+    concurrency_blocked = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs/{verification.json()['verification_run']['id']}/execute"
+    )
+    assert concurrency_blocked.status_code == 409
+    assert "concurrency limit" in concurrency_blocked.json()["detail"].lower()
+    assert verification_calls == []
+    async with async_session_factory() as db:
+        await bind_tenant_scope(db, tenant.id)
+        await db.delete(running_approval)
+        await db.delete(already_running)
+        await db.commit()
     first_result = await client.post(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs/{verification.json()['verification_run']['id']}/execute"
     )
