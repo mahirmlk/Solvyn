@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from prometheus_client import make_asgi_app
 
-from solvyn.api.v1 import health, maintenance, sessions, verification, webhooks, workflows
+from solvyn.api.v1 import health, maintenance, sessions, verification, verification_operations, webhooks, workflows
 from solvyn.api.v1.admin import router as admin_router
 from solvyn.api.v1.approvals import router as approvals_router
 from solvyn.api.v1.auth import router as auth_router
@@ -175,6 +175,7 @@ def create_app() -> FastAPI:
     solvyn_app.include_router(sessions.router, prefix="/api/v1")
     solvyn_app.include_router(workflows.router, prefix="/api/v1")
     solvyn_app.include_router(verification.router, prefix="/api/v1")
+    solvyn_app.include_router(verification_operations.router, prefix="/api/v1")
     solvyn_app.include_router(observability_router, prefix="/api/v1")
     solvyn_app.include_router(admin_router, prefix="/api/v1")
     solvyn_app.include_router(auth_router, prefix="/api/v1")
