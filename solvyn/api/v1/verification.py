@@ -1058,15 +1058,33 @@ async def _execute_approved_verification(
     await db.execute(
         select(func.pg_advisory_xact_lock(func.hashtextextended(str(approval.organization_id), 0)))
     )
-    queue_paused = await db.scalar(
-        select(VerificationQueueControl.paused).where(
-            VerificationQueueControl.organization_id == approval.organization_id,
-            VerificationQueueControl.tenant_id == task.tenant_id,
+    control = (
+        await db.execute(
+            select(VerificationQueueControl.paused, VerificationQueueControl.max_concurrent_runs).where(
+                VerificationQueueControl.organization_id == approval.organization_id,
+                VerificationQueueControl.tenant_id == task.tenant_id,
+            )
         )
-    )
+    ).one_or_none()
+    queue_paused = control[0] if control is not None else False
     if queue_paused:
         await db.rollback()
         raise HTTPException(status_code=409, detail="Verification queue is paused for this organization")
+
+    max_concurrent_runs = control[1] if control is not None else 2
+    active_runs = await db.scalar(
+        select(func.count())
+        .select_from(VerificationRun)
+        .join(Approval, Approval.verification_run_id == VerificationRun.id)
+        .where(
+            VerificationRun.tenant_id == task.tenant_id,
+            VerificationRun.status == "running",
+            Approval.organization_id == approval.organization_id,
+        )
+    )
+    if int(active_runs or 0) >= max_concurrent_runs:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="Organization verification concurrency limit reached")
 
     lease_owner = uuid.uuid4()
     run_claim = await db.execute(

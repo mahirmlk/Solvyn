@@ -433,7 +433,14 @@ export interface VerificationQueueResponse {
   total: number;
   limit: number;
   offset: number;
-  controls: { organization_id: string; organization_name: string; paused: boolean; updated_at: string | null }[];
+  controls: {
+    organization_id: string;
+    organization_name: string;
+    paused: boolean;
+    max_concurrent_runs: number;
+    active_runs: number;
+    updated_at: string | null;
+  }[];
   items: VerificationQueueItem[];
 }
 
@@ -506,9 +513,21 @@ export const api = {
   },
 
   setVerificationQueuePaused: (organizationId: string, paused: boolean) =>
-    request<{ organization_id: string; paused: boolean; updated_at: string; updated_by_user_id: string | null }>(
+    request<{
+      organization_id: string;
+      paused: boolean;
+      max_concurrent_runs: number;
+      updated_at: string;
+      updated_by_user_id: string | null;
+    }>(
       `/verification-queue/organizations/${organizationId}/control`,
       { method: "PATCH", body: JSON.stringify({ paused }) },
+    ),
+
+  setVerificationQueueConcurrency: (organizationId: string, max_concurrent_runs: number) =>
+    request<{ organization_id: string; paused: boolean; max_concurrent_runs: number; updated_at: string }>(
+      `/verification-queue/organizations/${organizationId}/control`,
+      { method: "PATCH", body: JSON.stringify({ max_concurrent_runs }) },
     ),
 
   redriveVerification: (verificationRunId: string) =>
