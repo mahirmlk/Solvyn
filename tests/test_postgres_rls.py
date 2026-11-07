@@ -832,10 +832,10 @@ async def test_proactive_data_rls_is_tenant_and_organization_scoped() -> None:
                 await connection.execute(
                     text(
                         "INSERT INTO maintenance_schedules "
-                        "(id, organization_id, project_id, maintenance_type, title, interval_days, next_run_at) "
-                        "VALUES (:id, :organization_id, :project_id, 'code_quality', 'RLS schedule', 7, now())"
+                        "(id, tenant_id, organization_id, project_id, maintenance_type, title, interval_days, next_run_at) "
+                        "VALUES (:id, :tenant_id, :organization_id, :project_id, 'code_quality', 'RLS schedule', 7, now())"
                     ),
-                    {"id": schedule_id, "organization_id": organization_id, "project_id": project_id},
+                    {"id": schedule_id, "tenant_id": tenant_id, "organization_id": organization_id, "project_id": project_id},
                 )
 
         tenant_context.clear()
@@ -897,6 +897,7 @@ async def test_proactive_data_rls_is_tenant_and_organization_scoped() -> None:
             db.add(
                 MaintenanceSchedule(
                     id=uuid.uuid4(),
+                    tenant_id=tenant_a,
                     organization_id=organization_a,
                     project_id=project_a_other,
                     maintenance_type="code_quality",
@@ -1052,11 +1053,11 @@ async def test_background_worker_webhook_and_maintenance_writes_are_tenant_scope
                 await connection.execute(
                     text(
                         "INSERT INTO maintenance_schedules "
-                        "(id, organization_id, project_id, maintenance_type, title, interval_days, next_run_at) "
-                        "VALUES (:id, :organization_id, :project_id, 'code_quality', 'Worker RLS', 7, "
+                        "(id, tenant_id, organization_id, project_id, maintenance_type, title, interval_days, next_run_at) "
+                        "VALUES (:id, :tenant_id, :organization_id, :project_id, 'code_quality', 'Worker RLS', 7, "
                         "now() - interval '1 day')"
                     ),
-                    {"id": schedule_id, "organization_id": organization_id, "project_id": project_id},
+                    {"id": schedule_id, "tenant_id": tenant_id, "organization_id": organization_id, "project_id": project_id},
                 )
 
         tenant_context.clear()
