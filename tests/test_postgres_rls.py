@@ -2166,9 +2166,15 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
     engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+    org_a, org_b = uuid.uuid4(), uuid.uuid4()
+    project_a, project_b = uuid.uuid4(), uuid.uuid4()
+    teammate_a, teammate_b = uuid.uuid4(), uuid.uuid4()
+    parent_a, parent_b = uuid.uuid4(), uuid.uuid4()
     task_a, task_b = uuid.uuid4(), uuid.uuid4()
     workspace_a, workspace_b = uuid.uuid4(), uuid.uuid4()
-    run_a, run_b, run_exhausted = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    run_a, run_b, run_exhausted, run_approved_a, run_approved_b = (uuid.uuid4() for _ in range(5))
+    handoff_a, handoff_b = uuid.uuid4(), uuid.uuid4()
+    approval_a, approval_b, approval_approved_a, approval_approved_b = (uuid.uuid4() for _ in range(4))
     stale_started_at = datetime.now(UTC) - timedelta(minutes=20)
 
     try:
@@ -2197,11 +2203,76 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                     {"id": tenant_b, "slug": f"rls-runs-{tenant_b}"},
                 ],
             )
-            for tenant_id, task_id in ((tenant_a, task_a), (tenant_b, task_b)):
+            await _seed_organizations(
+                connection,
+                [
+                    (org_a, tenant_a, f"rls-runs-org-{org_a}", "Verification RLS"),
+                    (org_b, tenant_b, f"rls-runs-org-{org_b}", "Verification RLS"),
+                ],
+            )
+            for tenant_id, organization_id, project_id, teammate_id in (
+                (tenant_a, org_a, project_a, teammate_a),
+                (tenant_b, org_b, project_b, teammate_b),
+            ):
                 await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_id)})
                 await connection.execute(
-                    text("INSERT INTO tasks (id, tenant_id, title) VALUES (:id, :tenant_id, 'RLS verification task')"),
-                    {"id": task_id, "tenant_id": tenant_id},
+                    text(
+                        "INSERT INTO projects (id, organization_id, tenant_id, name, slug) "
+                        "VALUES (:id, :organization_id, :tenant_id, 'Verification RLS', :slug)"
+                    ),
+                    {"id": project_id, "organization_id": organization_id, "tenant_id": tenant_id, "slug": f"rls-runs-project-{project_id}"},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO teammate_profiles "
+                        "(id, organization_id, tenant_id, name, role, agent_type) "
+                        "VALUES (:id, :organization_id, :tenant_id, 'Verification RLS', 'developer', 'developer')"
+                    ),
+                    {"id": teammate_id, "organization_id": organization_id, "tenant_id": tenant_id},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO teammate_project_assignments (id, teammate_id, project_id) "
+                        "VALUES (:id, :teammate_id, :project_id)"
+                    ),
+                    {"id": uuid.uuid4(), "teammate_id": teammate_id, "project_id": project_id},
+                )
+            for tenant_id, task_id in ((tenant_a, task_a), (tenant_b, task_b)):
+                await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_id)})
+                parent_id = parent_a if tenant_id == tenant_a else parent_b
+                await connection.execute(
+                    text("INSERT INTO tasks (id, tenant_id, title) VALUES (:id, :tenant_id, 'RLS verification parent')"),
+                    {"id": parent_id, "tenant_id": tenant_id},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO tasks (id, tenant_id, title, parent_task_id) "
+                        "VALUES (:id, :tenant_id, 'RLS verification task', :parent_id)"
+                    ),
+                    {"id": task_id, "tenant_id": tenant_id, "parent_id": parent_id},
+                )
+            for tenant_id, parent_id, child_id, teammate_id, project_id, handoff_id in (
+                (tenant_a, parent_a, task_a, teammate_a, project_a, handoff_a),
+                (tenant_b, parent_b, task_b, teammate_b, project_b, handoff_b),
+            ):
+                await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_id)})
+                await connection.execute(
+                    text(
+                        "INSERT INTO task_handoffs "
+                        "(id, tenant_id, parent_task_id, child_task_id, idempotency_key, teammate_id, project_id, "
+                        "delegated_from, delegated_to, reason, input_data) "
+                        "VALUES (:id, :tenant_id, :parent_id, :child_id, :key, :teammate_id, :project_id, "
+                        "'workflow', 'developer', 'verification RLS', '{}')"
+                    ),
+                    {
+                        "id": handoff_id,
+                        "tenant_id": tenant_id,
+                        "parent_id": parent_id,
+                        "child_id": child_id,
+                        "key": uuid.uuid4(),
+                        "teammate_id": teammate_id,
+                        "project_id": project_id,
+                    },
                 )
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
             await connection.execute(
@@ -2225,8 +2296,8 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                 await connection.execute(
                     text(
                         "INSERT INTO verification_runs "
-                        "(id, tenant_id, task_id, workspace_id, kind, command, status, runner_version, started_at, attempt_count) "
-                        "VALUES (:id, :tenant_id, :task_id, :workspace_id, 'test', '[]', 'approved', 'test', :started_at, 0)"
+                        "(id, tenant_id, task_id, workspace_id, kind, command, status, runner_version, started_at, attempt_count, source_digest) "
+                        "VALUES (:id, :tenant_id, :task_id, :workspace_id, 'test', '[]', 'approved', 'test', :started_at, 0, :source_digest)"
                     ),
                     {
                         "id": run_id,
@@ -2234,6 +2305,7 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                         "task_id": task_id,
                         "workspace_id": workspace_id,
                         "started_at": stale_started_at,
+                        "source_digest": "a" * 64,
                     },
                 )
                 await connection.execute(
@@ -2243,11 +2315,77 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                     ),
                     {"id": run_id, "attempt_count": attempt_count, "started_at": stale_started_at},
                 )
+                if run_id in {run_a, run_b}:
+                    organization_id, project_id, teammate_id, handoff_id = (
+                        (org_a, project_a, teammate_a, handoff_a)
+                        if tenant_id == tenant_a
+                        else (org_b, project_b, teammate_b, handoff_b)
+                    )
+                    approval_id = approval_a if tenant_id == tenant_a else approval_b
+                    await connection.execute(
+                        text(
+                            "INSERT INTO approvals "
+                            "(id, organization_id, project_id, teammate_id, task_handoff_id, verification_run_id, "
+                            "kind, summary, status, requested_by) "
+                            "VALUES (:id, :organization_id, :project_id, :teammate_id, :handoff_id, :run_id, "
+                            "'verification', 'Run fixed verification', 'approved', 'owner')"
+                        ),
+                        {
+                            "id": approval_id,
+                            "organization_id": organization_id,
+                            "project_id": project_id,
+                            "teammate_id": teammate_id,
+                            "handoff_id": handoff_id,
+                            "run_id": run_id,
+                        },
+                    )
                 if run_id == run_a:
                     await connection.execute(
                         text("UPDATE verification_runs SET stdout = repeat('x', 40000) WHERE id = :id"),
                         {"id": run_id},
                     )
+            for tenant_id, task_id, workspace_id, run_id, approval_id in (
+                (tenant_a, task_a, workspace_a, run_approved_a, approval_approved_a),
+                (tenant_b, task_b, workspace_b, run_approved_b, approval_approved_b),
+            ):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO verification_runs "
+                        "(id, tenant_id, task_id, workspace_id, kind, command, status, runner_version, source_digest) "
+                        "VALUES (:id, :tenant_id, :task_id, :workspace_id, 'test', '[]', 'approved', 'test', :source_digest)"
+                    ),
+                    {
+                        "id": run_id,
+                        "tenant_id": tenant_id,
+                        "task_id": task_id,
+                        "workspace_id": workspace_id,
+                        "source_digest": "a" * 64,
+                    },
+                )
+                organization_id, project_id, teammate_id = (
+                    (org_a, project_a, teammate_a)
+                    if tenant_id == tenant_a
+                    else (org_b, project_b, teammate_b)
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO approvals "
+                        "(id, organization_id, project_id, teammate_id, verification_run_id, kind, summary, status, requested_by) "
+                        "VALUES (:id, :organization_id, :project_id, :teammate_id, :run_id, "
+                        "'verification', 'Run fixed verification', 'approved', 'owner')"
+                    ),
+                    {
+                        "id": approval_id,
+                        "organization_id": organization_id,
+                        "project_id": project_id,
+                        "teammate_id": teammate_id,
+                        "run_id": run_id,
+                    },
+                )
 
         tenant_context.clear()
         async with sessions() as session:
@@ -2255,7 +2393,11 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
 
         tenant_context.set(tenant_a, "rls-a")
         async with sessions() as session:
-            assert set((await session.execute(select(VerificationRun.id))).scalars().all()) == {run_a, run_exhausted}
+            assert set((await session.execute(select(VerificationRun.id))).scalars().all()) == {
+                run_a,
+                run_exhausted,
+                run_approved_a,
+            }
             started_events = (
                 await session.execute(
                     select(VerificationAttemptEvent.verification_run_id, VerificationAttemptEvent.status)
@@ -2370,19 +2512,138 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                 )
             ).all()
             assert set(events_b) == {(run_b, "running"), (run_b, "interrupted")}
+
+        tenant_context.clear()
+        monkeypatch.setattr(scheduler, "_VERIFICATION_BATCH_SIZE", 100)
+        async with sessions() as session:
+            due_runs = await scheduler._fetch_due_verification_runs(session)
+        assert {
+            (run_a, tenant_a),
+            (run_b, tenant_b),
+            (run_approved_a, tenant_a),
+            (run_approved_b, tenant_b),
+        } <= set(due_runs)
+
+        class FakeWorkspaceManager:
+            def get(self, workspace_id: uuid.UUID) -> object:
+                return workspace_id
+
+            def fingerprint(self, workspace: object) -> str:
+                return "a" * 64
+
+        class FakeSandboxRunner:
+            async def run(self, workspace: object, command: list[str]) -> object:
+                from solvyn.sandbox.runtime import SandboxResult
+
+                return SandboxResult(
+                    uuid.uuid4(), tuple(command), 0, False, "ok", "", False, 0.01
+                )
+
+        from solvyn.api.v1 import verification
+
+        monkeypatch.setattr(verification, "_workspace_manager", lambda: FakeWorkspaceManager())
+        monkeypatch.setattr(verification, "_sandbox_runner", lambda: FakeSandboxRunner())
+        await scheduler._execute_due_verification(run_a, tenant_b)
+        tenant_context.set(tenant_a, "rls-a")
+        async with sessions() as session:
+            assert (
+                await session.execute(select(VerificationRun.status).where(VerificationRun.id == run_a))
+            ).scalar_one() == "interrupted"
+        tenant_context.clear()
+        await scheduler._execute_due_verification(run_a, tenant_a)
+        await scheduler._execute_due_verification(run_b, tenant_b)
+        await scheduler._execute_due_verification(run_approved_a, tenant_a)
+        await scheduler._execute_due_verification(run_approved_b, tenant_b)
+        for tenant_id, run_id, approval_id in ((tenant_a, run_a, approval_a), (tenant_b, run_b, approval_b)):
+            tenant_context.set(tenant_id, "verification-claim")
+            async with sessions() as session:
+                run_state = (
+                    await session.execute(
+                        select(
+                            VerificationRun.status,
+                            VerificationRun.attempt_count,
+                            VerificationRun.lease_owner,
+                            VerificationRun.lease_expires_at,
+                        ).where(VerificationRun.id == run_id)
+                    )
+                ).one()
+                approval_status = (
+                    await session.execute(select(Approval.status).where(Approval.id == approval_id))
+                ).scalar_one()
+                attempt_statuses = (
+                    await session.execute(
+                        select(VerificationAttemptEvent.status).where(
+                            VerificationAttemptEvent.verification_run_id == run_id,
+                            VerificationAttemptEvent.event_type == "finished",
+                        )
+                    )
+                ).scalars().all()
+                assert run_state == ("passed", 2, None, None)
+                assert approval_status == "consumed"
+                assert set(attempt_statuses) == {"interrupted", "passed"}
+        for tenant_id, run_id, approval_id in (
+            (tenant_a, run_approved_a, approval_approved_a),
+            (tenant_b, run_approved_b, approval_approved_b),
+        ):
+            tenant_context.set(tenant_id, "verification-approved-claim")
+            async with sessions() as session:
+                run_state = (
+                    await session.execute(
+                        select(
+                            VerificationRun.status,
+                            VerificationRun.attempt_count,
+                            VerificationRun.lease_owner,
+                            VerificationRun.lease_expires_at,
+                        ).where(VerificationRun.id == run_id)
+                    )
+                ).one()
+                approval_status = (
+                    await session.execute(select(Approval.status).where(Approval.id == approval_id))
+                ).scalar_one()
+                attempt_statuses = (
+                    await session.execute(
+                        select(VerificationAttemptEvent.status).where(
+                            VerificationAttemptEvent.verification_run_id == run_id,
+                            VerificationAttemptEvent.event_type == "finished",
+                        )
+                    )
+                ).scalars().all()
+                assert run_state == ("passed", 1, None, None)
+                assert approval_status == "consumed"
+                assert attempt_statuses == ["passed"]
     finally:
         tenant_context.clear()
         async with engine.begin() as connection:
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
+            await connection.execute(text("DELETE FROM approvals WHERE id = :id"), {"id": approval_a})
+            await connection.execute(text("DELETE FROM approvals WHERE id = :id"), {"id": approval_approved_a})
             await connection.execute(text("DELETE FROM verification_runs WHERE id = :id"), {"id": run_a})
             await connection.execute(text("DELETE FROM verification_runs WHERE id = :id"), {"id": run_exhausted})
+            await connection.execute(text("DELETE FROM verification_runs WHERE id = :id"), {"id": run_approved_a})
             await connection.execute(text("DELETE FROM task_workspaces WHERE id = :id"), {"id": workspace_a})
+            await connection.execute(text("DELETE FROM task_handoffs WHERE id = :id"), {"id": handoff_a})
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
+            await connection.execute(text("DELETE FROM approvals WHERE id = :id"), {"id": approval_b})
+            await connection.execute(text("DELETE FROM approvals WHERE id = :id"), {"id": approval_approved_b})
             await connection.execute(text("DELETE FROM verification_runs WHERE id = :id"), {"id": run_b})
+            await connection.execute(text("DELETE FROM verification_runs WHERE id = :id"), {"id": run_approved_b})
             await connection.execute(text("DELETE FROM task_workspaces WHERE id = :id"), {"id": workspace_b})
+            await connection.execute(text("DELETE FROM task_handoffs WHERE id = :id"), {"id": handoff_b})
+            for tenant_id, teammate_id in ((tenant_a, teammate_a), (tenant_b, teammate_b)):
+                await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_id)})
+                await connection.execute(text("DELETE FROM teammate_project_assignments WHERE teammate_id = :id"), {"id": teammate_id})
             for tenant_id, task_id in ((tenant_a, task_a), (tenant_b, task_b)):
                 await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_id)})
                 await connection.execute(text("DELETE FROM tasks WHERE id = :id"), {"id": task_id})
+                parent_id = parent_a if tenant_id == tenant_a else parent_b
+                await connection.execute(text("DELETE FROM tasks WHERE id = :id"), {"id": parent_id})
+            for tenant_id, teammate_id in ((tenant_a, teammate_a), (tenant_b, teammate_b)):
+                await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_id)})
+                await connection.execute(text("DELETE FROM teammate_profiles WHERE id = :id"), {"id": teammate_id})
+            for tenant_id, project_id in ((tenant_a, project_a), (tenant_b, project_b)):
+                await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_id)})
+                await connection.execute(text("DELETE FROM projects WHERE id = :id"), {"id": project_id})
+            await _delete_organizations(connection, [(tenant_a, org_a), (tenant_b, org_b)])
             await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
         await engine.dispose()
 
