@@ -148,6 +148,24 @@ export interface OrganizationInfo {
   created_at: string;
 }
 
+export interface ProactiveEventInfo {
+  id: string;
+  project_id: string;
+  delivery_id: string;
+  source_event_id: string;
+  event_type: string;
+  action: string;
+  repository_name: string;
+  workflow_name: string;
+  summary: string;
+  conclusion: string;
+  severity: string;
+  branch: string;
+  details_url: string;
+  status: string;
+  created_at: string | null;
+}
+
 export interface ProjectInfo {
   id: string;
   organization_id: string;
@@ -455,6 +473,17 @@ export const api = {
   me: () => request<CurrentUser>("/auth/me"),
 
   listOrganizations: () => request<{ organizations: OrganizationInfo[]; count: number }>("/organizations"),
+
+  listProactiveEvents: (organizationId: string, limit = 100) =>
+    request<{ events: ProactiveEventInfo[]; count: number; content_trust: string; can_manage: boolean }>(
+      `/organizations/${organizationId}/proactive-events?limit=${limit}`,
+    ),
+
+  acknowledgeProactiveEvent: (organizationId: string, eventId: string) =>
+    request<ProactiveEventInfo>(`/organizations/${organizationId}/proactive-events/${eventId}/acknowledge`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
 
   listProjects: (organizationId: string) =>
     request<{ projects: ProjectInfo[]; count: number }>(`/organizations/${organizationId}/projects`),

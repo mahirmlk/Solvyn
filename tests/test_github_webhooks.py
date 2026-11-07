@@ -17,7 +17,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
 from starlette.responses import Response
 
-from solvyn.api.v1.webhooks import _parse_security_alert, _parse_workflow_failure, _valid_signature, receive_github_webhook
+from solvyn.api.v1.webhooks import (
+    _parse_security_alert,
+    _parse_workflow_failure,
+    _valid_signature,
+    list_proactive_events,
+    receive_github_webhook,
+)
 from solvyn.db.models import ProactiveEvent
 from solvyn.multi_tenant.auth import RateLimitMiddleware
 
@@ -48,6 +54,39 @@ def _request(body: bytes, *, event: str = "workflow_run", delivery: str | None =
         return {"type": "http.request", "body": body, "more_body": False}
 
     return Request(scope, receive)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("role", "can_manage"), [("owner", True), ("admin", True), ("member", False)])
+async def test_proactive_event_listing_reports_acknowledgement_permission(role: str, can_manage: bool) -> None:
+    organization_id = uuid.uuid4()
+    event = SimpleNamespace(
+        id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        delivery_id=str(uuid.uuid4()),
+        source_event_id="octo/repo:12:1",
+        event_type="workflow_run",
+        action="completed",
+        repository_name="octo/repo",
+        workflow_name="CI",
+        conclusion="failure",
+        branch="main",
+        details_url="https://github.com/octo/repo/actions/runs/12",
+        status="pending",
+        created_at=None,
+    )
+    db = AsyncMock()
+    db.execute.return_value = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [event]))
+    with patch(
+        "solvyn.api.v1.webhooks.require_org_membership",
+        new=AsyncMock(return_value=SimpleNamespace(role=role)),
+    ):
+        result = await list_proactive_events(organization_id, limit=20, db=cast(AsyncSession, db))
+
+    assert result["count"] == 1
+    assert result["content_trust"] == "untrusted_github_event"
+    assert result["can_manage"] is can_manage
+    assert result["events"][0]["status"] == "pending"  # type: ignore[index]
 
 
 def _signature(secret: str, body: bytes) -> str:

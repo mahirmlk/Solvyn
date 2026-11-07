@@ -311,7 +311,7 @@ async def list_proactive_events(
     limit: int = 50,
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
-    await require_org_membership(db, organization_id, roles=ANY_ROLE)
+    membership = await require_org_membership(db, organization_id, roles=ANY_ROLE)
     if not 1 <= limit <= 100:
         raise HTTPException(status_code=422, detail="Limit must be between 1 and 100")
     result = await db.execute(
@@ -321,7 +321,12 @@ async def list_proactive_events(
         .limit(limit)
     )
     items = [_event_dict(event) for event in result.scalars().all()]
-    return {"events": items, "count": len(items), "content_trust": "untrusted_github_event"}
+    return {
+        "events": items,
+        "count": len(items),
+        "content_trust": "untrusted_github_event",
+        "can_manage": membership.role in OWNER_ADMIN,
+    }
 
 
 @router.post("/organizations/{organization_id}/proactive-events/{event_id}/acknowledge")

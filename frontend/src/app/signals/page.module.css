@@ -1,0 +1,145 @@
+.intro,
+.feed {
+  width: min(100% - 40px, 1120px);
+  margin: 0 auto 24px;
+}
+
+.intro {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 18px 20px;
+  border: 1px solid var(--line-light);
+  background: var(--color-pearl);
+}
+
+.intro p {
+  max-width: 660px;
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.organizationPicker {
+  display: grid;
+  min-width: 230px;
+  gap: 6px;
+}
+
+.feed {
+  display: grid;
+  gap: 12px;
+}
+
+.feedHeading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 18px;
+  padding-bottom: 4px;
+}
+
+.feedHeading h2 {
+  margin: 5px 0 0;
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.count,
+.meta {
+  color: var(--color-muted);
+  font-size: 10px;
+}
+
+.eventList {
+  display: grid;
+  gap: 10px;
+}
+
+.event {
+  display: grid;
+  gap: 12px;
+  padding: 18px 20px;
+  border: 1px solid var(--line-light);
+}
+
+.eventTopline,
+.eventActions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.kind {
+  color: var(--color-muted);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.status {
+  padding: 4px 8px;
+  border: 1px solid var(--line-light);
+  color: var(--color-ink);
+  font-size: 9px;
+  text-transform: capitalize;
+}
+
+.acknowledged {
+  color: var(--color-muted);
+}
+
+.event h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin: 0;
+}
+
+.eventActions {
+  justify-content: flex-start;
+}
+
+.eventActions a {
+  color: var(--color-ink);
+  font-size: 10px;
+  text-underline-offset: 3px;
+}
+
+.empty,
+.message {
+  padding: 18px 20px;
+  border: 1px solid var(--line-light);
+  color: var(--color-muted);
+  font-size: 11px;
+}
+
+.message {
+  width: min(100% - 40px, 1120px);
+  margin: 0 auto 12px;
+}
+
+@media (max-width: 640px) {
+  .intro,
+  .feedHeading,
+  .eventTopline {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .organizationPicker {
+    min-width: 0;
+  }
+}
