@@ -146,6 +146,16 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                 "workspaces",
             }
             assert all(row[1] and row[2] for row in protected_tables)
+            same_tenant_task_fk = await connection.scalar(
+                text(
+                    "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                    "WHERE conrelid = 'task_acceptance_criteria'::regclass "
+                    "AND conname = 'fk_tac_same_tenant_task' AND contype = 'f'"
+                )
+            )
+            assert same_tenant_task_fk == (
+                "FOREIGN KEY (tenant_id, task_id) REFERENCES tasks(tenant_id, id) ON DELETE CASCADE"
+            )
 
         async with engine.begin() as connection:
             await connection.execute(
@@ -188,6 +198,14 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
             session.add(
                 TaskAcceptanceCriterion(
                     id=uuid.uuid4(), tenant_id=tenant_b, task_id=task_b, text="cross-tenant insert"
+                )
+            )
+            with pytest.raises(DBAPIError):
+                await session.flush()
+            await session.rollback()
+            session.add(
+                TaskAcceptanceCriterion(
+                    id=uuid.uuid4(), tenant_id=tenant_a, task_id=task_b, text="task from another tenant"
                 )
             )
             with pytest.raises(DBAPIError):
