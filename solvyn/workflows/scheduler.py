@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import socket
 import uuid
@@ -20,6 +21,10 @@ from solvyn.db.models import (
     Project,
     Session,
     Task,
+    TaskHandoff,
+    TaskWorkspace,
+    TeammateProfile,
+    TeammateProjectAssignment,
     Tenant,
     VerificationRun,
     WorkflowWorkerHeartbeat,
@@ -115,6 +120,109 @@ async def _queue_due_maintenance_events(db: AsyncSession) -> int:
         now = datetime.now(UTC)
         for schedule in due:
             scheduled_for = schedule.next_run_at.isoformat()
+            run: VerificationRun | None = None
+            outcome = "scheduled"
+            status = "pending"
+            action = "due"
+            if schedule.maintenance_type == "code_quality" and schedule.task_id is not None:
+                target = (
+                    await db.execute(
+                        select(Task, TaskWorkspace, TaskHandoff, TeammateProfile)
+                        .join(
+                            TaskWorkspace,
+                            (TaskWorkspace.task_id == Task.id)
+                            & (TaskWorkspace.tenant_id == Task.tenant_id),
+                        )
+                        .join(
+                            TaskHandoff,
+                            (TaskHandoff.child_task_id == Task.id)
+                            & (TaskHandoff.tenant_id == Task.tenant_id)
+                            & (TaskHandoff.project_id == schedule.project_id),
+                        )
+                        .join(
+                            TeammateProfile,
+                            (TeammateProfile.id == TaskHandoff.teammate_id)
+                            & (TeammateProfile.tenant_id == TaskHandoff.tenant_id)
+                            & TeammateProfile.is_enabled.is_(True),
+                        )
+                        .join(
+                            TeammateProjectAssignment,
+                            (TeammateProjectAssignment.teammate_id == TeammateProfile.id)
+                            & (TeammateProjectAssignment.project_id == schedule.project_id),
+                        )
+                        .where(
+                            Task.id == schedule.task_id,
+                            Task.tenant_id == tenant_id,
+                            TaskWorkspace.task_id == schedule.task_id,
+                            TaskWorkspace.tenant_id == tenant_id,
+                            TaskHandoff.status.in_(("pending", "running", "failed", "completed")),
+                            TaskHandoff.tenant_id == tenant_id,
+                            TeammateProfile.organization_id == schedule.organization_id,
+                        )
+                    )
+                ).first()
+                if target is None:
+                    outcome = "target_unavailable"
+                    status = "blocked"
+                    action = "blocked"
+                else:
+                    task, workspace_record, handoff, teammate = target
+                    from solvyn.api.v1.verification import _DEFAULT_VERIFICATION_COMMANDS, _workspace_manager
+                    from solvyn.config import settings
+                    from solvyn.sandbox.workspaces import WorkspaceError
+
+                    manager = _workspace_manager()
+                    try:
+                        workspace = manager.get(workspace_record.id)
+                        source_digest = manager.fingerprint(workspace)
+                    except (WorkspaceError, OSError, ValueError):
+                        outcome = "workspace_unavailable"
+                        status = "blocked"
+                        action = "blocked"
+                    else:
+                        run = VerificationRun(
+                            tenant_id=tenant_id,
+                            task_id=task.id,
+                            execution_id=task.execution_id,
+                            workspace_id=workspace_record.id,
+                            maintenance_schedule_id=schedule.id,
+                            maintenance_scheduled_for=schedule.next_run_at,
+                            kind="lint",
+                            command=json.dumps(_DEFAULT_VERIFICATION_COMMANDS["lint"]),
+                            status="pending_approval",
+                            runner_version="sandbox-service/1" if settings.sandbox_runtime_url else "docker-sandbox/1",
+                            source_digest=source_digest,
+                        )
+                        run.id = uuid.uuid4()
+                        db.add(run)
+                        await db.flush()
+                        db.add(
+                            Approval(
+                                organization_id=schedule.organization_id,
+                                project_id=schedule.project_id,
+                                teammate_id=teammate.id,
+                                verification_run_id=run.id,
+                                kind="verification_run",
+                                summary=f"Scheduled code quality check: {schedule.title}",
+                                payload=json.dumps(
+                                    {
+                                        "execution_id": str(task.execution_id) if task.execution_id else None,
+                                        "task_id": str(task.id),
+                                        "verification_run_id": str(run.id),
+                                        "workspace_id": str(workspace_record.id),
+                                        "maintenance_schedule_id": str(schedule.id),
+                                        "scheduled_for": scheduled_for,
+                                        "kind": run.kind,
+                                        "command": _DEFAULT_VERIFICATION_COMMANDS["lint"],
+                                        "source_digest": source_digest,
+                                    }
+                                ),
+                                requested_by=f"maintenance:{schedule.id}",
+                            )
+                        )
+                        outcome = "awaiting_approval"
+                        action = "approval_requested"
+
             db.add(
                 ProactiveEvent(
                     organization_id=schedule.organization_id,
@@ -122,13 +230,13 @@ async def _queue_due_maintenance_events(db: AsyncSession) -> int:
                     delivery_id=str(uuid.uuid4()),
                     source_event_id=f"maintenance:{schedule.id}:{scheduled_for}"[:320],
                     event_type="scheduled_maintenance",
-                    action="due",
+                    action=action,
                     repository_name="",
                     workflow_name=f"{schedule.maintenance_type.replace('_', ' ').title()}: {schedule.title}"[:255],
-                    conclusion="scheduled",
+                    conclusion=outcome,
                     branch="",
                     details_url="",
-                    status="pending",
+                    status=status,
                 )
             )
             # Skip missed intervals rather than flooding the inbox after downtime.

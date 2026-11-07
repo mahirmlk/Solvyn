@@ -302,11 +302,27 @@ class VerificationRun(Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "id", name="uq_verification_runs_tenant_id_id"),
         UniqueConstraint("tenant_id", "redriven_from_run_id", name="uq_verification_runs_redrive_source"),
+        UniqueConstraint(
+            "tenant_id",
+            "maintenance_schedule_id",
+            "maintenance_scheduled_for",
+            name="uq_verification_runs_maintenance_occurrence",
+        ),
         ForeignKeyConstraint(
             ("tenant_id", "redriven_from_run_id"),
             ("verification_runs.tenant_id", "verification_runs.id"),
             name="fk_verification_runs_redrive_same_tenant",
             ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ("tenant_id", "maintenance_schedule_id"),
+            ("maintenance_schedules.tenant_id", "maintenance_schedules.id"),
+            name="fk_verification_runs_maintenance_same_tenant",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "(maintenance_schedule_id IS NULL) = (maintenance_scheduled_for IS NULL)",
+            name="ck_verification_runs_maintenance_occurrence_pair",
         ),
     )
 
@@ -315,6 +331,8 @@ class VerificationRun(Base):
     task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
     execution_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("execution_graphs.id", ondelete="CASCADE"), nullable=True, index=True)
     redriven_from_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    maintenance_schedule_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    maintenance_scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("task_workspaces.id", ondelete="CASCADE"), nullable=False)
     kind: Mapped[str] = mapped_column(String(30), nullable=False)
     command: Mapped[str] = mapped_column(Text, nullable=False)
@@ -766,6 +784,13 @@ class MaintenanceSchedule(Base):
 
     __tablename__ = "maintenance_schedules"
     __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_maintenance_schedules_tenant_id_id"),
+        ForeignKeyConstraint(
+            ("tenant_id", "task_id"),
+            ("tasks.tenant_id", "tasks.id"),
+            name="fk_maintenance_schedules_task_same_tenant",
+            ondelete="CASCADE",
+        ),
         CheckConstraint(
             "maintenance_type IN ('code_quality', 'dependency_review', 'documentation_review')",
             name="ck_maintenance_schedules_type",
@@ -774,8 +799,10 @@ class MaintenanceSchedule(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True)
     project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False, index=True)
+    task_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
     created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     maintenance_type: Mapped[str] = mapped_column(String(50), nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)

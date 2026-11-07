@@ -12,7 +12,15 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.api.v1._rbac import ANY_ROLE, OWNER_ADMIN, require_org_membership
-from solvyn.db.models import MaintenanceSchedule, Project
+from solvyn.db.models import (
+    MaintenanceSchedule,
+    Project,
+    Task,
+    TaskHandoff,
+    TaskWorkspace,
+    TeammateProfile,
+    TeammateProjectAssignment,
+)
 from solvyn.db.session import get_session
 from solvyn.multi_tenant.middleware import tenant_context
 
@@ -22,6 +30,7 @@ _MAX_ENABLED_SCHEDULES_PER_PROJECT = 10
 
 class MaintenanceScheduleCreate(BaseModel):
     project_id: uuid.UUID
+    task_id: uuid.UUID | None = None
     maintenance_type: Literal["code_quality", "dependency_review", "documentation_review"]
     title: str = Field(min_length=1, max_length=255)
     interval_days: int = Field(ge=1, le=30)
@@ -36,6 +45,7 @@ def _schedule_dict(schedule: MaintenanceSchedule) -> dict[str, object]:
         "id": str(schedule.id),
         "organization_id": str(schedule.organization_id),
         "project_id": str(schedule.project_id),
+        "task_id": str(schedule.task_id) if schedule.task_id else None,
         "maintenance_type": schedule.maintenance_type,
         "title": schedule.title,
         "interval_days": schedule.interval_days,
@@ -43,6 +53,54 @@ def _schedule_dict(schedule: MaintenanceSchedule) -> dict[str, object]:
         "enabled": schedule.enabled,
         "created_at": schedule.created_at.isoformat() if schedule.created_at else None,
     }
+
+
+async def _validate_check_target(db: AsyncSession, *, task_id: uuid.UUID, project: Project) -> None:
+    task = (
+        await db.execute(
+            select(Task).where(Task.id == task_id, Task.tenant_id == project.tenant_id)
+        )
+    ).scalar_one_or_none()
+    if task is None:
+        raise HTTPException(status_code=404, detail="Maintenance task not found")
+    if task.execution_id is None:
+        raise HTTPException(status_code=409, detail="Maintenance checks require a task linked to a workflow execution")
+    workspace = (
+        await db.execute(
+            select(TaskWorkspace).where(
+                TaskWorkspace.tenant_id == project.tenant_id,
+                TaskWorkspace.task_id == task.id,
+            )
+        )
+    ).scalar_one_or_none()
+    handoff = (
+        await db.execute(
+            select(TaskHandoff).where(
+                TaskHandoff.tenant_id == project.tenant_id,
+                TaskHandoff.child_task_id == task.id,
+                TaskHandoff.project_id == project.id,
+                TaskHandoff.status.in_(("pending", "running", "failed", "completed")),
+            )
+        )
+    ).scalar_one_or_none()
+    if workspace is None or handoff is None:
+        raise HTTPException(status_code=409, detail="Maintenance checks require an assigned task with a ready workspace")
+    teammate_id = await db.scalar(
+        select(TeammateProfile.id).where(
+            TeammateProfile.id == handoff.teammate_id,
+            TeammateProfile.tenant_id == project.tenant_id,
+            TeammateProfile.organization_id == project.organization_id,
+            TeammateProfile.is_enabled.is_(True),
+        )
+    )
+    assignment_id = await db.scalar(
+        select(TeammateProjectAssignment.id).where(
+            TeammateProjectAssignment.teammate_id == handoff.teammate_id,
+            TeammateProjectAssignment.project_id == project.id,
+        )
+    )
+    if teammate_id is None or assignment_id is None:
+        raise HTTPException(status_code=409, detail="Maintenance teammate assignment is no longer active")
 
 
 @router.post("/organizations/{organization_id}/maintenance-schedules", status_code=201)
@@ -67,6 +125,11 @@ async def create_maintenance_schedule(
     if project is None:
         raise HTTPException(status_code=404, detail="Active project not found in this organization")
 
+    if payload.maintenance_type == "code_quality" and payload.task_id is None:
+        raise HTTPException(status_code=422, detail="Code quality checks require a task with a ready workspace")
+    if payload.task_id is not None:
+        await _validate_check_target(db, task_id=payload.task_id, project=project)
+
     active_count = await db.scalar(
         select(func.count(MaintenanceSchedule.id)).where(
             MaintenanceSchedule.project_id == payload.project_id,
@@ -78,8 +141,10 @@ async def create_maintenance_schedule(
 
     now = datetime.now(UTC)
     schedule = MaintenanceSchedule(
+        tenant_id=project.tenant_id,
         organization_id=organization_id,
         project_id=payload.project_id,
+        task_id=payload.task_id,
         created_by=tenant_context.user_id,
         maintenance_type=payload.maintenance_type,
         title=payload.title.strip(),
@@ -140,6 +205,10 @@ async def update_maintenance_schedule(
         ).scalar_one_or_none()
         if project is None:
             raise HTTPException(status_code=404, detail="Active project not found in this organization")
+        if schedule.maintenance_type == "code_quality" and schedule.task_id is None:
+            raise HTTPException(status_code=409, detail="Set a task with a ready workspace before re-enabling this check")
+        if schedule.task_id is not None:
+            await _validate_check_target(db, task_id=schedule.task_id, project=project)
         active_count = await db.scalar(
             select(func.count(MaintenanceSchedule.id)).where(
                 MaintenanceSchedule.project_id == schedule.project_id,
