@@ -11,6 +11,7 @@ const NAV_ITEMS = [
   { label: "Teammates", href: "/teammates" },
   { label: "Approvals", href: "/approvals" },
   { label: "Maintenance", href: "/maintenance" },
+  { label: "Signals", href: "/signals" },
   { label: "Tasks", href: "/tasks" },
   { label: "Activity", href: "/activity" },
   { label: "Workflows", href: "/workflows" },
