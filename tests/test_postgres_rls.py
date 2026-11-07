@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
+import json
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -11,6 +13,7 @@ import pytest
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker, create_async_engine
+from starlette.requests import Request
 
 from solvyn.db.models import (
     ApiKey,
@@ -840,6 +843,185 @@ async def test_proactive_data_rls_is_tenant_and_organization_scoped() -> None:
                 connection,
                 [(tenant_a, organization_a), (tenant_a, organization_a_other), (tenant_b, organization_b)],
             )
+            await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_background_worker_webhook_and_maintenance_writes_are_tenant_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise worker discovery and writes using the non-bypass PostgreSQL runtime role."""
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url.startswith("postgresql+"):
+        pytest.skip("RLS behavior requires PostgreSQL and migrations at head")
+
+    from solvyn.api.v1.webhooks import receive_github_webhook
+    from solvyn.workflows import scheduler
+    from solvyn.workflows.scheduler import _queue_due_maintenance_events
+
+    secret = "postgres-worker-rls-test-secret"
+    monkeypatch.setattr("solvyn.api.v1.webhooks.settings.github_webhook_secret", secret)
+    monkeypatch.setattr(scheduler, "_BATCH_SIZE", 1000)
+    engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+    organization_a, organization_b = uuid.uuid4(), uuid.uuid4()
+    project_a, project_b = uuid.uuid4(), uuid.uuid4()
+    repository_a, repository_b = uuid.uuid4(), uuid.uuid4()
+    schedule_a, schedule_b = uuid.uuid4(), uuid.uuid4()
+    delivery_id = str(uuid.uuid4())
+    body = json.dumps(
+        {
+            "action": "completed",
+            "repository": {"full_name": "Shared/Worker-RLS"},
+            "workflow_run": {
+                "id": 8142,
+                "run_attempt": 1,
+                "conclusion": "failure",
+                "name": "Tenant isolation",
+                "head_branch": "main",
+                "html_url": "https://github.com/Shared/Worker-RLS/actions/runs/8142",
+            },
+        }
+    ).encode()
+    signature = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    request = Request(
+        {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "https",
+            "path": "/api/v1/webhooks/github",
+            "raw_path": b"/api/v1/webhooks/github",
+            "query_string": b"",
+            "headers": [
+                (b"content-length", str(len(body)).encode()),
+                (b"x-github-event", b"workflow_run"),
+                (b"x-github-delivery", delivery_id.encode()),
+                (b"x-hub-signature-256", signature.encode()),
+            ],
+            "server": ("example.test", 443),
+            "client": ("127.0.0.1", 1234),
+        },
+        receive,
+    )
+
+    try:
+        async with engine.connect() as connection:
+            role = (
+                await connection.execute(
+                    text("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user")
+                )
+            ).one()
+            assert role == (False, False)
+
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'Worker RLS', :slug, '')"),
+                [
+                    {"id": tenant_a, "slug": f"worker-rls-{tenant_a}"},
+                    {"id": tenant_b, "slug": f"worker-rls-{tenant_b}"},
+                ],
+            )
+            await _seed_organizations(
+                connection,
+                [
+                    (organization_a, tenant_a, f"worker-rls-{organization_a}", "Worker RLS"),
+                    (organization_b, tenant_b, f"worker-rls-{organization_b}", "Worker RLS"),
+                ],
+            )
+            for tenant_id, organization_id, project_id, repository_id, schedule_id in (
+                (tenant_a, organization_a, project_a, repository_a, schedule_a),
+                (tenant_b, organization_b, project_b, repository_b, schedule_b),
+            ):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO projects (id, organization_id, tenant_id, name, slug) "
+                        "VALUES (:id, :organization_id, :tenant_id, 'Worker RLS', :slug)"
+                    ),
+                    {
+                        "id": project_id,
+                        "organization_id": organization_id,
+                        "tenant_id": tenant_id,
+                        "slug": f"worker-rls-{project_id}",
+                    },
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO repositories (id, project_id, full_name, provider) "
+                        "VALUES (:id, :project_id, 'Shared/Worker-RLS', 'github')"
+                    ),
+                    {"id": repository_id, "project_id": project_id},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO maintenance_schedules "
+                        "(id, organization_id, project_id, maintenance_type, title, interval_days, next_run_at) "
+                        "VALUES (:id, :organization_id, :project_id, 'code_quality', 'Worker RLS', 7, "
+                        "now() - interval '1 day')"
+                    ),
+                    {"id": schedule_id, "organization_id": organization_id, "project_id": project_id},
+                )
+
+        tenant_context.clear()
+        async with sessions() as session:
+            response = await receive_github_webhook(request, db=session)
+            assert response["created_count"] == 2
+            assert await _queue_due_maintenance_events(session) >= 2
+
+        for tenant_id, project_id, schedule_id in (
+            (tenant_a, project_a, schedule_a),
+            (tenant_b, project_b, schedule_b),
+        ):
+            tenant_context.set(tenant_id, f"worker-rls-{tenant_id}")
+            async with sessions() as session:
+                events = (
+                    await session.execute(select(ProactiveEvent).order_by(ProactiveEvent.source_event_id))
+                ).scalars().all()
+                assert len(events) == 2
+                assert {event.project_id for event in events} == {project_id}
+                schedule = await session.get(MaintenanceSchedule, schedule_id)
+                assert schedule is not None
+                assert schedule.next_run_at > datetime.now(UTC) - timedelta(minutes=1)
+        tenant_context.clear()
+    finally:
+        tenant_context.clear()
+        async with engine.begin() as connection:
+            for tenant_id in (tenant_a, tenant_b):
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_id)},
+                )
+                await connection.execute(
+                    text("DELETE FROM proactive_events WHERE project_id IN (:a, :b)"),
+                    {"a": project_a, "b": project_b},
+                )
+                await connection.execute(
+                    text("DELETE FROM maintenance_schedules WHERE id IN (:a, :b)"),
+                    {"a": schedule_a, "b": schedule_b},
+                )
+                await connection.execute(
+                    text("DELETE FROM repositories WHERE id IN (:a, :b)"),
+                    {"a": repository_a, "b": repository_b},
+                )
+                await connection.execute(
+                    text("DELETE FROM projects WHERE id IN (:a, :b)"),
+                    {"a": project_a, "b": project_b},
+                )
+                await connection.execute(
+                    text("DELETE FROM organizations WHERE id IN (:a, :b)"),
+                    {"a": organization_a, "b": organization_b},
+                )
             await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
         await engine.dispose()
 
