@@ -386,6 +386,8 @@ export type VerificationQueueStatus =
 
 export interface VerificationQueueItem {
   id: string;
+  redriven_from_run_id: string | null;
+  redriven_to_run_id: string | null;
   task_id: string;
   execution_id: string | null;
   task_title: string;
@@ -454,6 +456,15 @@ export const api = {
     if (params?.offset) query.set("offset", String(params.offset));
     return request<VerificationQueueResponse>(`/verification-queue?${query}`);
   },
+
+  redriveVerification: (verificationRunId: string) =>
+    request<{
+      verification_run: { id: string; status: VerificationQueueStatus; attempt_count: number };
+      approval_id: string;
+      approval_status: string;
+      redriven_from_run_id: string;
+      already_redriven: boolean;
+    }>(`/verification-queue/${verificationRunId}/redrive`, { method: "POST", body: JSON.stringify({}) }),
 
   getApproval: (approvalId: string) => request<ApprovalInfo>(`/approvals/${approvalId}`),
 

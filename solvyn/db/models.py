@@ -299,11 +299,22 @@ class VerificationRun(Base):
     """Durable, bounded output from a deterministic sandbox verification command."""
 
     __tablename__ = "verification_runs"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_verification_runs_tenant_id_id"),
+        UniqueConstraint("tenant_id", "redriven_from_run_id", name="uq_verification_runs_redrive_source"),
+        ForeignKeyConstraint(
+            ("tenant_id", "redriven_from_run_id"),
+            ("verification_runs.tenant_id", "verification_runs.id"),
+            name="fk_verification_runs_redrive_same_tenant",
+            ondelete="CASCADE",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
     execution_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("execution_graphs.id", ondelete="CASCADE"), nullable=True, index=True)
+    redriven_from_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("task_workspaces.id", ondelete="CASCADE"), nullable=False)
     kind: Mapped[str] = mapped_column(String(30), nullable=False)
     command: Mapped[str] = mapped_column(Text, nullable=False)

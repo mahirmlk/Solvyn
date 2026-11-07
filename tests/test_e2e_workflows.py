@@ -463,6 +463,99 @@ async def test_task_verification_is_sandboxed_and_durable(
     assert failed_result.json()["status"] == "failed"
     assert "transport diagnostic" not in failed_result.json()["error"]
 
+    from solvyn.db.models import Approval, TaskWorkspace
+
+    dead_letter_id = uuid.uuid4()
+    async with async_session_factory() as db:
+        await bind_tenant_scope(db, tenant.id)
+        source_task = await db.get(Task, uuid.UUID(task_id))
+        assert source_task is not None
+        original_task_status = source_task.status
+        source_task.status = "pending"
+        workspace_record = (
+            await db.execute(
+                select(TaskWorkspace).where(
+                    TaskWorkspace.tenant_id == tenant.id,
+                    TaskWorkspace.task_id == uuid.UUID(task_id),
+                )
+            )
+        ).scalar_one()
+        db.add(
+            VerificationRun(
+                id=dead_letter_id,
+                tenant_id=tenant.id,
+                task_id=uuid.UUID(task_id),
+                execution_id=uuid.UUID(execution_id),
+                workspace_id=workspace_record.id,
+                kind="test",
+                command='["pytest", "-q"]',
+                status="dead_letter",
+                runner_version="docker-sandbox/1",
+                attempt_count=3,
+                error="Interrupted after repeated worker loss",
+            )
+        )
+        await db.flush()
+        db.add(
+            Approval(
+                organization_id=organization_id,
+                project_id=project_id,
+                teammate_id=teammate_id,
+                verification_run_id=dead_letter_id,
+                kind="verification_run",
+                summary="Original verification approval",
+                payload="{}",
+                status="approved",
+                requested_by="QA Engineer",
+            )
+        )
+        await db.commit()
+
+    concurrent_redrives = await asyncio.gather(
+        client.post(f"/api/v1/verification-queue/{dead_letter_id}/redrive"),
+        client.post(f"/api/v1/verification-queue/{dead_letter_id}/redrive"),
+    )
+    assert [response.status_code for response in concurrent_redrives] == [202, 202], [
+        response.text for response in concurrent_redrives
+    ]
+    redrive_bodies = [response.json() for response in concurrent_redrives]
+    first_redrive_body = next(body for body in redrive_bodies if not body["already_redriven"])
+    duplicate_redrive_body = next(body for body in redrive_bodies if body["already_redriven"])
+    assert len({body["verification_run"]["id"] for body in redrive_bodies}) == 1
+    assert len({body["approval_id"] for body in redrive_bodies}) == 1
+    assert first_redrive_body["redriven_from_run_id"] == str(dead_letter_id)
+    assert first_redrive_body["verification_run"]["status"] == "pending_approval"
+    assert first_redrive_body["verification_run"]["attempt_count"] == 0
+    assert len(first_redrive_body["verification_run"]["source_digest"]) == 64
+    assert duplicate_redrive_body["verification_run"]["id"] == first_redrive_body["verification_run"]["id"]
+    assert duplicate_redrive_body["approval_id"] == first_redrive_body["approval_id"]
+
+    child_id = first_redrive_body["verification_run"]["id"]
+    approved_redrive = await client.post(
+        f"/api/v1/approvals/{first_redrive_body['approval_id']}/approve",
+        json={"note": "Reapprove the current workspace before retrying"},
+    )
+    assert approved_redrive.status_code == 200
+    assert approved_redrive.json()["status"] == "approved"
+    async with async_session_factory() as db:
+        await bind_tenant_scope(db, tenant.id)
+        source_run = await db.get(VerificationRun, dead_letter_id)
+        child_run = await db.get(VerificationRun, uuid.UUID(child_id))
+    assert source_run is not None and source_run.status == "dead_letter" and source_run.attempt_count == 3
+    assert child_run is not None and child_run.status == "approved" and child_run.attempt_count == 0
+
+    dead_letter_queue = await client.get("/api/v1/verification-queue?status=dead_letter")
+    assert dead_letter_queue.status_code == 200
+    source_queue_item = next(item for item in dead_letter_queue.json()["items"] if item["id"] == str(dead_letter_id))
+    assert source_queue_item["redriven_to_run_id"] == child_id
+
+    async with async_session_factory() as db:
+        await bind_tenant_scope(db, tenant.id)
+        source_task = await db.get(Task, uuid.UUID(task_id))
+        assert source_task is not None
+        source_task.status = original_task_status
+        await db.commit()
+
 
 @pytest.mark.asyncio
 async def test_acceptance_criteria_require_an_owner_admin_decision(client: AsyncClient) -> None:
