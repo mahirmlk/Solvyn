@@ -18,6 +18,7 @@ from starlette.requests import Request
 from solvyn.db.models import (
     ApiKey,
     Approval,
+    Base,
     ExecutionGraph,
     Integration,
     IntegrationCredential,
@@ -50,6 +51,37 @@ from solvyn.db.models import (
     Workspace,
 )
 from solvyn.multi_tenant.middleware import tenant_context
+
+
+@pytest.mark.asyncio
+async def test_every_tenant_owned_orm_table_has_forced_postgres_rls() -> None:
+    """Keep the model inventory aligned with the deployed forced-RLS boundary."""
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url.startswith("postgresql+"):
+        pytest.skip("RLS inventory requires PostgreSQL and migrations at head")
+
+    global_tables = {"tenants", "users", "refresh_tokens", "workflow_worker_heartbeats"}
+    model_tables = set(Base.metadata.tables)
+    assert global_tables <= model_tables
+    tenant_tables = model_tables - global_tables
+    engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
+    try:
+        async with engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text(
+                        "SELECT relname, relrowsecurity, relforcerowsecurity "
+                        "FROM pg_class JOIN pg_namespace ON pg_namespace.oid = pg_class.relnamespace "
+                        "WHERE nspname = 'public' AND relkind IN ('r', 'p')"
+                    )
+                )
+            ).all()
+        policies = {row.relname: (row.relrowsecurity, row.relforcerowsecurity) for row in rows}
+        assert tenant_tables <= policies.keys()
+        assert all(policies[table] == (True, True) for table in tenant_tables)
+        assert all(policies[table] == (False, False) for table in global_tables)
+    finally:
+        await engine.dispose()
 
 
 async def _seed_organizations(
@@ -1086,6 +1118,50 @@ async def test_background_worker_webhook_and_maintenance_writes_are_tenant_scope
         async with sessions() as session:
             response = await receive_github_webhook(request, db=session)
             assert response["created_count"] == 2
+            for event_type, key, number in (("issues", "issue", 8143), ("pull_request", "pull_request", 8144)):
+                work_item: dict[str, object] = {
+                    "number": number,
+                    "state": "open",
+                    "title": f"Tenant scoped {event_type}",
+                    "html_url": f"https://github.com/Shared/Worker-RLS/{'pull' if key == 'pull_request' else 'issues'}/{number}",
+                }
+                if key == "pull_request":
+                    work_item["head"] = {"ref": "feature/rls"}
+                work_item_body = json.dumps(
+                    {
+                        "action": "opened",
+                        "repository": {"full_name": "Shared/Worker-RLS"},
+                        key: work_item,
+                    }
+                ).encode()
+                work_item_signature = "sha256=" + hmac.new(secret.encode(), work_item_body, hashlib.sha256).hexdigest()
+
+                async def receive_work_item() -> dict[str, object]:
+                    return {"type": "http.request", "body": work_item_body, "more_body": False}
+
+                work_item_request = Request(
+                    {
+                        "type": "http",
+                        "asgi": {"version": "3.0"},
+                        "http_version": "1.1",
+                        "method": "POST",
+                        "scheme": "https",
+                        "path": "/api/v1/webhooks/github",
+                        "raw_path": b"/api/v1/webhooks/github",
+                        "query_string": b"",
+                        "headers": [
+                            (b"content-length", str(len(work_item_body)).encode()),
+                            (b"x-github-event", event_type.encode()),
+                            (b"x-github-delivery", str(uuid.uuid4()).encode()),
+                            (b"x-hub-signature-256", work_item_signature.encode()),
+                        ],
+                        "server": ("example.test", 443),
+                        "client": ("127.0.0.1", 1234),
+                    },
+                    receive_work_item,
+                )
+                result = await receive_github_webhook(work_item_request, db=session)
+                assert result["created_count"] == 2
             assert await _queue_due_maintenance_events(session) >= 2
 
         for tenant_id, project_id, schedule_id in (
@@ -1097,8 +1173,9 @@ async def test_background_worker_webhook_and_maintenance_writes_are_tenant_scope
                 events = (
                     await session.execute(select(ProactiveEvent).order_by(ProactiveEvent.source_event_id))
                 ).scalars().all()
-                assert len(events) == 2
+                assert len(events) == 4
                 assert {event.project_id for event in events} == {project_id}
+                assert {event.event_type for event in events} == {"workflow_run", "issues", "pull_request", "scheduled_maintenance"}
                 schedule = await session.get(MaintenanceSchedule, schedule_id)
                 assert schedule is not None
                 assert schedule.next_run_at > datetime.now(UTC) - timedelta(minutes=1)

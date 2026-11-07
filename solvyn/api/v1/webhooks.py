@@ -63,6 +63,60 @@ def _parse_workflow_failure(payload: Any) -> dict[str, str] | None:
     }
 
 
+def _parse_github_work_item(event_type: str, payload: Any) -> dict[str, str] | None:
+    """Turn an opened GitHub issue or pull request into bounded triage metadata."""
+    if event_type not in {"issues", "pull_request"} or not isinstance(payload, dict):
+        return None
+    action = payload.get("action")
+    if not isinstance(action, str) or action not in {"opened", "reopened"}:
+        return None
+    item_key = "issue" if event_type == "issues" else "pull_request"
+    item_value = payload.get(item_key)
+    item = item_value if isinstance(item_value, dict) else {}
+    repository_value = payload.get("repository")
+    repository = repository_value if isinstance(repository_value, dict) else {}
+    full_name = repository.get("full_name")
+    number = item.get("number")
+    state = item.get("state")
+    if (
+        not isinstance(full_name, str)
+        or isinstance(number, bool)
+        or not isinstance(number, int)
+        or number < 1
+        or (state is not None and state != "open")
+        or (event_type == "issues" and "pull_request" in item)
+    ):
+        return None
+
+    owner, repo = validate_full_name(full_name)
+    owner_repo = f"{owner}/{repo}"
+    title = _bounded_text(item.get("title"), limit=255)
+    label = "Pull request" if event_type == "pull_request" else "Issue"
+    title = title or f"{label} #{number}"
+    details_url = item.get("html_url")
+    if (
+        not isinstance(details_url, str)
+        or urlparse(details_url).hostname != "github.com"
+        or urlparse(details_url).scheme != "https"
+    ):
+        details_url = ""
+    branch = ""
+    if event_type == "pull_request":
+        head_value = item.get("head")
+        head = head_value if isinstance(head_value, dict) else {}
+        branch = _bounded_text(head.get("ref"), limit=255)
+
+    return {
+        "repository_name": owner_repo[:255],
+        "source_event_id": f"{event_type}:{owner_repo.lower()}:{number}:{action}"[:320],
+        "workflow_name": title,
+        "conclusion": "open",
+        "branch": branch,
+        "details_url": details_url[:512],
+        "action": action,
+    }
+
+
 def _bounded_text(value: Any, *, limit: int, fallback: str = "") -> str:
     if not isinstance(value, str):
         return fallback
@@ -189,7 +243,14 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
         raise HTTPException(status_code=400, detail="Invalid GitHub delivery identifier") from exc
 
     event_type = request.headers.get("x-github-event", "")
-    supported_event_types = {"workflow_run", "dependabot_alert", "code_scanning_alert", "secret_scanning_alert"}
+    supported_event_types = {
+        "workflow_run",
+        "dependabot_alert",
+        "code_scanning_alert",
+        "secret_scanning_alert",
+        "issues",
+        "pull_request",
+    }
     if event_type not in supported_event_types:
         return {"accepted": True, "ignored": True, "reason": "unsupported_event"}
     try:
@@ -197,11 +258,21 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
     except (ValueError, UnicodeDecodeError) as exc:
         raise HTTPException(status_code=400, detail="Invalid GitHub webhook JSON") from exc
     try:
-        signal = _parse_workflow_failure(payload) if event_type == "workflow_run" else _parse_security_alert(event_type, payload)
+        if event_type == "workflow_run":
+            signal = _parse_workflow_failure(payload)
+        elif event_type in {"issues", "pull_request"}:
+            signal = _parse_github_work_item(event_type, payload)
+        else:
+            signal = _parse_security_alert(event_type, payload)
     except GitHubRepositoryError as exc:
         raise HTTPException(status_code=400, detail=exc.message) from exc
     if signal is None:
-        reason = "not_a_failed_workflow_run" if event_type == "workflow_run" else "not_an_open_security_alert"
+        if event_type == "workflow_run":
+            reason = "not_a_failed_workflow_run"
+        elif event_type in {"issues", "pull_request"}:
+            reason = "not_an_open_github_work_item"
+        else:
+            reason = "not_an_open_security_alert"
         return {"accepted": True, "ignored": True, "reason": reason}
 
     active_tenants = (
@@ -227,7 +298,7 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
                 .limit(_MAX_PROJECT_MATCHES + 1)
             )
         ).all()
-        project_matches.extend(tenant_matches)
+        project_matches.extend((match[0], match[1], match[2]) for match in tenant_matches)
         if len(project_matches) > _MAX_PROJECT_MATCHES:
             raise HTTPException(status_code=413, detail="Repository is connected to too many projects for webhook fan-out")
     if not project_matches:
