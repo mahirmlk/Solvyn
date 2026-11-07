@@ -476,7 +476,7 @@ async def test_task_verification_is_sandboxed_and_durable(
     assert len(verification_calls) == 1
     hourly_limit = await client.patch(
         f"/api/v1/verification-queue/organizations/{organization_id}/control",
-        json={"max_runs_per_hour": 2},
+        json={"max_runs_per_hour": 120, "max_concurrent_runs": 5},
     )
     assert hourly_limit.status_code == 200
     regression = await client.post(
@@ -489,7 +489,7 @@ async def test_task_verification_is_sandboxed_and_durable(
     assert regression.json()["source_changed"] is False
     await client.patch(
         f"/api/v1/verification-queue/organizations/{organization_id}/control",
-        json={"max_runs_per_hour": 30},
+        json={"max_runs_per_hour": 30, "max_concurrent_runs": 2},
     )
 
     history = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
