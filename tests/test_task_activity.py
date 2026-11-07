@@ -103,12 +103,26 @@ async def test_task_activity_combines_durable_records_in_reverse_chronological_o
         SimpleNamespace(
             id=uuid.uuid4(), tenant_id=tenant_id, task_id=task_id, execution_id=execution_id,
             entity_type="handoff", entity_id=handoff_id, event_type="created", previous_status=None,
-            status="waiting_approval", source="user_request", actor_user_id=uuid.uuid4(), occurred_at=_time(9, 21),
+            status="waiting_approval", source="user_request", actor_user_id=uuid.uuid4(), payload=None,
+            occurred_at=_time(9, 21),
         ),
         SimpleNamespace(
             id=uuid.uuid4(), tenant_id=tenant_id, task_id=task_id, execution_id=execution_id,
             entity_type="approval", entity_id=approval.id, event_type="status_changed", previous_status="pending",
-            status="approved", source="user_request", actor_user_id=uuid.uuid4(), occurred_at=_time(9, 26),
+            status="approved", source="user_request", actor_user_id=uuid.uuid4(), payload=None,
+            occurred_at=_time(9, 26),
+        ),
+        SimpleNamespace(
+            id=uuid.uuid4(), tenant_id=tenant_id, task_id=task_id, execution_id=execution_id,
+            entity_type="acceptance_criterion", entity_id=uuid.uuid4(), event_type="created", previous_status=None,
+            status="pending", source="api", actor_user_id=None,
+            payload={"text": "Build succeeds", "decision_note": None}, occurred_at=_time(9, 28),
+        ),
+        SimpleNamespace(
+            id=uuid.uuid4(), tenant_id=tenant_id, task_id=task_id, execution_id=execution_id,
+            entity_type="dependency", entity_id=uuid.uuid4(), event_type="created", previous_status=None,
+            status="active", source="database", actor_user_id=None,
+            payload={"depends_on_task_id": str(child_task_id)}, occurred_at=_time(9, 29),
         ),
     ]
     session = _ActivitySession(
@@ -144,17 +158,21 @@ async def test_task_activity_combines_durable_records_in_reverse_chronological_o
 
     feed = await verification.list_task_activity(execution_id, task_id, session)  # type: ignore[arg-type]
 
-    assert feed["count"] == 10
+    assert feed["count"] == 12
     assert feed["truncated"] is False
     assert [event["type"] for event in feed["activity"]] == [
         "tool", "verification", "verification_attempt", "verification_attempt",
-        "delivery", "handoff", "orchestration_transition", "approval", "orchestration_transition", "task_lifecycle",
+        "delivery", "handoff", "orchestration_transition", "orchestration_transition",
+        "orchestration_transition", "approval", "orchestration_transition", "task_lifecycle",
     ]
     delivery_event = feed["activity"][4]
     assert delivery_event["details"]["pull_request_status"]["review_status"]["state"] == "review_required"
-    assert feed["activity"][7]["details"]["decision_note"] == ""
-    assert feed["activity"][6]["details"]["previous_status"] == "pending"
-    assert feed["activity"][6]["status"] == "approved"
+    assert feed["activity"][9]["details"]["decision_note"] == ""
+    assert feed["activity"][8]["details"]["previous_status"] == "pending"
+    assert feed["activity"][8]["status"] == "approved"
+    assert feed["activity"][6]["summary"] == "Task dependency created as active"
+    assert feed["activity"][6]["details"]["payload"]["depends_on_task_id"] == str(child_task_id)
+    assert feed["activity"][7]["summary"] == "Acceptance criterion created as pending"
     assert feed["activity"][2]["details"]["attempt_number"] == 1
     assert feed["activity"][2]["status"] == "passed"
     assert feed["activity"][-1]["status"] == "completed"

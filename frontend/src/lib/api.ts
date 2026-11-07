@@ -304,9 +304,9 @@ export interface TaskActivityEvent {
     source?: string;
     actor_user_id?: string | null;
     execution_id?: string | null;
-    entity_type?: "approval" | "handoff";
+    entity_type?: "approval" | "handoff" | "acceptance_criterion" | "dependency";
     entity_id?: string;
-    event_type?: "created" | "status_changed";
+    event_type?: "created" | "status_changed" | "updated" | "deleted";
     previous_status?: string | null;
     path?: string | null;
     error_code?: string | null;
@@ -318,6 +318,7 @@ export interface TaskActivityEvent {
     reason?: string;
     summary?: string;
     decision_note?: string;
+    payload?: Record<string, string | null> | null;
   };
 }
 

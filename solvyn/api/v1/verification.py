@@ -13,7 +13,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1611,11 +1611,20 @@ async def list_task_activity(
         )
     for transition in orchestration_events:
         previous = transition.previous_status or "none"
-        entity_name = "Approval" if transition.entity_type == "approval" else "Task handoff"
+        entity_name = {
+            "approval": "Approval",
+            "handoff": "Task handoff",
+            "acceptance_criterion": "Acceptance criterion",
+            "dependency": "Task dependency",
+        }.get(transition.entity_type, "Task record")
         transition_task_id = transition.task_id
         prefix = task_prefix(transition_task_id) if transition_task_id is not None else ""
         if transition.event_type == "created":
             summary = f"{prefix}{entity_name} created as {transition.status.replace('_', ' ')}"
+        elif transition.event_type == "deleted":
+            summary = f"{prefix}{entity_name} removed"
+        elif transition.event_type == "updated":
+            summary = f"{prefix}{entity_name} details updated"
         else:
             summary = (
                 f"{prefix}{entity_name} changed from "
@@ -1637,6 +1646,7 @@ async def list_task_activity(
                     "previous_status": transition.previous_status,
                     "source": transition.source,
                     "actor_user_id": str(transition.actor_user_id) if transition.actor_user_id else None,
+                    "payload": transition.payload,
                 },
             }
         )
@@ -1843,6 +1853,10 @@ async def decide_task_acceptance_criterion(
 ) -> dict[str, Any]:
     task = await _owned_task(execution_id, task_id, db)
     reviewer_user_id, reviewer_organization_id = await _require_acceptance_reviewer(db, task)
+    await db.execute(
+        text("SELECT set_config('app.task_event_actor_user_id', :actor, true)"),
+        {"actor": str(reviewer_user_id)},
+    )
     decided = await db.execute(
         update(TaskAcceptanceCriterion)
         .where(

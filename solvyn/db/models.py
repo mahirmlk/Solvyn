@@ -4,6 +4,7 @@ from enum import StrEnum
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    JSON,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -19,7 +20,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -176,12 +177,18 @@ class TaskEvent(Base):
 
 
 class OrchestrationEvent(Base):
-    """Append-only approval and handoff lifecycle transitions."""
+    """Append-only task, approval, handoff, and dependency history."""
 
     __tablename__ = "orchestration_events"
     __table_args__ = (
-        CheckConstraint("entity_type IN ('approval', 'handoff')", name="ck_orchestration_events_entity_type"),
-        CheckConstraint("event_type IN ('created', 'status_changed')", name="ck_orchestration_events_event_type"),
+        CheckConstraint(
+            "entity_type IN ('approval', 'handoff', 'acceptance_criterion', 'dependency')",
+            name="ck_orchestration_events_entity_type",
+        ),
+        CheckConstraint(
+            "event_type IN ('created', 'status_changed', 'updated', 'deleted')",
+            name="ck_orchestration_events_event_type",
+        ),
         Index("ix_orchestration_events_tenant_task_time", "tenant_id", "task_id", "occurred_at", "id"),
         Index(
             "ix_orchestration_events_tenant_entity_time",
@@ -206,6 +213,9 @@ class OrchestrationEvent(Base):
     status: Mapped[str] = mapped_column(String(50), nullable=False)
     source: Mapped[str] = mapped_column(String(64), nullable=False)
     actor_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    payload: Mapped[dict[str, object] | None] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"), nullable=True
+    )
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
