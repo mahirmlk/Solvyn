@@ -1,6 +1,6 @@
 """Add organization verification concurrency limits.
 
-Revision ID: 0051_verification_queue_concurrency
+Revision ID: 0051_verif_queue_concurrency
 Revises: 0050_verification_queue_controls
 Create Date: 2026-11-07 00:00:00
 """
