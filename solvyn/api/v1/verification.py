@@ -46,6 +46,7 @@ from solvyn.repositories.credentials import (
 )
 from solvyn.repositories.github import GitHubClient, GitHubRepositoryError, _validate_solvyn_branch
 from solvyn.repositories.providers import get_authorized_repository_provider
+from solvyn.repositories.worktree import RepositoryWorktreeError, materialize_repository_worktree, validate_repository_tree
 from solvyn.sandbox.factory import create_sandbox_runner
 from solvyn.sandbox.remote import RemoteSandboxResult, RemoteSandboxRunner
 from solvyn.sandbox.runtime import DockerSandboxRunner, SandboxResult, SandboxRuntimeError
@@ -54,6 +55,7 @@ from solvyn.workflows.executor import workflow_executor
 
 router = APIRouter(prefix="/workflows/executions/{execution_id}/tasks/{task_id}", tags=["verification"])
 _MAX_INITIAL_FILES_BYTES = 16 * 1024 * 1024
+_MAX_FULL_WORKSPACE_BYTES = 128 * 1024 * 1024
 _MAX_REPOSITORY_PATHS = 50
 _MAX_REPOSITORY_FILE_BYTES = 1_000_000
 _MAX_STORED_OUTPUT_CHARS = 256 * 1024
@@ -74,6 +76,7 @@ class TaskWorkspaceCreate(BaseModel):
     files: dict[str, str] = Field(default_factory=dict)
     repository_id: uuid.UUID | None = None
     repository_paths: list[str] | None = Field(default=None, max_length=_MAX_REPOSITORY_PATHS)
+    full_repository: bool = False
 
 
 class VerificationRequest(BaseModel):
@@ -127,7 +130,7 @@ async def _task_delivery_context(
     execution_id: uuid.UUID,
     task_id: uuid.UUID,
     db: AsyncSession,
-) -> tuple[Task, TaskWorkspace, Repository, Any, list[str], Any, Any, str]:
+) -> tuple[Task, TaskWorkspace, Repository, Any, list[str] | None, Any, Any, str]:
     task = await _owned_task(execution_id, task_id, db)
     workspace_record = (
         await db.execute(
@@ -166,17 +169,15 @@ async def _task_delivery_context(
         ) from exc
 
     try:
-        source_paths = json.loads(workspace_record.source_paths or "[]")
+        source_paths = json.loads(workspace_record.source_paths) if workspace_record.source_paths is not None else None
     except (TypeError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=409, detail="Task workspace source provenance is invalid") from exc
-    if (
-        not isinstance(source_paths, list)
-        or not source_paths
-        or any(not isinstance(path, str) for path in source_paths)
+    if source_paths is not None and (
+        not isinstance(source_paths, list) or not source_paths or any(not isinstance(path, str) for path in source_paths)
     ):
         raise HTTPException(status_code=409, detail="Task workspace has no valid selected source paths")
     normalized_paths: list[str] = []
-    for path in source_paths:
+    for path in source_paths or []:
         try:
             normalized = safe_relative_path(path).as_posix()
         except WorkspaceError as exc:
@@ -184,7 +185,7 @@ async def _task_delivery_context(
         if normalized != path or any(part.casefold() == ".git" for part in normalized.split("/")):
             raise HTTPException(status_code=409, detail="Task workspace source provenance is invalid")
         normalized_paths.append(normalized)
-    if len({path.casefold() for path in normalized_paths}) != len(normalized_paths):
+    if source_paths is not None and len({path.casefold() for path in normalized_paths}) != len(normalized_paths):
         raise HTTPException(status_code=409, detail="Task workspace source paths are not unique")
 
     manager = _workspace_manager()
@@ -192,13 +193,13 @@ async def _task_delivery_context(
         workspace = manager.get(workspace_record.id)
     except WorkspaceError as exc:
         raise HTTPException(status_code=404, detail="Managed task workspace is unavailable") from exc
-    return task, workspace_record, repository, project, normalized_paths, manager, workspace, token
+    return task, workspace_record, repository, project, normalized_paths if source_paths is not None else None, manager, workspace, token
 
 
 async def _build_delivery_preview(
     repository: Repository,
     workspace_record: TaskWorkspace,
-    source_paths: list[str],
+    source_paths: list[str] | None,
     manager: WorkspaceManager,
     workspace: Any,
     github: GitHubClient,
@@ -213,9 +214,10 @@ async def _build_delivery_preview(
             raise HTTPException(status_code=502, detail="GitHub returned an invalid pull request base branch")
     except GitHubRepositoryError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
-    current_paths = manager.list_files(workspace, limit=1001, exclude_git=True)
-    if len(current_paths) > 1000:
-        raise HTTPException(status_code=413, detail="Delivery preview is limited to workspaces with at most 1,000 files")
+    current_limit = 20_000 if source_paths is None else 1000
+    current_paths = manager.list_files(workspace, limit=current_limit + 1, exclude_git=True)
+    if len(current_paths) > current_limit:
+        raise HTTPException(status_code=413, detail=f"Delivery preview is limited to workspaces with at most {current_limit:,} files")
     for path in current_paths:
         try:
             normalized = safe_relative_path(path).as_posix()
@@ -224,7 +226,7 @@ async def _build_delivery_preview(
         if normalized != path or any(part.casefold() == ".git" for part in normalized.split("/")):
             raise HTTPException(status_code=409, detail="Workspace contains an invalid delivery path")
 
-    missing_source_paths = sorted(set(source_paths) - set(current_paths))
+    missing_source_paths = sorted(set(source_paths or []) - set(current_paths))
     try:
         _, source_tree = await github.repository_tree(repository.full_name, source_commit_sha)
     except GitHubRepositoryError as exc:
@@ -240,6 +242,14 @@ async def _build_delivery_preview(
         path: entry for path, entry in source_tree_entries.items() if entry.get("type") == "blob"
     }
     source_tree_paths = set(source_tree_entries)
+    if source_paths is None:
+        try:
+            validate_repository_tree(source_tree)
+        except RepositoryWorktreeError as exc:
+            raise HTTPException(status_code=409, detail="Pinned repository tree is no longer supported for delivery") from exc
+        return await _build_full_repository_delivery_preview(
+            repository, workspace_record, current_paths, manager, workspace, github, base_branch, source_tree_entries
+        )
     files: list[dict[str, str]] = []
     deleted_paths: list[str] = []
     diffs: list[dict[str, str]] = []
@@ -284,7 +294,7 @@ async def _build_delivery_preview(
             content = manager.read_file(workspace, path, max_bytes=1_000_000).decode("utf-8")
         except (WorkspaceError, UnicodeDecodeError) as exc:
             raise HTTPException(status_code=422, detail=f"Delivery supports UTF-8 text files up to 1 MB: {path}") from exc
-        if path in source_paths:
+        if path in (source_paths or []):
             baseline = await github.text_file(
                 repository.full_name,
                 path,
@@ -313,7 +323,7 @@ async def _build_delivery_preview(
             baseline = ""
         if content == baseline:
             continue
-        if path in source_paths and source_tree_blob_entries.get(path, {}).get("mode") == "100755":
+        if path in (source_paths or []) and source_tree_blob_entries.get(path, {}).get("mode") == "100755":
             raise HTTPException(
                 status_code=409,
                 detail=f"Delivery cannot preserve the executable mode of a changed source file: {path}",
@@ -358,6 +368,141 @@ async def _build_delivery_preview(
         "unsupported_missing_source_paths": unsupported_missing_source_paths,
         "diff_digest": digest,
         "can_deliver": bool(files or deleted_paths) and not unsupported_missing_source_paths,
+    }
+
+
+def _git_blob_sha(path: Any) -> str:
+    size = path.stat().st_size
+    digest = hashlib.sha1(usedforsecurity=False)
+    digest.update(f"blob {size}\0".encode("ascii"))
+    with path.open("rb") as content:
+        for chunk in iter(lambda: content.read(64 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+async def _build_full_repository_delivery_preview(
+    repository: Repository,
+    workspace_record: TaskWorkspace,
+    current_paths: list[str],
+    manager: WorkspaceManager,
+    workspace: Any,
+    github: GitHubClient,
+    base_branch: str,
+    source_tree_entries: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Compare a full checkout to its pinned tree without trusting local Git metadata."""
+    source_blobs = {
+        path: entry for path, entry in source_tree_entries.items() if entry.get("type") == "blob"
+    }
+    source_casefold = {path.casefold(): path for path in source_tree_entries}
+    current_set = set(current_paths)
+    changed: list[tuple[str, dict[str, Any] | None]] = []
+    for path, entry in sorted(source_blobs.items()):
+        if path not in current_set:
+            changed.append((path, None))
+            if len(changed) > _MAX_DELIVERY_FILES:
+                raise HTTPException(status_code=413, detail="Delivery exceeds the 50-file or 500 KB limit")
+    for path in current_paths:
+        source_entry = source_blobs.get(path)
+        if source_entry is None:
+            changed.append((path, None))
+            continue
+        expected_sha = source_entry.get("sha")
+        try:
+            actual_sha = _git_blob_sha(workspace.path.joinpath(*safe_relative_path(path).parts))
+        except (OSError, WorkspaceError) as exc:
+            raise HTTPException(status_code=409, detail=f"Workspace file cannot be compared safely: {path}") from exc
+        if not isinstance(expected_sha, str) or actual_sha.lower() != expected_sha.lower():
+            changed.append((path, source_entry))
+        if len(changed) > _MAX_DELIVERY_FILES:
+            raise HTTPException(status_code=413, detail="Delivery exceeds the 50-file or 500 KB limit")
+
+    files: list[dict[str, str]] = []
+    deleted_paths: list[str] = []
+    diffs: list[dict[str, str]] = []
+    unsupported: list[str] = []
+    total_content_bytes = 0
+    total_diff_bytes = 0
+    for path, source_entry in changed:
+        if source_entry is None and path in source_blobs:
+            source_entry = source_blobs[path]
+            if source_entry.get("mode") != "100644":
+                unsupported.append(path)
+                continue
+            baseline = await github.text_file(repository.full_name, path, workspace_record.source_commit_sha or "", max_bytes=1_000_000)
+            if baseline is None:
+                unsupported.append(path)
+                continue
+            total_content_bytes += len(baseline.encode("utf-8"))
+            deleted_paths.append(path)
+            diff = "".join(
+                difflib.unified_diff(
+                    baseline.splitlines(keepends=True), [], fromfile=f"a/{path}", tofile="/dev/null"
+                )
+            )
+        else:
+            try:
+                raw = manager.read_file(workspace, path, max_bytes=1_000_000)
+                content = raw.decode("utf-8")
+            except (WorkspaceError, UnicodeDecodeError) as exc:
+                raise HTTPException(status_code=422, detail=f"Delivery supports UTF-8 text files up to 1 MB: {path}") from exc
+            if source_entry is None:
+                folded = path.casefold()
+                collision = any(
+                    folded == existing
+                    or existing.startswith(f"{folded}/")
+                    or (source_tree_entries[original].get("type") == "blob" and folded.startswith(f"{existing}/"))
+                    for existing, original in source_casefold.items()
+                )
+                if collision:
+                    raise HTTPException(status_code=409, detail=f"Workspace path conflicts with a source path: {path}")
+                baseline = ""
+            else:
+                if source_entry.get("mode") == "100755":
+                    raise HTTPException(status_code=409, detail=f"Delivery cannot preserve the executable mode of a changed source file: {path}")
+                baseline = await github.text_file(
+                    repository.full_name, path, workspace_record.source_commit_sha or "", max_bytes=1_000_000
+                )
+                if baseline is None:
+                    raise HTTPException(status_code=409, detail=f"Changed source file is binary or exceeds 1 MB: {path}")
+            if content == baseline:
+                continue
+            total_content_bytes += len(content.encode("utf-8"))
+            files.append({"path": path, "content": content})
+            diff = "".join(
+                difflib.unified_diff(
+                    baseline.splitlines(keepends=True),
+                    content.splitlines(keepends=True),
+                    fromfile=f"a/{path}" if baseline else "/dev/null",
+                    tofile=f"b/{path}",
+                )
+            )
+        if total_content_bytes > _MAX_DELIVERY_BYTES:
+            raise HTTPException(status_code=413, detail="Delivery exceeds the 50-file or 500 KB limit")
+        total_diff_bytes += len(diff.encode("utf-8"))
+        if total_diff_bytes > _MAX_DELIVERY_DIFF_BYTES:
+            raise HTTPException(status_code=413, detail="Rendered delivery diff exceeds the 1 MB limit")
+        diffs.append({"path": path, "diff": diff})
+
+    payload = {
+        "source_commit_sha": workspace_record.source_commit_sha,
+        "base_branch": base_branch,
+        "files": files,
+        "deleted_paths": deleted_paths,
+        "unsupported_missing_source_paths": unsupported,
+    }
+    digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return {
+        "repository_id": str(repository.id),
+        "source_commit_sha": workspace_record.source_commit_sha,
+        "base_branch": base_branch,
+        "files": files,
+        "deleted_paths": deleted_paths,
+        "diffs": diffs,
+        "unsupported_missing_source_paths": unsupported,
+        "diff_digest": digest,
+        "can_deliver": bool(files or deleted_paths) and not unsupported,
     }
 
 
@@ -638,17 +783,24 @@ async def create_task_workspace(
     if existing is not None:
         raise HTTPException(status_code=409, detail="Task already has a managed workspace")
 
-    if (payload.repository_id is None) != (payload.repository_paths is None):
-        raise HTTPException(status_code=422, detail="repository_id and repository_paths must be supplied together")
+    if payload.repository_id is None and (payload.repository_paths is not None or payload.full_repository):
+        raise HTTPException(status_code=422, detail="Repository paths and full_repository require a repository_id")
     if payload.repository_id is not None and payload.files:
         raise HTTPException(status_code=422, detail="Provide either initial files or a repository source, not both")
+    if payload.full_repository and payload.repository_paths is not None:
+        raise HTTPException(status_code=422, detail="Select repository paths or request full_repository, not both")
+    if payload.repository_id is not None and not payload.full_repository and payload.repository_paths is None:
+        raise HTTPException(status_code=422, detail="Select repository paths or request full_repository")
 
     initial_files = dict(payload.files)
     source_commit_sha: str | None = None
     source_paths: list[str] | None = None
     repository: Repository | None = None
+    repository_branch: str | None = None
+    repository_tree_sha: str | None = None
+    git_token: str | None = None
     if payload.repository_id is not None:
-        if not payload.repository_paths:
+        if not payload.full_repository and not payload.repository_paths:
             raise HTTPException(status_code=422, detail="Select at least one repository path")
         handoff = (
             await db.execute(
@@ -667,8 +819,8 @@ async def create_task_workspace(
             raise HTTPException(status_code=403, detail="Repository is outside the task's assigned project")
         if repository.provider != "github":
             raise HTTPException(status_code=422, detail="Only GitHub repository workspaces are supported")
-        source_paths = []
-        for path in payload.repository_paths:
+        selected_repository_paths: list[str] = []
+        for path in payload.repository_paths or []:
             try:
                 normalized = safe_relative_path(path).as_posix()
             except WorkspaceError as exc:
@@ -677,10 +829,11 @@ async def create_task_workspace(
                 normalized != path
                 or len(normalized) > 512
                 or any(part.casefold() == ".git" for part in normalized.split("/"))
-                or normalized.casefold() in {selected.casefold() for selected in source_paths}
+                or normalized.casefold() in {selected.casefold() for selected in selected_repository_paths}
             ):
                 raise HTTPException(status_code=422, detail="Repository paths must be normalized and unique")
-            source_paths.append(normalized)
+            selected_repository_paths.append(normalized)
+        source_paths = None if payload.full_repository else selected_repository_paths
 
         try:
             try:
@@ -696,11 +849,21 @@ async def create_task_workspace(
                 ) from exc
             async with github_provider as github:
                 metadata = await github.repository_metadata(repository.full_name)
-                source_commit_sha = await github.branch_commit(repository.full_name, str(metadata["default_branch"]))
-                _, tree = await github.repository_tree(repository.full_name, source_commit_sha)
+                repository_branch = str(metadata["default_branch"])
+                source_commit_sha = await github.branch_commit(repository.full_name, repository_branch)
+                repository_tree_sha, tree = await github.repository_tree(repository.full_name, source_commit_sha)
                 tree_entries = {entry["path"]: entry for entry in tree}
+                if payload.full_repository:
+                    try:
+                        validate_repository_tree(tree)
+                    except RepositoryWorktreeError as exc:
+                        status_code = 413 if "limit" in str(exc) or "too many" in str(exc) else 422
+                        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+                    if bool(metadata.get("private")) and not getattr(github, "git_auth_token", lambda: None)():
+                        raise HTTPException(status_code=409, detail="Reconnect the GitHub integration to clone this private repository")
+                    git_token = getattr(github, "git_auth_token", lambda: None)()
                 selected_entries = []
-                for path in source_paths:
+                for path in source_paths or []:
                     entry = tree_entries.get(path)
                     if entry is None or entry.get("type") != "blob" or entry.get("mode") not in {"100644", "100755"}:
                         raise HTTPException(status_code=422, detail=f"Repository path is not a regular file: {path}")
@@ -736,8 +899,24 @@ async def create_task_workspace(
     manager = _workspace_manager()
     workspace = manager.create()
     try:
-        for relative_path, contents in initial_files.items():
-            manager.write_file(workspace, relative_path, contents.encode("utf-8"))
+        if payload.full_repository:
+            if repository is None or not source_commit_sha or not repository_branch or not repository_tree_sha:
+                raise HTTPException(status_code=502, detail="GitHub returned incomplete pinned repository metadata")
+            await materialize_repository_worktree(
+                workspace.path,
+                full_name=repository.full_name,
+                branch=repository_branch,
+                expected_sha=source_commit_sha,
+                expected_tree_sha=repository_tree_sha,
+                token=git_token,
+                tree=tree,
+            )
+            workspace_size = manager.validate_tree(workspace)
+            if workspace_size > _MAX_FULL_WORKSPACE_BYTES:
+                raise RepositoryWorktreeError("Checked out workspace exceeds the 128 MiB execution workspace limit")
+        else:
+            for relative_path, contents in initial_files.items():
+                manager.write_file(workspace, relative_path, contents.encode("utf-8"))
         record = TaskWorkspace(
             id=workspace.id,
             tenant_id=task.tenant_id,
@@ -751,7 +930,13 @@ async def create_task_workspace(
     except WorkspaceError as exc:
         manager.delete(workspace.id)
         await db.rollback()
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        status_code = 413 if "size limit" in str(exc) else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    except RepositoryWorktreeError as exc:
+        manager.delete(workspace.id)
+        await db.rollback()
+        status_code = 413 if "limit" in str(exc) or "too many" in str(exc) else 422
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
     except Exception:
         manager.delete(workspace.id)
         await db.rollback()
@@ -763,6 +948,7 @@ async def create_task_workspace(
         "repository_id": str(repository.id) if repository else None,
         "source_commit_sha": source_commit_sha,
         "source_paths": source_paths,
+        "workspace_mode": "full_repository" if payload.full_repository else "selected_files" if repository else "manual",
     }
 
 

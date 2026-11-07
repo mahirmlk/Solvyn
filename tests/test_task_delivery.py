@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -37,6 +38,28 @@ class FakeGitHub:
     ) -> str | None:
         assert max_bytes == 1_000_000
         return "print('before')\n" if path == "src/main.py" else None
+
+
+class FullRepositoryGitHub(FakeGitHub):
+    sources = {"src/main.py": "print('before')\n", "README.md": "old readme\n"}
+
+    async def repository_tree(self, _full_name: str, _revision: str) -> tuple[str, list[dict[str, Any]]]:
+        entries = []
+        for path, content in self.sources.items():
+            raw = content.encode()
+            blob_sha = hashlib.sha1(f"blob {len(raw)}\0".encode() + raw, usedforsecurity=False).hexdigest()
+            entries.append({"path": path, "type": "blob", "mode": "100644", "size": len(raw), "sha": blob_sha})
+        return "tree-sha", entries
+
+    async def text_file(
+        self,
+        _full_name: str,
+        path: str,
+        _revision: str,
+        *,
+        max_bytes: int,
+    ) -> str | None:
+        return self.sources.get(path)
 
 
 class ExecutableSourceGitHub(FakeGitHub):
@@ -183,6 +206,26 @@ async def test_delivery_preview_is_bounded_and_digest_binds_workspace_contents(t
     assert first["diff_digest"] == second["diff_digest"]
     assert [item["path"] for item in first["files"]] == ["README.md", "src/main.py"]
     assert "+print('after')" in first["diffs"][1]["diff"]
+
+
+@pytest.mark.asyncio
+async def test_full_repository_delivery_compares_pinned_blobs_and_bounds_changes(tmp_path: Any) -> None:
+    verification_api = _verification_api()
+    manager = WorkspaceManager(tmp_path / "workspaces")
+    workspace = manager.create()
+    manager.write_file(workspace, "src/main.py", b"print('after')\n")
+    manager.write_file(workspace, "docs/new.md", b"new file\n")
+    record = SimpleNamespace(source_commit_sha="a" * 40)
+    repository = SimpleNamespace(id="repo-id", full_name="octo/repo")
+
+    preview = await verification_api._build_delivery_preview(
+        repository, record, None, manager, workspace, FullRepositoryGitHub()  # type: ignore[arg-type]
+    )
+
+    assert preview["can_deliver"] is True
+    assert [item["path"] for item in preview["files"]] == ["docs/new.md", "src/main.py"]
+    assert preview["deleted_paths"] == ["README.md"]
+    assert len(preview["diffs"]) == 3
 
 
 @pytest.mark.asyncio

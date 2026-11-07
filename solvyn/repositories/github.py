@@ -107,6 +107,7 @@ class GitHubClient(RepositoryProvider):
 
     def __init__(self, client: httpx.AsyncClient | None = None, *, token: str | None = None) -> None:
         self._owns_client = client is None
+        self._token = token
         headers = {
             "Accept": "application/vnd.github+json",
             "User-Agent": "Solvyn-Repository-Inspector/1.0",
@@ -122,6 +123,10 @@ class GitHubClient(RepositoryProvider):
         # Inject credentials per request when the caller owns the client. This
         # avoids leaving an organization token on a shared AsyncClient.
         self._request_headers = {"Authorization": f"Bearer {token}"} if token and client is not None else None
+
+    def git_auth_token(self) -> str | None:
+        """Return the configured token to the isolated Git transport only."""
+        return self._token
 
     async def __aenter__(self) -> GitHubClient:
         return self
