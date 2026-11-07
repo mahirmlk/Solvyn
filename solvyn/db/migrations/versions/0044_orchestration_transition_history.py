@@ -1,6 +1,6 @@
 """Capture immutable approval and task handoff status transitions.
 
-Revision ID: 0044_orchestration_transition_history
+Revision ID: 0044_orchestration_history
 Revises: 0043_verification_attempts
 Create Date: 2026-11-07 00:00:00.000000
 """
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0044_orchestration_transition_history"
+revision: str = "0044_orchestration_history"
 down_revision: str | None = "0043_verification_attempts"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
