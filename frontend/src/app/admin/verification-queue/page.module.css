@@ -115,6 +115,13 @@
   font-size: 12px;
 }
 
+.actionMessage {
+  width: min(100% - 40px, 1200px);
+  margin: 0 auto 16px;
+  color: var(--color-muted);
+  font-size: 12px;
+}
+
 .emptyCell {
   padding: 32px !important;
   color: var(--color-muted);

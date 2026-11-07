@@ -38,6 +38,8 @@ export default function VerificationQueuePage() {
   const [queue, setQueue] = useState<VerificationQueueResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [redrivingId, setRedrivingId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -78,6 +80,24 @@ export default function VerificationQueuePage() {
     setOffset(nextOffset);
   }
 
+  async function redrive(itemId: string) {
+    setRedrivingId(itemId);
+    setActionMessage(null);
+    try {
+      const result = await api.redriveVerification(itemId);
+      setActionMessage(
+        result.already_redriven
+          ? "This dead-letter run already has a redrive request."
+          : "A fresh approval request was created. Approve it in Approvals before it can run.",
+      );
+      await refresh();
+    } catch (reason) {
+      setActionMessage(reason instanceof Error ? reason.message : "Could not create a redrive request.");
+    } finally {
+      setRedrivingId(null);
+    }
+  }
+
   const counts = queue?.counts ?? {};
   const summary = [
     { label: "Pending approval", value: counts.pending_approval ?? 0 },
@@ -111,6 +131,7 @@ export default function VerificationQueuePage() {
           {error.includes("401") && <> <Link href="/login">Sign in</Link></>}
         </div>
       )}
+      {actionMessage && <p className={styles.actionMessage} role="status">{actionMessage}</p>}
 
       <section className={styles.summaryGrid} aria-label="Queue status counts">
         {summary.map((item) => (
@@ -151,11 +172,12 @@ export default function VerificationQueuePage() {
               <th scope="col">Attempts</th>
               <th scope="col">Lease expires</th>
               <th scope="col">Started</th>
+              <th scope="col">Queue action</th>
             </tr>
           </thead>
           <tbody>
             {loading && !queue ? (
-              <tr><td className={styles.emptyCell} colSpan={6}>Loading queue…</td></tr>
+              <tr><td className={styles.emptyCell} colSpan={7}>Loading queue…</td></tr>
             ) : queue?.items.length ? queue.items.map((item) => (
               <tr key={item.id}>
                 <td>
@@ -164,7 +186,10 @@ export default function VerificationQueuePage() {
                       {item.task_title}
                     </Link>
                   ) : item.task_title}
-                  <span className={styles.subtle}>{item.kind} · {item.id.slice(0, 8)}</span>
+                  <span className={styles.subtle}>
+                    {item.kind} · {item.id.slice(0, 8)}
+                    {item.redriven_from_run_id && ` · redriven from ${item.redriven_from_run_id.slice(0, 8)}`}
+                  </span>
                 </td>
                 <td><span className="status-pill">{formatStatus(item.status)}</span></td>
                 <td>{formatStatus(item.approval_status)}</td>
@@ -174,9 +199,21 @@ export default function VerificationQueuePage() {
                 </td>
                 <td>{formatDate(item.lease_expires_at)}</td>
                 <td>{formatDate(item.started_at)}</td>
+                <td>
+                  {item.status === "dead_letter" && item.redriven_to_run_id ? (
+                    <span className={styles.subtle}>Redriven as {item.redriven_to_run_id.slice(0, 8)}</span>
+                  ) : item.status === "dead_letter" ? (
+                    <button
+                      className="action-button secondary"
+                      disabled={loading || redrivingId !== null}
+                      onClick={() => void redrive(item.id)}
+                      type="button"
+                    >{redrivingId === item.id ? "Requesting…" : "Redrive for approval"}</button>
+                  ) : "—"}
+                </td>
               </tr>
             )) : (
-              <tr><td className={styles.emptyCell} colSpan={6}>
+              <tr><td className={styles.emptyCell} colSpan={7}>
                 {error ? "Queue data is unavailable." : "No verification runs match this filter."}
               </td></tr>
             )}
