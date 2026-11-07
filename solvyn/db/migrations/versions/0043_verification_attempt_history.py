@@ -1,6 +1,6 @@
 """Capture immutable verification attempt lifecycle and results.
 
-Revision ID: 0043_verification_attempt_history
+Revision ID: 0043_verification_attempts
 Revises: 0042_verification_run_recovery
 Create Date: 2026-11-07 00:00:00.000000
 """
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0043_verification_attempt_history"
+revision: str = "0043_verification_attempts"
 down_revision: str | None = "0042_verification_run_recovery"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
