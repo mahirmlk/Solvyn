@@ -160,6 +160,27 @@ export interface ProjectInfo {
   created_at: string;
 }
 
+export interface MaintenanceScheduleInfo {
+  id: string;
+  organization_id: string;
+  project_id: string;
+  task_id: string | null;
+  task_title: string | null;
+  maintenance_type: "code_quality" | "dependency_review" | "documentation_review";
+  title: string;
+  interval_days: number;
+  next_run_at: string;
+  enabled: boolean;
+  created_at: string | null;
+}
+
+export interface MaintenanceTaskTarget {
+  id: string;
+  execution_id: string;
+  title: string;
+  status: string;
+}
+
 export interface TeammateInfo {
   id: string;
   organization_id: string;
@@ -427,6 +448,30 @@ export const api = {
 
   listProjects: (organizationId: string) =>
     request<{ projects: ProjectInfo[]; count: number }>(`/organizations/${organizationId}/projects`),
+
+  listMaintenanceSchedules: (organizationId: string) =>
+    request<{ schedules: MaintenanceScheduleInfo[]; count: number; can_manage: boolean }>(
+      `/organizations/${organizationId}/maintenance-schedules`,
+    ),
+
+  listMaintenanceTaskTargets: (organizationId: string, projectId: string) =>
+    request<{ tasks: MaintenanceTaskTarget[]; count: number }>(
+      `/organizations/${organizationId}/projects/${projectId}/maintenance-task-targets`,
+    ),
+
+  createMaintenanceSchedule: (
+    organizationId: string,
+    input: { project_id: string; task_id: string; maintenance_type: "code_quality"; title: string; interval_days: number },
+  ) => request<MaintenanceScheduleInfo>(`/organizations/${organizationId}/maintenance-schedules`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  }),
+
+  updateMaintenanceSchedule: (organizationId: string, scheduleId: string, input: { enabled: boolean }) =>
+    request<MaintenanceScheduleInfo>(`/organizations/${organizationId}/maintenance-schedules/${scheduleId}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
 
   createProject: (input: { organization_id: string; name: string; slug: string; description: string }) =>
     request<ProjectInfo>("/projects", { method: "POST", body: JSON.stringify(input) }),
