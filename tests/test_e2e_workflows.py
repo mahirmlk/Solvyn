@@ -468,6 +468,10 @@ async def test_task_verification_is_sandboxed_and_durable(
     dead_letter_id = uuid.uuid4()
     async with async_session_factory() as db:
         await bind_tenant_scope(db, tenant.id)
+        source_task = await db.get(Task, uuid.UUID(task_id))
+        assert source_task is not None
+        original_task_status = source_task.status
+        source_task.status = "pending"
         workspace_record = (
             await db.execute(
                 select(TaskWorkspace).where(
@@ -544,6 +548,13 @@ async def test_task_verification_is_sandboxed_and_durable(
     assert dead_letter_queue.status_code == 200
     source_queue_item = next(item for item in dead_letter_queue.json()["items"] if item["id"] == str(dead_letter_id))
     assert source_queue_item["redriven_to_run_id"] == child_id
+
+    async with async_session_factory() as db:
+        await bind_tenant_scope(db, tenant.id)
+        source_task = await db.get(Task, uuid.UUID(task_id))
+        assert source_task is not None
+        source_task.status = original_task_status
+        await db.commit()
 
 
 @pytest.mark.asyncio
