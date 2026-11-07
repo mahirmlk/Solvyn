@@ -374,6 +374,43 @@ export interface AdminApiKeyCreated extends AdminApiKey {
   plaintext_key: string;
 }
 
+export type VerificationQueueStatus =
+  | "pending_approval"
+  | "approved"
+  | "running"
+  | "interrupted"
+  | "stale"
+  | "completed"
+  | "failed"
+  | "dead_letter";
+
+export interface VerificationQueueItem {
+  id: string;
+  task_id: string;
+  execution_id: string | null;
+  task_title: string;
+  organization_id: string;
+  kind: string;
+  status: VerificationQueueStatus;
+  approval_status: string;
+  attempt_count: number;
+  max_attempts: number;
+  retryable: boolean;
+  attempt_started_at: string | null;
+  lease_expires_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface VerificationQueueResponse {
+  counts: Partial<Record<VerificationQueueStatus, number>>;
+  status_filter: VerificationQueueStatus | null;
+  total: number;
+  limit: number;
+  offset: number;
+  items: VerificationQueueItem[];
+}
+
 export const api = {
   health: () => request<HealthStatus>("/health"),
 
@@ -409,6 +446,14 @@ export const api = {
 
   listApprovals: (status: "pending" | "approved" | "rejected" | "consumed" | "stale" = "pending") =>
     request<{ approvals: ApprovalInfo[]; count: number }>(`/approvals?status=${status}`),
+
+  getVerificationQueue: (params?: { status?: VerificationQueueStatus; limit?: number; offset?: number }) => {
+    const query = new URLSearchParams();
+    if (params?.status) query.set("status", params.status);
+    if (params?.limit) query.set("limit", String(params.limit));
+    if (params?.offset) query.set("offset", String(params.offset));
+    return request<VerificationQueueResponse>(`/verification-queue?${query}`);
+  },
 
   getApproval: (approvalId: string) => request<ApprovalInfo>(`/approvals/${approvalId}`),
 
