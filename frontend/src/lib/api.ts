@@ -185,6 +185,7 @@ export interface MaintenanceScheduleInfo {
   task_id: string | null;
   task_title: string | null;
   maintenance_type: "code_quality" | "dependency_review" | "documentation_review";
+  verification_kind: "test" | "build" | "lint" | "typecheck" | "security";
   title: string;
   interval_days: number;
   next_run_at: string;
@@ -501,7 +502,14 @@ export const api = {
 
   createMaintenanceSchedule: (
     organizationId: string,
-    input: { project_id: string; task_id: string; maintenance_type: "code_quality"; title: string; interval_days: number },
+    input: {
+      project_id: string;
+      task_id: string;
+      maintenance_type: "code_quality";
+      verification_kind: MaintenanceScheduleInfo["verification_kind"];
+      title: string;
+      interval_days: number;
+    },
   ) => request<MaintenanceScheduleInfo>(`/organizations/${organizationId}/maintenance-schedules`, {
     method: "POST",
     body: JSON.stringify(input),

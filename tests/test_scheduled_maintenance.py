@@ -25,7 +25,7 @@ from solvyn.multi_tenant.middleware import tenant_context
 from solvyn.workflows.scheduler import _queue_due_maintenance_events
 
 
-def test_schedule_interval_is_limited_to_one_through_thirty_days() -> None:
+def test_schedule_interval_and_verification_profile_are_bounded() -> None:
     with pytest.raises(ValidationError):
         MaintenanceScheduleCreate(
             project_id=uuid.uuid4(),
@@ -35,11 +35,29 @@ def test_schedule_interval_is_limited_to_one_through_thirty_days() -> None:
         )
     valid = MaintenanceScheduleCreate(
         project_id=uuid.uuid4(),
-        maintenance_type="dependency_review",
+        maintenance_type="code_quality",
         title="Dependencies",
         interval_days=30,
+        verification_kind="security",
     )
     assert valid.interval_days == 30
+    assert valid.verification_kind == "security"
+    with pytest.raises(ValidationError):
+        MaintenanceScheduleCreate(
+            project_id=uuid.uuid4(),
+            maintenance_type="code_quality",
+            title="Unsupported",
+            interval_days=7,
+            verification_kind="dependency_review",
+        )
+    with pytest.raises(ValidationError):
+        MaintenanceScheduleCreate(
+            project_id=uuid.uuid4(),
+            maintenance_type="dependency_review",
+            title="Unsupported reminder profile",
+            interval_days=7,
+            verification_kind="security",
+        )
 
 
 @pytest.mark.asyncio
@@ -89,6 +107,7 @@ async def test_maintenance_schedule_create_requires_admin_and_project_scope() ->
     assert stub_db.added is not None
     assert stub_db.added.created_by == user_id
     assert stub_db.added.title == "Docs review"
+    assert stub_db.added.verification_kind == "lint"
     assert stub_db.added.next_run_at > datetime.now(UTC)
     assert result["enabled"] is True
 
@@ -146,6 +165,7 @@ async def test_schedule_list_reports_read_only_membership() -> None:
         organization_id=organization_id,
         project_id=uuid.uuid4(),
         maintenance_type="code_quality",
+        verification_kind="build",
         title="Weekly lint",
         interval_days=7,
         next_run_at=datetime.now(UTC),
@@ -167,6 +187,7 @@ async def test_schedule_list_reports_read_only_membership() -> None:
     assert response["count"] == 1
     assert response["schedules"][0]["id"] == str(schedule.id)  # type: ignore[index]
     assert response["schedules"][0]["task_title"] == "Lint task"  # type: ignore[index]
+    assert response["schedules"][0]["verification_kind"] == "build"  # type: ignore[index]
 
 
 @pytest.mark.asyncio
@@ -259,8 +280,20 @@ async def test_due_maintenance_schedule_adds_one_human_triage_event_and_advances
 
 
 @pytest.mark.asyncio
-async def test_due_code_quality_schedule_requests_real_approval_bound_lint(
+@pytest.mark.parametrize(
+    ("verification_kind", "command"),
+    [
+        ("test", ["pytest", "-q"]),
+        ("build", ["python", "-m", "compileall", "-q", "."]),
+        ("lint", ["ruff", "check", "."]),
+        ("typecheck", ["mypy", "."]),
+        ("security", ["ruff", "check", "--select", "S", "."]),
+    ],
+)
+async def test_due_code_quality_schedule_requests_profile_with_real_approval(
     monkeypatch: pytest.MonkeyPatch,
+    verification_kind: str,
+    command: list[str],
 ) -> None:
     from solvyn.api.v1 import verification
 
@@ -275,6 +308,7 @@ async def test_due_code_quality_schedule_requests_real_approval_bound_lint(
         project_id=project_id,
         task_id=task_id,
         maintenance_type="code_quality",
+        verification_kind=verification_kind,
         title="Weekly lint",
         interval_days=7,
         next_run_at=scheduled_for,
@@ -342,15 +376,19 @@ async def test_due_code_quality_schedule_requests_real_approval_bound_lint(
     assert len(runs) == len(approvals) == len(events) == 1
     run = runs[0]
     assert run.status == "pending_approval"
-    assert run.kind == "lint"
-    assert json.loads(run.command) == ["ruff", "check", "."]
+    assert run.kind == verification_kind
+    assert json.loads(run.command) == command
     assert run.source_digest == digest
     assert run.maintenance_schedule_id == schedule.id
     assert run.maintenance_scheduled_for == scheduled_for
     approval = approvals[0]
     assert approval.verification_run_id == run.id
     assert approval.status == "pending"
-    assert json.loads(approval.payload)["source_digest"] == digest
+    approval_payload = json.loads(approval.payload)
+    assert approval_payload["source_digest"] == digest
+    assert approval_payload["kind"] == verification_kind
+    assert approval_payload["command"] == command
+    assert f"Scheduled {verification_kind} check" in approval.summary
     assert events[0].conclusion == "awaiting_approval"
     assert events[0].action == "approval_requested"
     assert schedule.next_run_at > now

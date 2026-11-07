@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,8 +32,15 @@ class MaintenanceScheduleCreate(BaseModel):
     project_id: uuid.UUID
     task_id: uuid.UUID | None = None
     maintenance_type: Literal["code_quality", "dependency_review", "documentation_review"]
+    verification_kind: Literal["test", "build", "lint", "typecheck", "security"] = "lint"
     title: str = Field(min_length=1, max_length=255)
     interval_days: int = Field(ge=1, le=30)
+
+    @model_validator(mode="after")
+    def profile_only_for_code_quality(self) -> MaintenanceScheduleCreate:
+        if self.maintenance_type != "code_quality" and self.verification_kind != "lint":
+            raise ValueError("Verification profiles are only available for code quality schedules")
+        return self
 
 
 class MaintenanceScheduleUpdate(BaseModel):
@@ -48,6 +55,7 @@ def _schedule_dict(schedule: MaintenanceSchedule, *, task_title: str | None = No
         "task_id": str(schedule.task_id) if schedule.task_id else None,
         "task_title": task_title,
         "maintenance_type": schedule.maintenance_type,
+        "verification_kind": schedule.verification_kind,
         "title": schedule.title,
         "interval_days": schedule.interval_days,
         "next_run_at": schedule.next_run_at.isoformat(),
@@ -130,7 +138,6 @@ async def create_maintenance_schedule(
         raise HTTPException(status_code=422, detail="Code quality checks require a task with a ready workspace")
     if payload.task_id is not None:
         await _validate_check_target(db, task_id=payload.task_id, project=project)
-
     active_count = await db.scalar(
         select(func.count(MaintenanceSchedule.id)).where(
             MaintenanceSchedule.project_id == payload.project_id,
@@ -148,6 +155,7 @@ async def create_maintenance_schedule(
         task_id=payload.task_id,
         created_by=tenant_context.user_id,
         maintenance_type=payload.maintenance_type,
+        verification_kind=payload.verification_kind,
         title=payload.title.strip(),
         interval_days=payload.interval_days,
         next_run_at=now + timedelta(days=payload.interval_days),

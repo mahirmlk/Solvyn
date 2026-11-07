@@ -8,6 +8,7 @@ import logging
 import socket
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -168,10 +169,13 @@ async def _queue_due_maintenance_events(db: AsyncSession) -> int:
                     action = "blocked"
                 else:
                     task, workspace_record, handoff, teammate = target
-                    from solvyn.api.v1.verification import _DEFAULT_VERIFICATION_COMMANDS, _workspace_manager
+                    from solvyn.api.v1.verification import _DEFAULT_VERIFICATION_COMMANDS, VerificationKind, _workspace_manager
                     from solvyn.config import settings
                     from solvyn.sandbox.workspaces import WorkspaceError
 
+                    # The API validator and database constraint bound this persisted value.
+                    verification_kind = cast(VerificationKind, schedule.verification_kind)
+                    command = _DEFAULT_VERIFICATION_COMMANDS[verification_kind]
                     manager = _workspace_manager()
                     try:
                         workspace = manager.get(workspace_record.id)
@@ -188,8 +192,8 @@ async def _queue_due_maintenance_events(db: AsyncSession) -> int:
                             workspace_id=workspace_record.id,
                             maintenance_schedule_id=schedule.id,
                             maintenance_scheduled_for=schedule.next_run_at,
-                            kind="lint",
-                            command=json.dumps(_DEFAULT_VERIFICATION_COMMANDS["lint"]),
+                            kind=verification_kind,
+                            command=json.dumps(command),
                             status="pending_approval",
                             runner_version="sandbox-service/1" if settings.sandbox_runtime_url else "docker-sandbox/1",
                             source_digest=source_digest,
@@ -205,7 +209,7 @@ async def _queue_due_maintenance_events(db: AsyncSession) -> int:
                                 verification_run_id=run.id,
                                 kind="verification_run",
                                 status="pending",
-                                summary=f"Scheduled code quality check: {schedule.title}",
+                                summary=f"Scheduled {verification_kind} check: {schedule.title}",
                                 payload=json.dumps(
                                     {
                                         "execution_id": str(task.execution_id) if task.execution_id else None,
@@ -214,8 +218,8 @@ async def _queue_due_maintenance_events(db: AsyncSession) -> int:
                                         "workspace_id": str(workspace_record.id),
                                         "maintenance_schedule_id": str(schedule.id),
                                         "scheduled_for": scheduled_for,
-                                        "kind": run.kind,
-                                        "command": _DEFAULT_VERIFICATION_COMMANDS["lint"],
+                                        "kind": verification_kind,
+                                        "command": command,
                                         "source_digest": source_digest,
                                     }
                                 ),
