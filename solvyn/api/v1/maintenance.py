@@ -40,12 +40,13 @@ class MaintenanceScheduleUpdate(BaseModel):
     enabled: bool
 
 
-def _schedule_dict(schedule: MaintenanceSchedule) -> dict[str, object]:
+def _schedule_dict(schedule: MaintenanceSchedule, *, task_title: str | None = None) -> dict[str, object]:
     return {
         "id": str(schedule.id),
         "organization_id": str(schedule.organization_id),
         "project_id": str(schedule.project_id),
         "task_id": str(schedule.task_id) if schedule.task_id else None,
+        "task_title": task_title,
         "maintenance_type": schedule.maintenance_type,
         "title": schedule.title,
         "interval_days": schedule.interval_days,
@@ -163,14 +164,81 @@ async def list_maintenance_schedules(
     organization_id: uuid.UUID,
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
-    await require_org_membership(db, organization_id, roles=ANY_ROLE)
+    membership = await require_org_membership(db, organization_id, roles=ANY_ROLE)
     result = await db.execute(
-        select(MaintenanceSchedule)
+        select(MaintenanceSchedule, Task.title)
+        .outerjoin(
+            Task,
+            (Task.id == MaintenanceSchedule.task_id) & (Task.tenant_id == MaintenanceSchedule.tenant_id),
+        )
         .where(MaintenanceSchedule.organization_id == organization_id)
         .order_by(MaintenanceSchedule.created_at.desc())
     )
-    items = [_schedule_dict(schedule) for schedule in result.scalars().all()]
-    return {"schedules": items, "count": len(items)}
+    items = [_schedule_dict(schedule, task_title=task_title) for schedule, task_title in result.all()]
+    return {"schedules": items, "count": len(items), "can_manage": membership.role in OWNER_ADMIN}
+
+
+@router.get("/organizations/{organization_id}/projects/{project_id}/maintenance-task-targets")
+async def list_maintenance_task_targets(
+    organization_id: uuid.UUID,
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    """List bounded project tasks that can run an approval-gated quality check."""
+    await require_org_membership(db, organization_id, roles=ANY_ROLE)
+    project = (
+        await db.execute(
+            select(Project).where(
+                Project.id == project_id,
+                Project.organization_id == organization_id,
+                Project.is_active.is_(True),
+            )
+        )
+    ).scalar_one_or_none()
+    if project is None:
+        raise HTTPException(status_code=404, detail="Active project not found in this organization")
+
+    rows = (
+        await db.execute(
+            select(Task.id, Task.execution_id, Task.title, Task.status)
+            .join(
+                TaskWorkspace,
+                (TaskWorkspace.task_id == Task.id) & (TaskWorkspace.tenant_id == Task.tenant_id),
+            )
+            .join(
+                TaskHandoff,
+                (TaskHandoff.child_task_id == Task.id)
+                & (TaskHandoff.tenant_id == Task.tenant_id)
+                & (TaskHandoff.project_id == project.id),
+            )
+            .join(
+                TeammateProfile,
+                (TeammateProfile.id == TaskHandoff.teammate_id)
+                & (TeammateProfile.tenant_id == TaskHandoff.tenant_id)
+                & (TeammateProfile.organization_id == organization_id)
+                & TeammateProfile.is_enabled.is_(True),
+            )
+            .join(
+                TeammateProjectAssignment,
+                (TeammateProjectAssignment.teammate_id == TeammateProfile.id)
+                & (TeammateProjectAssignment.project_id == project.id),
+            )
+            .where(
+                Task.tenant_id == project.tenant_id,
+                Task.execution_id.is_not(None),
+                TaskHandoff.status.in_(("pending", "running", "failed", "completed")),
+            )
+            .order_by(Task.updated_at.desc(), Task.id)
+            .limit(100)
+        )
+    ).all()
+    return {
+        "tasks": [
+            {"id": str(task_id), "execution_id": str(execution_id), "title": title, "status": status}
+            for task_id, execution_id, title, status in rows
+        ],
+        "count": len(rows),
+    }
 
 
 @router.patch("/organizations/{organization_id}/maintenance-schedules/{schedule_id}")

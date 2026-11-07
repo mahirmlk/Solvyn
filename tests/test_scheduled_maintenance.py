@@ -14,7 +14,12 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from solvyn.api.v1.maintenance import MaintenanceScheduleCreate, create_maintenance_schedule
+from solvyn.api.v1.maintenance import (
+    MaintenanceScheduleCreate,
+    create_maintenance_schedule,
+    list_maintenance_schedules,
+    list_maintenance_task_targets,
+)
 from solvyn.db.models import Approval, MaintenanceSchedule, ProactiveEvent, VerificationRun
 from solvyn.multi_tenant.middleware import tenant_context
 from solvyn.workflows.scheduler import _queue_due_maintenance_events
@@ -130,6 +135,68 @@ async def test_code_quality_schedule_requires_a_task_workspace() -> None:
             db=cast(AsyncSession, StubDB()),
         )
     assert exc.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_schedule_list_reports_read_only_membership() -> None:
+    organization_id, tenant_id = uuid.uuid4(), uuid.uuid4()
+    schedule = MaintenanceSchedule(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        organization_id=organization_id,
+        project_id=uuid.uuid4(),
+        maintenance_type="code_quality",
+        title="Weekly lint",
+        interval_days=7,
+        next_run_at=datetime.now(UTC),
+        enabled=True,
+    )
+
+    class Results:
+        def all(self) -> list[tuple[MaintenanceSchedule, str]]:
+            return [(schedule, "Lint task")]
+
+    with patch(
+        "solvyn.api.v1.maintenance.require_org_membership",
+        new_callable=AsyncMock,
+        return_value=SimpleNamespace(role="member"),
+    ):
+        response = await list_maintenance_schedules(organization_id, db=cast(AsyncSession, SimpleNamespace(execute=AsyncMock(return_value=Results()))))
+
+    assert response["can_manage"] is False
+    assert response["count"] == 1
+    assert response["schedules"][0]["id"] == str(schedule.id)  # type: ignore[index]
+    assert response["schedules"][0]["task_title"] == "Lint task"  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_maintenance_task_targets_are_project_scoped() -> None:
+    organization_id, project_id = uuid.uuid4(), uuid.uuid4()
+    project = SimpleNamespace(id=project_id, tenant_id=uuid.uuid4())
+    target = (uuid.uuid4(), uuid.uuid4(), "Lint backend", "completed")
+
+    class Results:
+        def __init__(self, *, project_result: bool) -> None:
+            self.project_result = project_result
+
+        def scalar_one_or_none(self) -> object | None:
+            return project if self.project_result else None
+
+        def all(self) -> list[tuple[uuid.UUID, uuid.UUID, str, str]]:
+            return [target]
+
+    db = SimpleNamespace(execute=AsyncMock(side_effect=[Results(project_result=True), Results(project_result=False)]))
+    with patch("solvyn.api.v1.maintenance.require_org_membership", new_callable=AsyncMock):
+        response = await list_maintenance_task_targets(
+            organization_id,
+            project_id,
+            db=cast(AsyncSession, db),
+        )
+
+    assert response == {
+        "tasks": [{"id": str(target[0]), "execution_id": str(target[1]), "title": target[2], "status": target[3]}],
+        "count": 1,
+    }
 
 
 @pytest.mark.asyncio
