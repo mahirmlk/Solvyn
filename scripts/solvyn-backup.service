@@ -1,0 +1,17 @@
+[Unit]
+Description=Create and retain a Solvyn PostgreSQL backup
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=solvyn-backup
+Group=solvyn-backup
+EnvironmentFile=/etc/solvyn/backup.env
+WorkingDirectory=/opt/solvyn
+ExecStart=/usr/bin/bash /opt/solvyn/scripts/backup-retention.sh
+UMask=0077
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/backups/solvyn

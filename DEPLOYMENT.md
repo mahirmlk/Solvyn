@@ -149,17 +149,18 @@ docker compose down -v
 The production-oriented stack builds the API and frontend images, runs Alembic migrations once before the API and worker start, and keeps PostgreSQL and Redis off public interfaces. PostgreSQL is optionally reachable on a loopback-only host port for operator backups; Redis remains only on the private Compose network. It uses persistent named volumes, container health checks, restart policies, and CPU/memory limits. The API and frontend ports also bind to loopback so a host TLS reverse proxy can publish them.
 
 1. Install Docker Engine with the Compose v2 plugin and PostgreSQL client tools (`pg_dump`, `psql`, and `gzip`) on the backup operator's host.
-2. Prepare a secrets file and replace every placeholder. Use separate random values for the PostgreSQL bootstrap administrator, migration role, and restricted runtime role; API and JWT signing; and a valid Fernet key for integration encryption. URL-encode special characters in both database URLs. Keep JSON-valued settings such as `ALLOWED_ORIGINS` quoted as in the example; quote URLs if encoded values contain shell-sensitive characters. The PostgreSQL init script creates separate `NOSUPERUSER NOBYPASSRLS` roles: the migrator owns database objects and the API/worker runtime role receives data access only. Alembic uses `MIGRATION_DATABASE_URL`; API and worker use `DATABASE_URL`. Never point either variable at the bootstrap administrator:
+2. Prepare two secrets files and replace every placeholder. `.env.production` contains Compose interpolation values and database role URLs; `.env.application` contains only API/worker settings. Use separate random values for the PostgreSQL bootstrap administrator, migration role, restricted runtime role, backup role, and restore role; API and JWT signing; and a valid Fernet key for integration encryption. URL-encode special characters in the database URLs. Keep JSON-valued settings such as `ALLOWED_ORIGINS` quoted as in the example; quote URLs if encoded values contain shell-sensitive characters. The PostgreSQL init script creates separate `NOSUPERUSER NOBYPASSRLS` migration/runtime roles, a `NOSUPERUSER BYPASSRLS` read-only backup role, and a `NOSUPERUSER BYPASSRLS` restore role that can assume migration ownership. The backup role can read every tenant's database rows and its credential must be available only to the backup operator. The restore role also bypasses RLS and can modify schema/data, so retain it for restore operations only. Alembic receives only `MIGRATION_DATABASE_URL`; API and worker load `.env.application` and use `DATABASE_URL`. Neither privileged backup/restore URL nor database bootstrap credentials are injected into app containers. Scheduled host backups use `BACKUP_DATABASE_URL`; restores use `RESTORE_DATABASE_URL` from the host-only secrets file:
 
    ```bash
    cp .env.production.example .env.production
-   chmod 600 .env.production
-   # Generate secrets, then edit .env.production:
+   cp .env.application.example .env.application
+   chmod 600 .env.production .env.application
+   # Generate secrets, then edit both files:
    openssl rand -hex 32
    python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
    ```
 
-3. Set `ALLOWED_ORIGINS` to the public HTTPS origin. Set `DATABASE_URL` to `POSTGRES_APP_USER` and `MIGRATION_DATABASE_URL` to `POSTGRES_MIGRATION_USER`, both at host `db` with their URL-encoded passwords. Set at least one LLM provider key if workflows need model access. Do not commit `.env.production`.
+3. Set `ALLOWED_ORIGINS` in `.env.application` to the public HTTPS origin. Set its `DATABASE_URL` to `POSTGRES_APP_USER`; set `MIGRATION_DATABASE_URL` in `.env.production` to `POSTGRES_MIGRATION_USER`, both at host `db` with URL-encoded passwords. Set at least one LLM provider key if workflows need model access. Do not commit either secrets file. For a different application env path, set `SOLVYN_APP_ENV_FILE` for Compose.
 4. Start the stack:
 
    ```bash
@@ -172,7 +173,7 @@ The production-oriented stack builds the API and frontend images, runs Alembic m
 
 The workflow scheduler runs in exactly one `worker` service; the API disables its in-process scheduler. Do not scale the worker through this Compose file. The app containers run as non-root. The stack does not create an off-host backup, TLS proxy, firewall, secret manager, or disaster-recovery policy; operators must configure and periodically exercise those controls.
 
-The `docker-entrypoint-initdb.d` role setup runs only when PostgreSQL initializes an empty data directory. For an existing volume, provision separate `NOSUPERUSER NOBYPASSRLS` migration and runtime roles, transfer database, schema, table, and sequence ownership to the migration role, grant the runtime role CRUD and sequence privileges plus default privileges for future tables, and set both database URLs before enabling this migration. Update the role setup on existing Kubernetes volumes as a separate operator migration; init scripts are not replayed for initialized data directories. PostgreSQL superusers always bypass RLS, even when a table uses `FORCE ROW LEVEL SECURITY`.
+The `docker-entrypoint-initdb.d` role setup runs only when PostgreSQL initializes an empty data directory. For an existing volume, provision separate `NOSUPERUSER NOBYPASSRLS` migration/runtime roles plus dedicated backup/restore roles; transfer database, schema, table, and sequence ownership to the migration role and grant the runtime role CRUD and sequence privileges. Give the backup role `CONNECT`, schema `USAGE`, `SELECT` on all tables, `USAGE/SELECT` on all sequences, and matching default privileges for future objects created by the migration role. Give the restore role `BYPASSRLS` and membership in the migration role so it can load all tenant rows and restore object ownership. These roles bypass RLS intentionally: the backup role only reads data, while the restore role can modify schema/data. Compose passes only the explicitly configured database bootstrap values to PostgreSQL and only `MIGRATION_DATABASE_URL` to Alembic; backup and restore URLs remain host-side. Keep backup/restore credentials out of application containers. Set the database role URLs in their designated secrets files before enabling this migration. Update the role setup on existing Kubernetes volumes as a separate operator migration; init scripts are not replayed for initialized data directories. PostgreSQL superusers always bypass RLS, even when a table uses `FORCE ROW LEVEL SECURITY`.
 
 For status and explicitly outstanding product blockers, see [Shipment readiness](./docs/SHIPMENT_READINESS.md).
 
@@ -719,26 +720,47 @@ kubectl create secret tls solvyn-tls \
 # PostgreSQL port published by Compose for host-side backup access.
 set -a && source .env.production && set +a
 umask 077
-backup_database_url="${DATABASE_URL//@db:5432/@127.0.0.1:${POSTGRES_PORT:-5432}}"
+backup_database_url="${BACKUP_DATABASE_URL//@db:5432/@127.0.0.1:${POSTGRES_PORT:-5432}}"
 DATABASE_URL="$backup_database_url" bash scripts/backup-db.sh ./backups
 ```
 
-The backup is a compressed plain-SQL dump. Files are created with owner-only permissions and atomically renamed after `pg_dump` succeeds. S3 upload is disabled unless `S3_BUCKET` is explicitly set; configure and test AWS credentials before enabling it. Copy backups off the application host and define retention/encryption according to your policy.
+The backup is a compressed plain-SQL dump. Files are created with owner-only permissions and atomically renamed after `pg_dump` succeeds. The production stack creates a dedicated `solvyn_backup` role with `BYPASSRLS` and read-only table/sequence grants so `pg_dump` can export all tenant rows; this credential can read all customer data and must be restricted to the backup operator. S3 upload is disabled unless `S3_BUCKET` is explicitly set; configure AWS CLI credentials or a host role and an object-lifecycle retention policy before enabling it.
 
 ### Restore
 
 ```bash
 set -a && source .env.production && set +a
-restore_database_url="${DATABASE_URL//@db:5432/@127.0.0.1:${POSTGRES_PORT:-5432}}"
+restore_database_url="${RESTORE_DATABASE_URL//@db:5432/@127.0.0.1:${POSTGRES_PORT:-5432}}"
 DATABASE_URL="$restore_database_url" bash scripts/restore-db.sh ./backups/solvyn_YYYYMMDDTHHMMSSZ.sql.gz \
   --confirm-database solvyn
 ```
 
-Restore requires both an exact database-name confirmation argument and interactive confirmation. It never drops the database, but SQL may replace existing objects. Restore into a maintenance window or a fresh isolated database, validate the application against it, and preserve the existing database until validation succeeds.
+Restore requires a dedicated `solvyn_restore` role, an exact database-name confirmation argument, and interactive confirmation. This `NOSUPERUSER BYPASSRLS` role is a member of the migration role so it can restore all tenants' rows and assign restored objects to the migration role; keep its credential separate from both the read-only backup role and the application runtime role. The script refuses a target database that already contains user tables, views, or sequences, and it never drops the target database. Create a new empty database, restore there, validate the application against it, and preserve the existing database until validation succeeds.
 
 ### Automated backup scheduling
 
-No backup scheduler is included. Run the backup from a host scheduler or managed backup service, copy it off-host, alert on failures, and test restores regularly. Do not use the example Kubernetes CronJob below as a complete production backup policy without adding retention, off-site storage, encryption, and monitoring.
+The repository includes a host `systemd` timer and a backup/retention wrapper. On the backup host, create a restricted service account and local archive directory, copy `scripts/backup.env.example` to `/etc/solvyn/backup.env`, and install it as `root:solvyn-backup` with mode `0640`. Set `DATABASE_URL` in that file to the dedicated backup role at the loopback-only Compose PostgreSQL port. Set `BACKUP_DIR` and `RETENTION_DAYS`; if using S3, set `S3_BUCKET` and configure credentials accessible to the service account.
+
+Install the unit files after adjusting `/opt/solvyn` and `/var/backups/solvyn` to match the checkout and directory configured above. The `ReadWritePaths` setting must match `BACKUP_DIR`:
+
+```bash
+sudo useradd --system --home /nonexistent --shell /usr/sbin/nologin solvyn-backup
+sudo install -d -o solvyn-backup -g solvyn-backup -m 0700 /var/backups/solvyn
+sudo install -d -m 0700 /etc/solvyn
+sudo install -o root -g solvyn-backup -m 0640 scripts/backup.env.example /etc/solvyn/backup.env
+sudo install -m 0644 scripts/solvyn-backup.service scripts/solvyn-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now solvyn-backup.timer
+sudo systemctl start solvyn-backup.service
+sudo systemctl status solvyn-backup.service solvyn-backup.timer
+gzip -t /var/backups/solvyn/solvyn_*.sql.gz
+```
+
+The timer runs daily at 02:00 local host time, applies a randomized delay of up to 30 minutes, and catches up after downtime. Local archives older than `RETENTION_DAYS` are removed only after a new backup succeeds. Configure a matching S3 object lifecycle policy for remote retention. Alert on failed systemd units and confirm an off-host copy exists. Do not use the example Kubernetes CronJob below as a complete production backup policy without off-site storage, encryption, monitoring, and a tested restore.
+
+### Restore drill
+
+Run a restore drill against an isolated PostgreSQL instance or a newly created staging database, never the production target. Create a fresh empty target database owned by the migration role with the bootstrap administrator, then set `RESTORE_DATABASE_URL` to that target and run `scripts/restore-db.sh` with `--confirm-database` set to its exact name. Type the same exact name at the prompt. The script refuses targets that already contain user relations. After restore, verify the `alembic_version` row, expected application tables, row counts from representative tables, and application readiness with a staging instance pointed at the restored database. Record the archive name, target, elapsed time, and validation outcome. Drop the temporary database only after those checks succeed. Repeat the drill on a schedule appropriate to the recovery objective; no deployment-specific restore drill has been recorded for this repository yet.
 
 ```yaml
 apiVersion: batch/v1

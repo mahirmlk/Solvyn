@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Solvyn PostgreSQL backup daily
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+RandomizedDelaySec=30m
+Persistent=true
+Unit=solvyn-backup.service
+
+[Install]
+WantedBy=timers.target
