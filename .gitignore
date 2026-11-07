@@ -5,6 +5,7 @@ __pycache__/
 .env.*
 !.env.example
 !.env.production.example
+!.env.application.example
 venv/
 .venv/
 dist/

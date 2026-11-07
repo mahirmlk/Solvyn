@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Restore a plain SQL gzip backup into an existing database. No database is dropped.
-# Usage: DATABASE_URL=... ./scripts/restore-db.sh backup.sql.gz --confirm-database solvyn
+# Restore a plain SQL gzip backup into an empty target database. No database is dropped.
+# Usage: DATABASE_URL=... ./scripts/restore-db.sh backup.sql.gz --confirm-database solvyn_restore
 
 if [ "$#" -ne 3 ] || [ "$2" != "--confirm-database" ]; then
   echo "Usage: $0 <backup.sql.gz> --confirm-database <target-database-name>" >&2
@@ -59,7 +59,16 @@ if ! gzip -t -- "$BACKUP_FILE"; then
   exit 1
 fi
 
-echo "This will apply SQL from ${BACKUP_FILE} to database '${DB_PARTS[4]}'. Existing objects may be replaced."
+USER_OBJECT_COUNT="$(psql --host "${DB_PARTS[0]}" --port "${DB_PARTS[1]}" \
+  --username "${DB_PARTS[2]}" --dbname "${DB_PARTS[4]}" --no-password \
+  --tuples-only --no-align --set=ON_ERROR_STOP=1 \
+  --command "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')")"
+if [ "$USER_OBJECT_COUNT" != "0" ]; then
+  echo "Restore target '${DB_PARTS[4]}' contains database objects; restore only into an empty database." >&2
+  exit 1
+fi
+
+echo "This will restore SQL from ${BACKUP_FILE} into empty database '${DB_PARTS[4]}'."
 read -r -p "Type the target database name to continue: " typed_database
 if [ "$typed_database" != "$CONFIRMED_DATABASE" ]; then
   echo "Restore cancelled." >&2

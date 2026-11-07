@@ -12,6 +12,10 @@ services:
       POSTGRES_MIGRATION_PASSWORD: ${POSTGRES_MIGRATION_PASSWORD:?Set POSTGRES_MIGRATION_PASSWORD in .env.production}
       POSTGRES_APP_USER: ${POSTGRES_APP_USER:?Set POSTGRES_APP_USER in .env.production}
       POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD in .env.production}
+      POSTGRES_BACKUP_USER: ${POSTGRES_BACKUP_USER:?Set POSTGRES_BACKUP_USER in .env.production}
+      POSTGRES_BACKUP_PASSWORD: ${POSTGRES_BACKUP_PASSWORD:?Set POSTGRES_BACKUP_PASSWORD in .env.production}
+      POSTGRES_RESTORE_USER: ${POSTGRES_RESTORE_USER:?Set POSTGRES_RESTORE_USER in .env.production}
+      POSTGRES_RESTORE_PASSWORD: ${POSTGRES_RESTORE_PASSWORD:?Set POSTGRES_RESTORE_PASSWORD in .env.production}
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
@@ -51,8 +55,8 @@ services:
       context: .
     image: solvyn-api:local
     restart: "no"
-    env_file: ${SOLVYN_ENV_FILE:-.env.production}
     environment:
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?Set MIGRATION_DATABASE_URL in .env.production}
       ENABLE_WORKFLOW_SCHEDULER: "false"
     command: ["alembic", "upgrade", "head"]
     depends_on:
@@ -69,7 +73,7 @@ services:
       context: .
     image: solvyn-api:local
     restart: unless-stopped
-    env_file: ${SOLVYN_ENV_FILE:-.env.production}
+    env_file: ${SOLVYN_APP_ENV_FILE:-.env.application}
     environment:
       ENABLE_WORKFLOW_SCHEDULER: "false"
       HOST: 0.0.0.0
@@ -108,7 +112,7 @@ services:
       context: .
     image: solvyn-api:local
     restart: unless-stopped
-    env_file: ${SOLVYN_ENV_FILE:-.env.production}
+    env_file: ${SOLVYN_APP_ENV_FILE:-.env.application}
     environment:
       ENABLE_WORKFLOW_SCHEDULER: "true"
       SANDBOX_RUNTIME_TOKEN: ""
