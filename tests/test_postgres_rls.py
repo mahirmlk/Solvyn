@@ -179,6 +179,7 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
         tenant_context.clear()
         async with sessions() as session:
             assert (await session.execute(select(TaskAcceptanceCriterion.id))).scalars().all() == []
+            assert (await session.execute(select(OrchestrationEvent.id))).scalars().all() == []
 
         tenant_context.set(tenant_a, "rls-a")
         async with sessions() as session:
@@ -198,6 +199,71 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
         tenant_context.clear()
         async with sessions() as session:
             assert (await session.execute(select(TaskAcceptanceCriterion.id))).scalars().all() == []
+
+        tenant_context.set(tenant_a, "rls-a")
+        async with sessions() as session:
+            created = (
+                await session.execute(
+                    select(OrchestrationEvent).where(
+                        OrchestrationEvent.entity_type == "acceptance_criterion",
+                        OrchestrationEvent.entity_id == criterion_a,
+                    )
+                )
+            ).scalars().all()
+            assert [(item.event_type, item.status, item.payload["text"]) for item in created] == [
+                ("created", "pending", "criterion")
+            ]
+            actor_id = uuid.uuid4()
+            await session.execute(
+                text("SELECT set_config('app.task_event_actor_user_id', :actor, true)"),
+                {"actor": str(actor_id)},
+            )
+            await session.execute(
+                update(TaskAcceptanceCriterion)
+                .where(TaskAcceptanceCriterion.id == criterion_a)
+                .values(status="accepted", decision_note="Reviewed")
+            )
+            await session.commit()
+            await session.execute(
+                text("DELETE FROM task_acceptance_criteria WHERE id = :id"),
+                {"id": criterion_a},
+            )
+            await session.commit()
+            history = (
+                await session.execute(
+                    select(OrchestrationEvent)
+                    .where(
+                        OrchestrationEvent.entity_type == "acceptance_criterion",
+                        OrchestrationEvent.entity_id == criterion_a,
+                    )
+                    .order_by(OrchestrationEvent.occurred_at, OrchestrationEvent.id)
+                )
+            ).scalars().all()
+            assert [(item.event_type, item.previous_status, item.status) for item in history] == [
+                ("created", None, "pending"),
+                ("status_changed", "pending", "accepted"),
+                ("deleted", "accepted", "deleted"),
+            ]
+            assert history[1].payload["decision_note"] == "Reviewed"
+            assert history[1].payload["previous_text"] == "criterion"
+            assert history[1].payload["previous_decision_note"] is None
+            assert history[1].actor_user_id == actor_id
+            with pytest.raises(DBAPIError):
+                await session.execute(
+                    text(
+                        "INSERT INTO orchestration_events "
+                        "(tenant_id, task_id, entity_type, entity_id, event_type, status, source) "
+                        "VALUES (:tenant_id, :task_id, 'acceptance_criterion', :entity_id, 'created', 'pending', 'test')"
+                    ),
+                    {"tenant_id": tenant_a, "task_id": task_a, "entity_id": uuid.uuid4()},
+                )
+            await session.rollback()
+            with pytest.raises(DBAPIError):
+                await session.execute(
+                    text("DELETE FROM orchestration_events WHERE id = :id"),
+                    {"id": history[0].id},
+                )
+            await session.rollback()
     finally:
         tenant_context.clear()
         async with engine.begin() as connection:
@@ -2042,7 +2108,7 @@ async def test_task_dependency_rls_is_tenant_scoped_and_rejects_cross_tenant_edg
     engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
-    task_a, task_b = uuid.uuid4(), uuid.uuid4()
+    task_a, task_a_other, task_b = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     dependency_a, dependency_b = uuid.uuid4(), uuid.uuid4()
 
     try:
@@ -2071,7 +2137,11 @@ async def test_task_dependency_rls_is_tenant_scoped_and_rejects_cross_tenant_edg
                     {"id": tenant_b, "slug": f"rls-deps-{tenant_b}"},
                 ],
             )
-            for tenant_id, task_id in ((tenant_a, task_a), (tenant_b, task_b)):
+            for tenant_id, task_id in (
+                (tenant_a, task_a),
+                (tenant_a, task_a_other),
+                (tenant_b, task_b),
+            ):
                 await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_id)})
                 await connection.execute(
                     text("INSERT INTO tasks (id, tenant_id, title) VALUES (:id, :tenant_id, 'RLS dependency task')"),
@@ -2113,10 +2183,22 @@ async def test_task_dependency_rls_is_tenant_scoped_and_rejects_cross_tenant_edg
         tenant_context.clear()
         async with sessions() as session:
             assert (await session.execute(select(TaskDependency.id))).scalars().all() == []
+            assert (await session.execute(select(OrchestrationEvent.id))).scalars().all() == []
 
         tenant_context.set(tenant_a, "rls-a")
         async with sessions() as session:
             assert (await session.execute(select(TaskDependency.id))).scalars().all() == [dependency_a]
+            history = (
+                await session.execute(
+                    select(OrchestrationEvent).where(
+                        OrchestrationEvent.entity_type == "dependency",
+                        OrchestrationEvent.entity_id == dependency_a,
+                    )
+                )
+            ).scalars().all()
+            assert [(item.event_type, item.status, item.payload["depends_on_task_id"]) for item in history] == [
+                ("created", "active", str(task_a))
+            ]
             session.add(
                 TaskDependency(
                     id=uuid.uuid4(),
@@ -2141,6 +2223,57 @@ async def test_task_dependency_rls_is_tenant_scoped_and_rejects_cross_tenant_edg
             with pytest.raises(DBAPIError):
                 await session.flush()
             await session.rollback()
+
+        tenant_context.set(tenant_a, "rls-a")
+        async with sessions() as session:
+            await session.execute(
+                text("UPDATE task_dependencies SET depends_on_task_id = :target WHERE id = :id"),
+                {"target": task_a_other, "id": dependency_a},
+            )
+            await session.commit()
+            await session.execute(
+                text("DELETE FROM task_dependencies WHERE id = :id"),
+                {"id": dependency_a},
+            )
+            await session.commit()
+            history = (
+                await session.execute(
+                    select(OrchestrationEvent)
+                    .where(
+                        OrchestrationEvent.entity_type == "dependency",
+                        OrchestrationEvent.entity_id == dependency_a,
+                    )
+                    .order_by(OrchestrationEvent.occurred_at, OrchestrationEvent.id)
+                )
+            ).scalars().all()
+            assert [(item.event_type, item.status, item.previous_status) for item in history] == [
+                ("created", "active", None),
+                ("updated", "active", "active"),
+                ("deleted", "deleted", "active"),
+            ]
+            assert history[1].payload == {
+                "depends_on_task_id": str(task_a_other),
+                "previous_task_id": None,
+                "previous_depends_on_task_id": str(task_a),
+            }
+            with pytest.raises(DBAPIError):
+                await session.execute(
+                    text("UPDATE orchestration_events SET status = 'tampered' WHERE id = :id"),
+                    {"id": history[0].id},
+                )
+            await session.rollback()
+
+        tenant_context.set(tenant_b, "rls-b")
+        async with sessions() as session:
+            history_b = (
+                await session.execute(
+                    select(OrchestrationEvent).where(
+                        OrchestrationEvent.entity_type == "dependency",
+                        OrchestrationEvent.entity_id == dependency_b,
+                    )
+                )
+            ).scalars().all()
+            assert [(item.event_type, item.status) for item in history_b] == [("created", "active")]
     finally:
         tenant_context.clear()
         async with engine.begin() as connection:
@@ -2148,7 +2281,11 @@ async def test_task_dependency_rls_is_tenant_scoped_and_rejects_cross_tenant_edg
             await connection.execute(text("DELETE FROM task_dependencies WHERE id = :id"), {"id": dependency_a})
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
             await connection.execute(text("DELETE FROM task_dependencies WHERE id = :id"), {"id": dependency_b})
-            for tenant_id, task_id in ((tenant_a, task_a), (tenant_b, task_b)):
+            for tenant_id, task_id in (
+                (tenant_a, task_a),
+                (tenant_a, task_a_other),
+                (tenant_b, task_b),
+            ):
                 await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_id)})
                 await connection.execute(text("DELETE FROM tasks WHERE id = :id"), {"id": task_id})
             await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})

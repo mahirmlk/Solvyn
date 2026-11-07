@@ -158,6 +158,24 @@ export default function TaskDeliveryReviewPage() {
                   {event.type === "delivery" && event.details.branch && <p className={styles.muted}>Branch <code>{event.details.branch}</code></p>}
                   {event.type === "handoff" && event.details.reason && <p className={styles.muted}>{event.details.reason}</p>}
                   {event.type === "approval" && event.details.decision_note && <p className={styles.muted}>{event.details.decision_note}</p>}
+                  {event.type === "orchestration_transition" && event.details.payload?.text && (
+                    <p className={styles.muted}>{event.details.payload.text}</p>
+                  )}
+                  {event.type === "orchestration_transition" && event.details.payload?.previous_text && (
+                    <p className={styles.muted}>Previously: {event.details.payload.previous_text}</p>
+                  )}
+                  {event.type === "orchestration_transition" && event.details.payload?.decision_note && (
+                    <p className={styles.muted}>{event.details.payload.decision_note}</p>
+                  )}
+                  {event.type === "orchestration_transition" && event.details.payload?.previous_decision_note && (
+                    <p className={styles.muted}>Previous decision note: {event.details.payload.previous_decision_note}</p>
+                  )}
+                  {event.type === "orchestration_transition" && event.details.payload?.depends_on_task_id && (
+                    <p className={styles.muted}>Depends on task <code>{event.details.payload.depends_on_task_id}</code></p>
+                  )}
+                  {event.type === "orchestration_transition" && event.details.payload?.previous_depends_on_task_id && (
+                    <p className={styles.muted}>Previously depended on task <code>{event.details.payload.previous_depends_on_task_id}</code></p>
+                  )}
                   {event.type === "delivery" && pullRequest && (
                     <p className={styles.muted}>
                       {pullRequest.availability === "current" && pullRequest.review_status
