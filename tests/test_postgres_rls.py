@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 import os
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 from sqlalchemy import select, text, update
@@ -2412,6 +2421,7 @@ async def test_task_dependency_rls_is_tenant_scoped_and_rejects_cross_tenant_edg
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="Process-level worker recovery test requires POSIX signal handling")
 async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2429,6 +2439,7 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
     task_a, task_b = uuid.uuid4(), uuid.uuid4()
     workspace_a, workspace_b = uuid.uuid4(), uuid.uuid4()
     run_a, run_b, run_exhausted, run_approved_a, run_approved_b = (uuid.uuid4() for _ in range(5))
+    restart_run_id, restart_approval_id = uuid.uuid4(), uuid.uuid4()
     handoff_a, handoff_b = uuid.uuid4(), uuid.uuid4()
     approval_a, approval_b, approval_approved_a, approval_approved_b = (uuid.uuid4() for _ in range(4))
     stale_started_at = datetime.now(UTC) - timedelta(minutes=20)
@@ -2867,10 +2878,301 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                 assert run_state == ("passed", 1, None, None)
                 assert approval_status == "consumed"
                 assert attempt_statuses == ["passed"]
+
+        # Validate recovery through a fresh scheduler process, not an in-process
+        # call to the claim helper. The first worker is killed while its remote
+        # sandbox request is in flight; two new workers then compete to resume it.
+        from solvyn.sandbox.workspaces import WorkspaceManager
+
+        tenant_context.clear()
+        with tempfile.TemporaryDirectory(prefix="solvyn-worker-restart-") as workspace_root_name:
+            workspace_root = Path(workspace_root_name)
+            (workspace_root / str(workspace_a)).mkdir()
+            workspace_manager = WorkspaceManager(workspace_root)
+            workspace = workspace_manager.get(workspace_a)
+            source_digest = workspace_manager.fingerprint(workspace)
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(tenant_a)},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO verification_runs "
+                        "(id, tenant_id, task_id, workspace_id, kind, command, status, runner_version, source_digest) "
+                        "VALUES (:id, :tenant_id, :task_id, :workspace_id, 'test', :command, 'approved', "
+                        "'sandbox-service/1', :source_digest)"
+                    ),
+                    {
+                        "id": restart_run_id,
+                        "tenant_id": tenant_a,
+                        "task_id": task_a,
+                        "workspace_id": workspace_a,
+                        "command": json.dumps(["python", "-c", "pass"]),
+                        "source_digest": source_digest,
+                    },
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO approvals "
+                        "(id, organization_id, project_id, teammate_id, task_handoff_id, verification_run_id, "
+                        "kind, summary, status, requested_by) "
+                        "VALUES (:id, :organization_id, :project_id, :teammate_id, :handoff_id, :run_id, "
+                        "'verification', 'Process restart recovery', 'approved', 'owner')"
+                    ),
+                    {
+                        "id": restart_approval_id,
+                        "organization_id": org_a,
+                        "project_id": project_a,
+                        "teammate_id": teammate_a,
+                        "handoff_id": handoff_a,
+                        "run_id": restart_run_id,
+                    },
+                )
+
+            requests: list[dict[str, object]] = []
+            requests_lock = threading.Lock()
+            initial_request_started = threading.Event()
+            recovery_request_started = threading.Event()
+            release_initial_request = threading.Event()
+            release_recovery_request = threading.Event()
+
+            class BlockingSandboxHandler(BaseHTTPRequestHandler):
+                def do_POST(self) -> None:
+                    if self.path != "/v1/runs" or self.headers.get("Authorization") != "Bearer restart-test-token":
+                        self.send_error(401)
+                        return
+                    try:
+                        content_length = int(self.headers.get("content-length", "0"))
+                        payload = json.loads(self.rfile.read(content_length))
+                    except (ValueError, json.JSONDecodeError):
+                        self.send_error(400)
+                        return
+                    with requests_lock:
+                        requests.append(payload)
+                        request_number = len(requests)
+                    if request_number == 1:
+                        initial_request_started.set()
+                        release_initial_request.wait(45)
+                    else:
+                        recovery_request_started.set()
+                        release_recovery_request.wait(45)
+                    response = json.dumps(
+                        {
+                            "workspace_id": payload.get("workspace_id"),
+                            "result": {
+                                "run_id": f"restart-check-{request_number}",
+                                "command": payload.get("command"),
+                                "exit_code": 0,
+                                "timed_out": False,
+                                "stdout": "recovered",
+                                "stderr": "",
+                                "output_truncated": False,
+                                "duration_seconds": 0.01,
+                            },
+                        }
+                    ).encode()
+                    try:
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(response)))
+                        self.end_headers()
+                        self.wfile.write(response)
+                    except (BrokenPipeError, ConnectionResetError):
+                        # The first worker is deliberately killed with this request open.
+                        pass
+
+                def log_message(self, _format: str, *_args: object) -> None:
+                    return
+
+            sandbox_server = ThreadingHTTPServer(("127.0.0.1", 0), BlockingSandboxHandler)
+            sandbox_server.daemon_threads = True
+            server_thread = threading.Thread(target=sandbox_server.serve_forever, daemon=True)
+            server_thread.start()
+            worker_processes: list[subprocess.Popen[bytes]] = []
+            worker_log_paths: list[Path] = []
+            worker_log_streams: list[object] = []
+            worker_environment = os.environ.copy()
+            worker_environment.update(
+                {
+                    "ALLOW_INSECURE_DEV": "true",
+                    "API_KEY_SECRET": "worker-restart-test-api-secret",
+                    "JWT_SECRET": "worker-restart-test-jwt-secret",
+                    "SANDBOX_RUNTIME_URL": f"http://127.0.0.1:{sandbox_server.server_port}",
+                    "SANDBOX_RUNTIME_TOKEN": "restart-test-token",
+                    "SANDBOX_WORKSPACE_ROOT": str(workspace_root),
+                }
+            )
+
+            async def wait_for_event(
+                event: threading.Event,
+                processes: list[subprocess.Popen[bytes]],
+                timeout_seconds: float = 30,
+            ) -> None:
+                deadline = time.monotonic() + timeout_seconds
+                while not event.is_set():
+                    if any(process.poll() is not None for process in processes):
+                        log_output = "\n".join(path.read_text(encoding="utf-8") for path in worker_log_paths)
+                        raise AssertionError(f"Scheduler worker exited before reaching sandbox: {log_output}")
+                    if time.monotonic() >= deadline:
+                        raise AssertionError("Timed out waiting for a scheduler sandbox request")
+                    await asyncio.sleep(0.1)
+
+            async def read_restart_run() -> tuple[str, int, str, str | None]:
+                async with engine.begin() as connection:
+                    await connection.execute(
+                        text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                        {"tenant_id": str(tenant_a)},
+                    )
+                    row = (
+                        await connection.execute(
+                            text(
+                                "SELECT status, attempt_count, stdout, lease_owner "
+                                "FROM verification_runs WHERE id = :id"
+                            ),
+                            {"id": restart_run_id},
+                        )
+                    ).one()
+                    return row.status, row.attempt_count, row.stdout, str(row.lease_owner) if row.lease_owner else None
+
+            async def wait_for_restart_status(expected_status: str, expected_attempts: int) -> tuple[str, int, str, str | None]:
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    state = await read_restart_run()
+                    if state[:2] == (expected_status, expected_attempts):
+                        return state
+                    await asyncio.sleep(0.1)
+                raise AssertionError(f"Verification did not reach {expected_status}/{expected_attempts}; last state: {state}")
+
+            async def wait_for_worker_heartbeats(started_after: datetime) -> None:
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    async with engine.begin() as connection:
+                        heartbeat_count = (
+                            await connection.execute(
+                                text(
+                                    "SELECT count(*) FROM workflow_worker_heartbeats "
+                                    "WHERE worker_name = 'workflow-scheduler' AND status = 'running' "
+                                    "AND started_at >= :started_after"
+                                ),
+                                {"started_after": started_after},
+                            )
+                        ).scalar_one()
+                    if heartbeat_count >= 2:
+                        return
+                    if any(process.poll() is not None for process in worker_processes[1:]):
+                        log_output = "\n".join(path.read_text(encoding="utf-8") for path in worker_log_paths)
+                        raise AssertionError(f"A recovery worker exited before starting: {log_output}")
+                    await asyncio.sleep(0.1)
+                raise AssertionError("Timed out waiting for both recovery worker heartbeats")
+
+            try:
+                first_log_path = workspace_root / "worker-first.log"
+                first_log = first_log_path.open("wb")
+                worker_log_paths.append(first_log_path)
+                worker_log_streams.append(first_log)
+                first_worker = subprocess.Popen(
+                    [sys.executable, "-m", "solvyn.worker"],
+                    cwd=Path(__file__).resolve().parents[1],
+                    env=worker_environment,
+                    stdout=first_log,
+                    stderr=subprocess.STDOUT,
+                )
+                worker_processes.append(first_worker)
+                await wait_for_event(initial_request_started, [first_worker])
+                first_state = await wait_for_restart_status("running", 1)
+                assert first_state[3] is not None
+
+                first_worker.kill()
+                first_worker.wait(timeout=10)
+                release_initial_request.set()
+                async with engine.begin() as connection:
+                    await connection.execute(
+                        text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                        {"tenant_id": str(tenant_a)},
+                    )
+                    await connection.execute(
+                        text(
+                            "UPDATE verification_runs SET attempt_started_at = now() - interval '20 minutes', "
+                            "lease_expires_at = now() - interval '10 minutes' WHERE id = :id"
+                        ),
+                        {"id": restart_run_id},
+                    )
+
+                recovery_workers_started_after = datetime.now(UTC)
+                for index in range(2):
+                    worker_log_path = workspace_root / f"worker-recovery-{index}.log"
+                    worker_log = worker_log_path.open("wb")
+                    worker_log_paths.append(worker_log_path)
+                    worker_log_streams.append(worker_log)
+                    worker_process = subprocess.Popen(
+                        [sys.executable, "-m", "solvyn.worker"],
+                        cwd=Path(__file__).resolve().parents[1],
+                        env=worker_environment,
+                        stdout=worker_log,
+                        stderr=subprocess.STDOUT,
+                    )
+                    worker_processes.append(worker_process)
+
+                await wait_for_worker_heartbeats(recovery_workers_started_after)
+                await wait_for_event(recovery_request_started, worker_processes[1:])
+                assert len(requests) == 2
+                # Keep the claimed run in flight for one poll interval so the
+                # competing process gets a chance to discover, but not duplicate, it.
+                await asyncio.sleep(6)
+                assert len(requests) == 2
+                release_recovery_request.set()
+                final_state = await wait_for_restart_status("passed", 2)
+                assert final_state == ("passed", 2, "recovered", None)
+                await asyncio.sleep(6)
+                assert len(requests) == 2
+                assert all(request["workspace_id"] == str(workspace_a) for request in requests)
+                assert all(request["command"] == ["python", "-c", "pass"] for request in requests)
+                tenant_context.set(tenant_a, "restart-evidence")
+                async with sessions() as session:
+                    approval_status = (
+                        await session.execute(
+                            select(Approval.status).where(Approval.id == restart_approval_id)
+                        )
+                    ).scalar_one()
+                    attempt_history = (
+                        await session.execute(
+                            select(VerificationAttemptEvent.event_type, VerificationAttemptEvent.status)
+                            .where(VerificationAttemptEvent.verification_run_id == restart_run_id)
+                            .order_by(VerificationAttemptEvent.occurred_at, VerificationAttemptEvent.id)
+                        )
+                    ).all()
+                assert approval_status == "consumed"
+                assert set(attempt_history) == {
+                    ("started", "running"),
+                    ("finished", "interrupted"),
+                    ("started", "running"),
+                    ("finished", "passed"),
+                }
+            finally:
+                release_initial_request.set()
+                release_recovery_request.set()
+                for worker_process in worker_processes:
+                    if worker_process.poll() is None:
+                        worker_process.send_signal(signal.SIGINT)
+                for worker_process in worker_processes:
+                    if worker_process.poll() is None:
+                        try:
+                            worker_process.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            worker_process.kill()
+                            worker_process.wait(timeout=10)
+                sandbox_server.shutdown()
+                sandbox_server.server_close()
+                server_thread.join(timeout=5)
+                for worker_log in worker_log_streams:
+                    worker_log.close()
     finally:
         tenant_context.clear()
         async with engine.begin() as connection:
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
+            await connection.execute(text("DELETE FROM approvals WHERE id = :id"), {"id": restart_approval_id})
+            await connection.execute(text("DELETE FROM verification_runs WHERE id = :id"), {"id": restart_run_id})
             await connection.execute(text("DELETE FROM approvals WHERE id = :id"), {"id": approval_a})
             await connection.execute(text("DELETE FROM approvals WHERE id = :id"), {"id": approval_approved_a})
             await connection.execute(text("DELETE FROM verification_runs WHERE id = :id"), {"id": run_a})
