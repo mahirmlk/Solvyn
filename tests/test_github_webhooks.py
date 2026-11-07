@@ -595,7 +595,7 @@ async def test_unsupported_signed_event_is_ignored_without_database_access() -> 
     db = AsyncMock()
     with patch("solvyn.api.v1.webhooks.settings.github_webhook_secret", "webhook-secret"):
         result = await receive_github_webhook(
-            _request(body, event="issues", signature=_signature("webhook-secret", body)),
+            _request(body, event="push", signature=_signature("webhook-secret", body)),
             db=db,
         )
     assert result == {"accepted": True, "ignored": True, "reason": "unsupported_event"}
