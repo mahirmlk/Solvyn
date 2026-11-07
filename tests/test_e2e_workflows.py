@@ -103,7 +103,7 @@ def low_rate_limit() -> Any:
     try:
         yield redis_rate_limiter
     finally:
-        redis_rate_limiter.configure(ip_limit=100, tenant_limit=1000, window_seconds=60)
+        redis_rate_limiter.configure(ip_limit=5000, tenant_limit=5000, window_seconds=60)
         redis_rate_limiter._fallback_buckets.clear()
         _clear_ratelimit_keys()
 
