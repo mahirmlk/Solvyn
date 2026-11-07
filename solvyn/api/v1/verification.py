@@ -34,6 +34,7 @@ from solvyn.db.models import (
     TaskWorkspace,
     TeammateToolInvocation,
     User,
+    VerificationAttemptEvent,
     VerificationRun,
 )
 from solvyn.db.session import bind_tenant_scope, get_session
@@ -501,7 +502,59 @@ async def _verification_history_for_task(
             .order_by(VerificationRun.started_at, VerificationRun.id)
         )
     ).scalars().all()
-    return _verification_history(list(runs))
+    evidence = _verification_history(list(runs))
+    if not runs:
+        return evidence
+    attempt_events = (
+        await db.execute(
+            select(VerificationAttemptEvent)
+            .where(
+                VerificationAttemptEvent.tenant_id == tenant_id,
+                VerificationAttemptEvent.task_id == task_id,
+            )
+            .order_by(
+                VerificationAttemptEvent.verification_run_id,
+                VerificationAttemptEvent.attempt_number,
+                VerificationAttemptEvent.occurred_at,
+                VerificationAttemptEvent.id,
+            )
+            .limit(1001)
+        )
+    ).scalars().all()
+    by_run: dict[uuid.UUID, list[dict[str, Any]]] = {}
+    for event in attempt_events[:1000]:
+        by_run.setdefault(event.verification_run_id, []).append(
+            _verification_attempt_event_dict(event, include_output=False)
+        )
+    attempt_history_truncated = len(attempt_events) > 1000
+    for item in evidence:
+        run_id = uuid.UUID(item["id"])
+        item["attempt_history"] = by_run.get(run_id, [])
+        item["attempt_history_truncated"] = attempt_history_truncated
+    return evidence
+
+
+def _verification_attempt_event_dict(
+    event: VerificationAttemptEvent,
+    *,
+    include_output: bool = True,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "id": str(event.id),
+        "attempt_number": event.attempt_number,
+        "event_type": event.event_type,
+        "status": event.status,
+        "exit_code": event.exit_code,
+        "timed_out": event.timed_out,
+        "output_truncated": event.output_truncated,
+        "error": event.error if include_output else (event.error[:1000] if event.error else None),
+        "duration_seconds": float(event.duration_seconds) if event.duration_seconds is not None else None,
+        "occurred_at": event.occurred_at.isoformat() if event.occurred_at else None,
+    }
+    if include_output:
+        result["stdout"] = event.stdout
+        result["stderr"] = event.stderr
+    return result
 
 
 def _criterion_dict(criterion: TaskAcceptanceCriterion) -> dict[str, Any]:
@@ -983,6 +1036,45 @@ async def list_task_verification_runs(
     }
 
 
+@router.get("/verification-runs/{verification_run_id}/attempts", summary="List immutable verification attempt evidence")
+async def list_verification_attempt_events(
+    execution_id: uuid.UUID,
+    task_id: uuid.UUID,
+    verification_run_id: uuid.UUID,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    task = await _owned_task(execution_id, task_id, db)
+    run = (
+        await db.execute(
+            select(VerificationRun).where(
+                VerificationRun.id == verification_run_id,
+                VerificationRun.tenant_id == task.tenant_id,
+                VerificationRun.task_id == task.id,
+                VerificationRun.execution_id == execution_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status_code=404, detail="Verification request not found")
+    rows = (
+        await db.execute(
+            select(VerificationAttemptEvent)
+            .where(
+                VerificationAttemptEvent.tenant_id == task.tenant_id,
+                VerificationAttemptEvent.task_id == task.id,
+                VerificationAttemptEvent.verification_run_id == run.id,
+            )
+            .order_by(VerificationAttemptEvent.attempt_number, VerificationAttemptEvent.occurred_at, VerificationAttemptEvent.id)
+            .limit(21)
+        )
+    ).scalars().all()
+    return {
+        "verification_run_id": str(run.id),
+        "attempts": [_verification_attempt_event_dict(event) for event in rows[:20]],
+        "truncated": len(rows) > 20,
+    }
+
+
 @router.get("/tool-invocations", summary="List task-scoped teammate tool audit records")
 async def list_task_tool_invocations(
     execution_id: uuid.UUID,
@@ -1201,6 +1293,17 @@ async def list_task_activity(
             .limit(_ACTIVITY_SOURCE_LIMIT + 1)
         )
     ).scalars().all()
+    attempt_events = (
+        await db.execute(
+            select(VerificationAttemptEvent)
+            .where(
+                VerificationAttemptEvent.tenant_id == task.tenant_id,
+                VerificationAttemptEvent.task_id.in_(task_ids),
+            )
+            .order_by(VerificationAttemptEvent.occurred_at.desc(), VerificationAttemptEvent.id.desc())
+            .limit(_ACTIVITY_SOURCE_LIMIT + 1)
+        )
+    ).scalars().all()
     deliveries = (
         await db.execute(
             select(TaskDelivery)
@@ -1254,11 +1357,12 @@ async def list_task_activity(
 
     source_truncated = any(
         len(records) > _ACTIVITY_SOURCE_LIMIT
-        for records in (invocations, runs, deliveries, handoffs, approvals, task_events)
+        for records in (invocations, runs, attempt_events, deliveries, handoffs, approvals, task_events)
     )
     source_truncated = source_truncated or tree_truncated
     invocations = invocations[:_ACTIVITY_SOURCE_LIMIT]
     runs = runs[:_ACTIVITY_SOURCE_LIMIT]
+    attempt_events = attempt_events[:_ACTIVITY_SOURCE_LIMIT]
     deliveries = deliveries[:_ACTIVITY_SOURCE_LIMIT]
     handoffs = handoffs[:_ACTIVITY_SOURCE_LIMIT]
     approvals = approvals[:_ACTIVITY_SOURCE_LIMIT]
@@ -1321,6 +1425,37 @@ async def list_task_activity(
                 "timestamp": _activity_timestamp(run.completed_at or run.started_at),
                 "summary": f"{task_prefix(run.task_id)}{run.kind.title()} verification {run.status.replace('_', ' ')}",
                 "details": {"task_id": str(run.task_id), "exit_code": run.exit_code, "timed_out": run.timed_out},
+            }
+        )
+    for attempt in attempt_events:
+        prefix = task_prefix(attempt.task_id)
+        if attempt.event_type == "snapshot":
+            summary = f"{prefix}Verification result snapshot: {attempt.status.replace('_', ' ')}"
+        elif attempt.event_type == "started":
+            summary = f"{prefix}Verification attempt {attempt.attempt_number} started"
+        else:
+            summary = (
+                f"{prefix}Verification attempt {attempt.attempt_number} "
+                f"{attempt.status.replace('_', ' ')}"
+            )
+        events.append(
+            {
+                "id": f"verification_attempt:{attempt.id}",
+                "type": "verification_attempt",
+                "status": attempt.status,
+                "timestamp": _activity_timestamp(attempt.occurred_at),
+                "summary": summary,
+                "details": {
+                    "task_id": str(attempt.task_id),
+                    "verification_run_id": str(attempt.verification_run_id),
+                    "verification_kind": attempt.verification_kind,
+                    "attempt_number": attempt.attempt_number,
+                    "event_type": attempt.event_type,
+                    "exit_code": attempt.exit_code,
+                    "timed_out": attempt.timed_out,
+                    "output_truncated": attempt.output_truncated,
+                    "error": attempt.error[:1000] if attempt.error else None,
+                },
             }
         )
     for delivery in deliveries:

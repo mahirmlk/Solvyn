@@ -416,6 +416,23 @@ async def test_task_verification_is_sandboxed_and_durable(
     assert recovered_run is not None
     assert recovered_run.status == "passed"
     assert recovered_run.attempt_count == 2
+    attempt_history = await client.get(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs"
+    )
+    recovered_evidence = next(
+        item for item in attempt_history.json()["verification_runs"] if item["id"] == str(late_run_id)
+    )
+    assert [event["event_type"] for event in recovered_evidence["attempt_history"]] == [
+        "started", "finished", "started", "finished",
+    ]
+    assert [event["status"] for event in recovered_evidence["attempt_history"]] == [
+        "running", "interrupted", "running", "passed",
+    ]
+    attempt_output = await client.get(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs/{late_run_id}/attempts"
+    )
+    assert attempt_output.status_code == 200
+    assert attempt_output.json()["attempts"][-1]["stdout"] == "1 passed"
 
     rejected_request = await client.post(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs",
