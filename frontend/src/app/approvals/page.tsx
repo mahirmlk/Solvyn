@@ -37,6 +37,9 @@ export default function ApprovalsPage() {
   const [loading, setLoading] = useState(true);
   const [busyApprovalId, setBusyApprovalId] = useState<string | null>(null);
   const [busyRunApprovalId, setBusyRunApprovalId] = useState<string | null>(null);
+  const [openHistoryId, setOpenHistoryId] = useState<string | null>(null);
+  const [historyLoadingId, setHistoryLoadingId] = useState<string | null>(null);
+  const [historyByApproval, setHistoryByApproval] = useState<Record<string, NonNullable<ApprovalInfo["history"]>>>({});
   const [executionMessage, setExecutionMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -60,6 +63,12 @@ export default function ApprovalsPage() {
     setBusyApprovalId(approval.id);
     try {
       await api.decideApproval(approval.id, decision, notes[approval.id]?.trim() || "");
+      setHistoryByApproval((current) => {
+        const next = { ...current };
+        delete next[approval.id];
+        return next;
+      });
+      setOpenHistoryId((current) => (current === approval.id ? null : current));
       setNotes((current) => {
         const next = { ...current };
         delete next[approval.id];
@@ -86,6 +95,25 @@ export default function ApprovalsPage() {
       setError(reason instanceof Error ? reason.message : "Could not run the approved verification.");
     } finally {
       setBusyRunApprovalId(null);
+    }
+  }
+
+  async function toggleHistory(approvalId: string) {
+    if (openHistoryId === approvalId) {
+      setOpenHistoryId(null);
+      return;
+    }
+    setOpenHistoryId(approvalId);
+    if (historyByApproval[approvalId]) return;
+    setHistoryLoadingId(approvalId);
+    try {
+      const approval = await api.getApproval(approvalId);
+      setHistoryByApproval((current) => ({ ...current, [approvalId]: approval.history || [] }));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not load approval history.");
+      setOpenHistoryId(null);
+    } finally {
+      setHistoryLoadingId(null);
     }
   }
 
@@ -137,6 +165,37 @@ export default function ApprovalsPage() {
               {approval.teammate_id && <div><dt>Teammate</dt><dd className="mono">{approval.teammate_id.slice(0, 8)}</dd></div>}
               {approval.task_handoff_id && <div><dt>Task handoff</dt><dd className="mono">{approval.task_handoff_id.slice(0, 8)}</dd></div>}
             </dl>
+            <button
+              className="action-button secondary"
+              onClick={() => void toggleHistory(approval.id)}
+              type="button"
+            >
+              {historyLoadingId === approval.id
+                ? "Loading history…"
+                : openHistoryId === approval.id
+                  ? "Hide history"
+                  : "View history"}
+            </button>
+            {openHistoryId === approval.id && (
+              <section className={styles.decisionNote} aria-label="Approval transition history">
+                <strong>Approval history</strong>
+                {(historyByApproval[approval.id] || []).length > 0 ? (
+                  <ol>
+                    {(historyByApproval[approval.id] || []).map((event, index) => (
+                      <li key={`${event.event_type}-${event.occurred_at}-${index}`}>
+                        {event.event_type === "created"
+                          ? `Requested as ${event.status.replaceAll("_", " ")}`
+                          : `${event.previous_status?.replaceAll("_", " ") || "Unknown"} → ${event.status.replaceAll("_", " ")}`}
+                        {" · "}{new Date(event.occurred_at).toLocaleString()}
+                        {event.actor_user_id && <span> · actor {event.actor_user_id.slice(0, 8)}</span>}
+                      </li>
+                    ))}
+                  </ol>
+                ) : (
+                  <p>No transition history is available for this approval.</p>
+                )}
+              </section>
+            )}
             {details && (
               <section className={styles.decisionNote} aria-label="Approved verification details">
                 <strong>Verification request · {details.kind}</strong>

@@ -22,6 +22,7 @@ from solvyn.api.v1.repositories import _load_authorized_repository
 from solvyn.config import settings
 from solvyn.db.models import (
     Approval,
+    OrchestrationEvent,
     Organization,
     OrganizationMembership,
     Project,
@@ -1517,6 +1518,17 @@ async def list_task_activity(
             .limit(_ACTIVITY_SOURCE_LIMIT + 1)
         )
     ).scalars().all()
+    orchestration_events = (
+        await db.execute(
+            select(OrchestrationEvent)
+            .where(
+                OrchestrationEvent.tenant_id == task.tenant_id,
+                OrchestrationEvent.task_id.in_(task_ids),
+            )
+            .order_by(OrchestrationEvent.occurred_at.desc(), OrchestrationEvent.id.desc())
+            .limit(_ACTIVITY_SOURCE_LIMIT + 1)
+        )
+    ).scalars().all()
 
     handoff_ids = [item.id for item in handoffs]
     run_ids = [item.id for item in runs]
@@ -1543,7 +1555,16 @@ async def list_task_activity(
 
     source_truncated = any(
         len(records) > _ACTIVITY_SOURCE_LIMIT
-        for records in (invocations, runs, attempt_events, deliveries, handoffs, approvals, task_events)
+        for records in (
+            invocations,
+            runs,
+            attempt_events,
+            deliveries,
+            handoffs,
+            approvals,
+            task_events,
+            orchestration_events,
+        )
     )
     source_truncated = source_truncated or tree_truncated
     invocations = invocations[:_ACTIVITY_SOURCE_LIMIT]
@@ -1553,6 +1574,7 @@ async def list_task_activity(
     handoffs = handoffs[:_ACTIVITY_SOURCE_LIMIT]
     approvals = approvals[:_ACTIVITY_SOURCE_LIMIT]
     task_events = task_events[:_ACTIVITY_SOURCE_LIMIT]
+    orchestration_events = orchestration_events[:_ACTIVITY_SOURCE_LIMIT]
 
     root_deliveries = [delivery for delivery in deliveries if delivery.task_id == task.id]
     live_pr_statuses = await _refresh_task_pull_request_statuses(db, task, root_deliveries)
@@ -1584,6 +1606,37 @@ async def list_task_activity(
                     "parent_task_id": str(task_event.parent_task_id) if task_event.parent_task_id else None,
                     "source": task_event.source,
                     "actor_user_id": str(task_event.actor_user_id) if task_event.actor_user_id else None,
+                },
+            }
+        )
+    for transition in orchestration_events:
+        previous = transition.previous_status or "none"
+        entity_name = "Approval" if transition.entity_type == "approval" else "Task handoff"
+        transition_task_id = transition.task_id
+        prefix = task_prefix(transition_task_id) if transition_task_id is not None else ""
+        if transition.event_type == "created":
+            summary = f"{prefix}{entity_name} created as {transition.status.replace('_', ' ')}"
+        else:
+            summary = (
+                f"{prefix}{entity_name} changed from "
+                f"{previous.replace('_', ' ')} to {transition.status.replace('_', ' ')}"
+            )
+        events.append(
+            {
+                "id": f"orchestration:{transition.id}",
+                "type": "orchestration_transition",
+                "status": transition.status,
+                "timestamp": _activity_timestamp(transition.occurred_at),
+                "summary": summary,
+                "details": {
+                    "task_id": str(transition_task_id) if transition_task_id else None,
+                    "execution_id": str(transition.execution_id) if transition.execution_id else None,
+                    "entity_type": transition.entity_type,
+                    "entity_id": str(transition.entity_id),
+                    "event_type": transition.event_type,
+                    "previous_status": transition.previous_status,
+                    "source": transition.source,
+                    "actor_user_id": str(transition.actor_user_id) if transition.actor_user_id else None,
                 },
             }
         )
@@ -1679,7 +1732,10 @@ async def list_task_activity(
                 "type": "handoff",
                 "status": handoff.status,
                 "timestamp": _activity_timestamp(handoff.completed_at or handoff.created_at),
-                "summary": f"{task_prefix(related_task_id)}Task {direction} by {handoff.delegated_to}",
+                "summary": (
+                    f"{task_prefix(related_task_id)}Current handoff status: "
+                    f"{handoff.status.replace('_', ' ')} (task {direction} by {handoff.delegated_to})"
+                ),
                 "details": {
                     "task_id": str(related_task_id),
                     "parent_task_id": str(handoff.parent_task_id),
@@ -1708,7 +1764,10 @@ async def list_task_activity(
                 "type": "approval",
                 "status": approval.status,
                 "timestamp": _activity_timestamp(approval.decided_at or approval.updated_at or approval.created_at),
-                "summary": f"{prefix}{approval.kind.replace('_', ' ').title()} approval {approval.status.replace('_', ' ')}",
+                "summary": (
+                    f"{prefix}Current {approval.kind.replace('_', ' ')} approval status: "
+                    f"{approval.status.replace('_', ' ')}"
+                ),
                 "details": {
                     "task_id": str(approval_task_id) if approval_task_id is not None else None,
                     "summary": approval.summary[:1000],

@@ -175,6 +175,40 @@ class TaskEvent(Base):
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class OrchestrationEvent(Base):
+    """Append-only approval and handoff lifecycle transitions."""
+
+    __tablename__ = "orchestration_events"
+    __table_args__ = (
+        CheckConstraint("entity_type IN ('approval', 'handoff')", name="ck_orchestration_events_entity_type"),
+        CheckConstraint("event_type IN ('created', 'status_changed')", name="ck_orchestration_events_event_type"),
+        Index("ix_orchestration_events_tenant_task_time", "tenant_id", "task_id", "occurred_at", "id"),
+        Index(
+            "ix_orchestration_events_tenant_entity_time",
+            "tenant_id",
+            "entity_type",
+            "entity_id",
+            "occurred_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # Historical references intentionally have no foreign keys so events
+    # survive deletion of their task, approval, handoff, or tenant.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    task_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    execution_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    entity_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    entity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    previous_status: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class TaskWorkspace(Base):
     """Server-managed isolated source tree owned by one tenant task."""
 

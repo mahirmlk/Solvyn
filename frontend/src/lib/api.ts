@@ -195,6 +195,16 @@ export interface ApprovalInfo {
   decision_note: string;
   created_at: string;
   updated_at: string;
+  history?: ApprovalHistoryEvent[];
+}
+
+export interface ApprovalHistoryEvent {
+  event_type: "created" | "status_changed";
+  previous_status: string | null;
+  status: string;
+  source: string;
+  actor_user_id: string | null;
+  occurred_at: string;
 }
 
 export interface WorkflowTaskInfo {
@@ -273,7 +283,16 @@ export interface TaskActivityPullRequestStatus {
 
 export interface TaskActivityEvent {
   id: string;
-  type: "task" | "task_lifecycle" | "tool" | "verification" | "delivery" | "handoff" | "approval";
+  type:
+    | "task"
+    | "task_lifecycle"
+    | "tool"
+    | "verification"
+    | "verification_attempt"
+    | "delivery"
+    | "handoff"
+    | "approval"
+    | "orchestration_transition";
   status: string;
   timestamp: string | null;
   summary: string;
@@ -284,6 +303,11 @@ export interface TaskActivityEvent {
     child_task_id?: string | null;
     source?: string;
     actor_user_id?: string | null;
+    execution_id?: string | null;
+    entity_type?: "approval" | "handoff";
+    entity_id?: string;
+    event_type?: "created" | "status_changed";
+    previous_status?: string | null;
     path?: string | null;
     error_code?: string | null;
     exit_code?: number | null;
@@ -384,6 +408,8 @@ export const api = {
 
   listApprovals: (status: "pending" | "approved" | "rejected" | "consumed" | "stale" = "pending") =>
     request<{ approvals: ApprovalInfo[]; count: number }>(`/approvals?status=${status}`),
+
+  getApproval: (approvalId: string) => request<ApprovalInfo>(`/approvals/${approvalId}`),
 
   decideApproval: (approvalId: string, decision: "approve" | "reject", note: string) =>
     request<ApprovalInfo>(`/approvals/${approvalId}/${decision}`, { method: "POST", body: JSON.stringify({ note }) }),
