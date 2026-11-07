@@ -835,7 +835,7 @@ async def test_proactive_data_rls_is_tenant_and_organization_scoped() -> None:
                         "(id, tenant_id, organization_id, project_id, maintenance_type, title, interval_days, next_run_at) "
                         "VALUES (:id, :tenant_id, :organization_id, :project_id, 'code_quality', 'RLS schedule', 7, now())"
                     ),
-                    {"id": schedule_id, "tenant_id": tenant_a, "organization_id": organization_id, "project_id": project_id},
+                    {"id": schedule_id, "tenant_id": tenant_id, "organization_id": organization_id, "project_id": project_id},
                 )
 
         tenant_context.clear()

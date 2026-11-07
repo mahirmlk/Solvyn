@@ -203,6 +203,7 @@ async def _queue_due_maintenance_events(db: AsyncSession) -> int:
                                 teammate_id=teammate.id,
                                 verification_run_id=run.id,
                                 kind="verification_run",
+                                status="pending",
                                 summary=f"Scheduled code quality check: {schedule.title}",
                                 payload=json.dumps(
                                     {
