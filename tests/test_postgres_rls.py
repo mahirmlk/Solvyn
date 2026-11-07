@@ -1298,7 +1298,7 @@ async def test_scheduler_fetches_due_workflows_under_each_tenant_scope(monkeypat
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
     session_a, session_b = uuid.uuid4(), uuid.uuid4()
-    execution_a, execution_b = uuid.uuid4(), uuid.uuid4()
+    execution_a, execution_b, execution_expired = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
 
     try:
         async with engine.begin() as connection:
@@ -1329,15 +1329,29 @@ async def test_scheduler_fetches_due_workflows_under_each_tenant_scope(monkeypat
                 text("INSERT INTO execution_graphs (id, session_id, graph_data, status, scheduled_at) VALUES (:id, :session_id, '{}', 'scheduled', now() - interval '1 minute')"),
                 {"id": execution_b, "session_id": session_b},
             )
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
+            await connection.execute(
+                text(
+                    "INSERT INTO execution_graphs "
+                    "(id, session_id, graph_data, status, lease_owner, lease_expires_at) "
+                    "VALUES (:id, :session_id, '{}', 'resuming', :lease_owner, now() - interval '1 minute')"
+                ),
+                {"id": execution_expired, "session_id": session_a, "lease_owner": uuid.uuid4()},
+            )
 
         tenant_context.clear()
         async with sessions() as session:
             due = await _fetch_due_scheduled_workflows(session)
-            assert set(due) >= {(execution_a, tenant_a), (execution_b, tenant_b)}
+            assert set(due) >= {
+                (execution_a, tenant_a),
+                (execution_b, tenant_b),
+                (execution_expired, tenant_a),
+            }
     finally:
         tenant_context.clear()
         async with engine.begin() as connection:
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
+            await connection.execute(text("DELETE FROM execution_graphs WHERE id = :id"), {"id": execution_expired})
             await connection.execute(text("DELETE FROM execution_graphs WHERE id = :id"), {"id": execution_a})
             await connection.execute(text("DELETE FROM sessions WHERE id = :id"), {"id": session_a})
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
@@ -1870,7 +1884,7 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
     tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
     task_a, task_b = uuid.uuid4(), uuid.uuid4()
     workspace_a, workspace_b = uuid.uuid4(), uuid.uuid4()
-    run_a, run_b = uuid.uuid4(), uuid.uuid4()
+    run_a, run_b, run_exhausted = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     stale_started_at = datetime.now(UTC) - timedelta(minutes=20)
 
     try:
@@ -1915,9 +1929,10 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                 text("INSERT INTO task_workspaces (id, tenant_id, task_id) VALUES (:id, :tenant_id, :task_id)"),
                 {"id": workspace_b, "tenant_id": tenant_b, "task_id": task_b},
             )
-            for tenant_id, task_id, workspace_id, run_id in (
-                (tenant_a, task_a, workspace_a, run_a),
-                (tenant_b, task_b, workspace_b, run_b),
+            for tenant_id, task_id, workspace_id, run_id, attempt_count in (
+                (tenant_a, task_a, workspace_a, run_a, 0),
+                (tenant_b, task_b, workspace_b, run_b, 0),
+                (tenant_a, task_a, workspace_a, run_exhausted, 3),
             ):
                 await connection.execute(
                     text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
@@ -1926,8 +1941,8 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                 await connection.execute(
                     text(
                         "INSERT INTO verification_runs "
-                        "(id, tenant_id, task_id, workspace_id, kind, command, status, runner_version, started_at) "
-                        "VALUES (:id, :tenant_id, :task_id, :workspace_id, 'test', '[]', 'running', 'test', :started_at)"
+                        "(id, tenant_id, task_id, workspace_id, kind, command, status, runner_version, started_at, attempt_count) "
+                        "VALUES (:id, :tenant_id, :task_id, :workspace_id, 'test', '[]', 'running', 'test', :started_at, :attempt_count)"
                     ),
                     {
                         "id": run_id,
@@ -1935,6 +1950,7 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                         "task_id": task_id,
                         "workspace_id": workspace_id,
                         "started_at": stale_started_at,
+                        "attempt_count": attempt_count,
                     },
                 )
 
@@ -1944,7 +1960,7 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
 
         tenant_context.set(tenant_a, "rls-a")
         async with sessions() as session:
-            assert (await session.execute(select(VerificationRun.id))).scalars().all() == [run_a]
+            assert set((await session.execute(select(VerificationRun.id))).scalars().all()) == {run_a, run_exhausted}
             session.add(
                 VerificationRun(
                     id=uuid.uuid4(),
@@ -1986,6 +2002,13 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
         async with sessions() as session:
             status_a = (await session.execute(select(VerificationRun.status).where(VerificationRun.id == run_a))).scalar_one()
             assert status_a == "interrupted"
+            exhausted = (
+                await session.execute(
+                    select(VerificationRun.status, VerificationRun.lease_owner, VerificationRun.lease_expires_at)
+                    .where(VerificationRun.id == run_exhausted)
+                )
+            ).one()
+            assert exhausted == ("dead_letter", None, None)
         tenant_context.set(tenant_b, "rls-b")
         async with sessions() as session:
             status_b = (await session.execute(select(VerificationRun.status).where(VerificationRun.id == run_b))).scalar_one()
@@ -1995,6 +2018,7 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
         async with engine.begin() as connection:
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
             await connection.execute(text("DELETE FROM verification_runs WHERE id = :id"), {"id": run_a})
+            await connection.execute(text("DELETE FROM verification_runs WHERE id = :id"), {"id": run_exhausted})
             await connection.execute(text("DELETE FROM task_workspaces WHERE id = :id"), {"id": workspace_a})
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
             await connection.execute(text("DELETE FROM verification_runs WHERE id = :id"), {"id": run_b})

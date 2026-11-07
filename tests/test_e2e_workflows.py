@@ -252,6 +252,7 @@ async def test_task_verification_is_sandboxed_and_durable(
         TeammateStatus,
         Tenant,
         User,
+        VerificationRun,
     )
     from solvyn.db.session import async_session_factory, bind_tenant_scope
 
@@ -384,9 +385,12 @@ async def test_task_verification_is_sandboxed_and_durable(
                     .limit(1)
                 )
             ).scalar_one()
-            run.status = "interrupted"
-            run.error = "Worker stopped before persisting the verification result"
+            run.attempt_started_at = datetime.now(UTC) - timedelta(minutes=20)
+            run.lease_expires_at = datetime.now(UTC) - timedelta(minutes=10)
             await db.commit()
+        from solvyn.workflows import scheduler
+
+        await scheduler._interrupt_stale_verification_runs()
         return SandboxResult(uuid.uuid4(), tuple(command), 0, False, "late success", "", False, 0.05)
 
     monkeypatch.setattr(DockerSandboxRunner, "run", late_result)
@@ -398,6 +402,20 @@ async def test_task_verification_is_sandboxed_and_durable(
     late = await approve_and_execute(late)
     assert late.status_code == 200
     assert late.json()["status"] == "interrupted"
+    from solvyn.workflows import scheduler
+
+    late_run_id = uuid.UUID(late.json()["id"])
+    async with async_session_factory() as db:
+        due_verifications = await scheduler._fetch_due_verification_runs(db)
+    assert (late_run_id, tenant.id) in due_verifications
+    monkeypatch.setattr(DockerSandboxRunner, "run", fake_run)
+    await scheduler._execute_due_verification(late_run_id, tenant.id)
+    async with async_session_factory() as db:
+        await bind_tenant_scope(db, tenant.id)
+        recovered_run = await db.get(VerificationRun, late_run_id)
+    assert recovered_run is not None
+    assert recovered_run.status == "passed"
+    assert recovered_run.attempt_count == 2
 
     rejected_request = await client.post(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs",
