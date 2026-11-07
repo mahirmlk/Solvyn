@@ -416,9 +416,11 @@ export interface VerificationQueueItem {
   kind: string;
   status: VerificationQueueStatus;
   approval_status: string;
+  organization_paused: boolean;
   attempt_count: number;
   max_attempts: number;
   retryable: boolean;
+  claimable: boolean;
   attempt_started_at: string | null;
   lease_expires_at: string | null;
   started_at: string | null;
@@ -431,6 +433,7 @@ export interface VerificationQueueResponse {
   total: number;
   limit: number;
   offset: number;
+  controls: { organization_id: string; organization_name: string; paused: boolean; updated_at: string | null }[];
   items: VerificationQueueItem[];
 }
 
@@ -501,6 +504,12 @@ export const api = {
     if (params?.offset) query.set("offset", String(params.offset));
     return request<VerificationQueueResponse>(`/verification-queue?${query}`);
   },
+
+  setVerificationQueuePaused: (organizationId: string, paused: boolean) =>
+    request<{ organization_id: string; paused: boolean; updated_at: string; updated_by_user_id: string | null }>(
+      `/verification-queue/organizations/${organizationId}/control`,
+      { method: "PATCH", body: JSON.stringify({ paused }) },
+    ),
 
   redriveVerification: (verificationRunId: string) =>
     request<{

@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +24,7 @@ from solvyn.db.models import (
     TaskWorkspace,
     TeammateProfile,
     TeammateProjectAssignment,
+    VerificationQueueControl,
     VerificationRun,
 )
 from solvyn.db.session import bind_tenant_scope, get_session
@@ -41,6 +43,10 @@ _QUEUE_STATUSES = (
     "dead_letter",
 )
 _MAX_ATTEMPTS = 3
+
+
+class VerificationQueueControlUpdate(BaseModel):
+    paused: bool
 
 
 @router.get("", summary="Inspect verification queue and dead-letter state")
@@ -67,11 +73,11 @@ async def get_verification_queue(
         raise HTTPException(status_code=403, detail="Organization administrator access required")
 
     await bind_tenant_scope(db, tenant_id)
-    organization_ids = list(
+    organization_rows = (
         (
             await db.execute(
-                select(OrganizationMembership.organization_id)
-                .join(Organization, Organization.id == OrganizationMembership.organization_id)
+                select(Organization.id, Organization.name)
+                .join(OrganizationMembership, OrganizationMembership.organization_id == Organization.id)
                 .where(
                     OrganizationMembership.user_id == user_id,
                     OrganizationMembership.role.in_(OWNER_ADMIN),
@@ -80,11 +86,26 @@ async def get_verification_queue(
                 )
             )
         )
-        .scalars()
         .all()
     )
+    organization_names = {organization_id: name for organization_id, name in organization_rows}
+    organization_ids = list(organization_names)
     if not organization_ids:
         raise HTTPException(status_code=403, detail="Organization administrator access required")
+
+    control_rows = (
+        await db.execute(
+            select(
+                VerificationQueueControl.organization_id,
+                VerificationQueueControl.paused,
+                VerificationQueueControl.updated_at,
+            ).where(
+                VerificationQueueControl.tenant_id == tenant_id,
+                VerificationQueueControl.organization_id.in_(organization_ids),
+            )
+        )
+    ).all()
+    paused_by_organization = {organization_id: paused for organization_id, paused, _ in control_rows}
 
     queue_filters = (
         VerificationRun.tenant_id == tenant_id,
@@ -157,10 +178,22 @@ async def get_verification_queue(
                 "kind": run.kind,
                 "status": run.status,
                 "approval_status": approval_status,
+                "organization_paused": paused_by_organization.get(organization_id, False),
                 "attempt_count": run.attempt_count,
                 "max_attempts": _MAX_ATTEMPTS,
                 "retryable": (
                     run.status in {"approved", "interrupted"}
+                    and run.attempt_count < _MAX_ATTEMPTS
+                    and approval_status in {"approved", "consumed"}
+                    and (
+                        run.status != "interrupted"
+                        or run.lease_expires_at is None
+                        or run.lease_expires_at <= now
+                    )
+                ),
+                "claimable": (
+                    not paused_by_organization.get(organization_id, False)
+                    and run.status in {"approved", "interrupted"}
                     and run.attempt_count < _MAX_ATTEMPTS
                     and approval_status in {"approved", "consumed"}
                     and (
@@ -176,6 +209,61 @@ async def get_verification_queue(
             }
             for run, task_title, organization_id, approval_status in rows
         ],
+        "controls": [
+            {
+                "organization_id": str(organization_id),
+                "organization_name": organization_names[organization_id],
+                "paused": paused_by_organization.get(organization_id, False),
+                "updated_at": next(
+                    (updated_at.isoformat() for control_org_id, _, updated_at in control_rows if control_org_id == organization_id),
+                    None,
+                ),
+            }
+            for organization_id in organization_ids
+        ],
+    }
+
+
+@router.patch("/organizations/{organization_id}/control", summary="Pause or resume new verification claims")
+async def update_verification_queue_control(
+    organization_id: uuid.UUID,
+    payload: VerificationQueueControlUpdate,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Persist an organization pause; running sandbox jobs continue unchanged."""
+    tenant_id = require_tenant()
+    await bind_tenant_scope(db, tenant_id)
+    membership = await require_org_membership(db, organization_id, roles=OWNER_ADMIN)
+
+    # Serialize the pause mutation with worker claims for this organization.
+    await db.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(str(organization_id), 0))))
+    control = (
+        await db.execute(
+            select(VerificationQueueControl).where(
+                VerificationQueueControl.organization_id == organization_id,
+                VerificationQueueControl.tenant_id == tenant_id,
+            ).with_for_update()
+        )
+    ).scalar_one_or_none()
+    if control is None:
+        control = VerificationQueueControl(
+            organization_id=organization_id,
+            tenant_id=tenant_id,
+            paused=payload.paused,
+            updated_by_user_id=tenant_context.user_id,
+        )
+        db.add(control)
+    else:
+        control.paused = payload.paused
+        control.updated_by_user_id = tenant_context.user_id
+    await db.commit()
+    await db.refresh(control)
+    return {
+        "organization_id": str(organization_id),
+        "paused": control.paused,
+        "updated_at": control.updated_at.isoformat(),
+        "updated_by_user_id": str(control.updated_by_user_id) if control.updated_by_user_id else None,
+        "membership_role": membership.role,
     }
 
 

@@ -26,6 +26,7 @@ from solvyn.db.models import (
     TeammateProfile,
     TeammateProjectAssignment,
     Tenant,
+    VerificationQueueControl,
     VerificationRun,
     WorkflowWorkerHeartbeat,
 )
@@ -302,9 +303,16 @@ async def _fetch_due_verification_runs(db: AsyncSession) -> list[tuple[uuid.UUID
     due_rows: list[tuple[uuid.UUID, uuid.UUID, datetime]] = []
     for tenant_id in tenant_ids:
         await bind_tenant_scope(db, tenant_id)
-        rows = (
+        paused_organization_ids = (
             await db.execute(
-                select(VerificationRun.id, VerificationRun.tenant_id, VerificationRun.started_at)
+                select(VerificationQueueControl.organization_id).where(
+                    VerificationQueueControl.tenant_id == tenant_id,
+                    VerificationQueueControl.paused.is_(True),
+                )
+            )
+        ).scalars().all()
+        query = (
+            select(VerificationRun.id, VerificationRun.tenant_id, VerificationRun.started_at)
                 .join(Task, Task.id == VerificationRun.task_id)
                 .join(Approval, Approval.verification_run_id == VerificationRun.id)
                 .where(
@@ -321,8 +329,10 @@ async def _fetch_due_verification_runs(db: AsyncSession) -> list[tuple[uuid.UUID
                 )
                 .order_by(VerificationRun.started_at, VerificationRun.id)
                 .limit(_VERIFICATION_BATCH_SIZE)
-            )
-        ).all()
+        )
+        if paused_organization_ids:
+            query = query.where(Approval.organization_id.not_in(paused_organization_ids))
+        rows = (await db.execute(query)).all()
         due_rows.extend((row.id, row.tenant_id, row.started_at) for row in rows)
         await db.commit()
 
