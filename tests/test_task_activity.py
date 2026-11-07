@@ -99,8 +99,23 @@ async def test_task_activity_combines_durable_records_in_reverse_chronological_o
         previous_status="running", status="completed", source="user_request", actor_user_id=uuid.uuid4(),
         occurred_at=_time(9, 10),
     )
+    orchestration_events = [
+        SimpleNamespace(
+            id=uuid.uuid4(), tenant_id=tenant_id, task_id=task_id, execution_id=execution_id,
+            entity_type="handoff", entity_id=handoff_id, event_type="created", previous_status=None,
+            status="waiting_approval", source="user_request", actor_user_id=uuid.uuid4(), occurred_at=_time(9, 21),
+        ),
+        SimpleNamespace(
+            id=uuid.uuid4(), tenant_id=tenant_id, task_id=task_id, execution_id=execution_id,
+            entity_type="approval", entity_id=approval.id, event_type="status_changed", previous_status="pending",
+            status="approved", source="user_request", actor_user_id=uuid.uuid4(), occurred_at=_time(9, 26),
+        ),
+    ]
     session = _ActivitySession(
-        [[child_task_id], [], [invocation], [run], attempt_events, [delivery], [handoff], [task_event], [approval]]
+        [
+            [child_task_id], [], [invocation], [run], attempt_events, [delivery], [handoff], [task_event],
+            orchestration_events, [approval],
+        ]
     )
     monkeypatch.setattr(verification, "_owned_task", AsyncMock(return_value=task))
     monkeypatch.setattr(
@@ -129,15 +144,17 @@ async def test_task_activity_combines_durable_records_in_reverse_chronological_o
 
     feed = await verification.list_task_activity(execution_id, task_id, session)  # type: ignore[arg-type]
 
-    assert feed["count"] == 8
+    assert feed["count"] == 10
     assert feed["truncated"] is False
     assert [event["type"] for event in feed["activity"]] == [
         "tool", "verification", "verification_attempt", "verification_attempt",
-        "delivery", "handoff", "approval", "task_lifecycle",
+        "delivery", "handoff", "orchestration_transition", "approval", "orchestration_transition", "task_lifecycle",
     ]
     delivery_event = feed["activity"][4]
     assert delivery_event["details"]["pull_request_status"]["review_status"]["state"] == "review_required"
-    assert feed["activity"][6]["details"]["decision_note"] == ""
+    assert feed["activity"][7]["details"]["decision_note"] == ""
+    assert feed["activity"][6]["details"]["previous_status"] == "pending"
+    assert feed["activity"][6]["status"] == "approved"
     assert feed["activity"][2]["details"]["attempt_number"] == 1
     assert feed["activity"][2]["status"] == "passed"
     assert feed["activity"][-1]["status"] == "completed"

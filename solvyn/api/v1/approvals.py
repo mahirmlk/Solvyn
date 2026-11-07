@@ -15,7 +15,17 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.api.v1._rbac import ANY_ROLE, OWNER_ADMIN, require_org_membership, require_tenant
-from solvyn.db.models import Approval, Organization, OrganizationMembership, Project, Task, TaskHandoff, TeammateProfile, VerificationRun
+from solvyn.db.models import (
+    Approval,
+    OrchestrationEvent,
+    Organization,
+    OrganizationMembership,
+    Project,
+    Task,
+    TaskHandoff,
+    TeammateProfile,
+    VerificationRun,
+)
 from solvyn.db.session import get_session
 from solvyn.multi_tenant.middleware import tenant_context
 
@@ -41,6 +51,35 @@ def _approval_dict(a: Approval, *, include_payload: bool = True) -> dict[str, ob
         "created_at": a.created_at.isoformat() if a.created_at else "",
         "updated_at": a.updated_at.isoformat() if a.updated_at else "",
     }
+
+
+async def _approval_history(db: AsyncSession, approval: Approval) -> list[dict[str, object]]:
+    tenant_id = await db.scalar(select(Organization.tenant_id).where(Organization.id == approval.organization_id))
+    if tenant_id is None:
+        return []
+    transitions = (
+        await db.execute(
+            select(OrchestrationEvent)
+            .where(
+                OrchestrationEvent.tenant_id == tenant_id,
+                OrchestrationEvent.entity_type == "approval",
+                OrchestrationEvent.entity_id == approval.id,
+            )
+            .order_by(OrchestrationEvent.occurred_at, OrchestrationEvent.id)
+            .limit(100)
+        )
+    ).scalars().all()
+    return [
+        {
+            "event_type": event.event_type,
+            "previous_status": event.previous_status,
+            "status": event.status,
+            "source": event.source,
+            "actor_user_id": str(event.actor_user_id) if event.actor_user_id else None,
+            "occurred_at": event.occurred_at.isoformat(),
+        }
+        for event in transitions
+    ]
 
 
 class ApprovalCreate(BaseModel):
@@ -111,7 +150,9 @@ async def get_approval(approval_id: uuid.UUID, db: AsyncSession = Depends(get_se
     if approval is None:
         raise HTTPException(status_code=404, detail="Approval not found")
     membership = await require_org_membership(db, approval.organization_id, roles=ANY_ROLE)
-    return _approval_dict(approval, include_payload=membership.role in OWNER_ADMIN)
+    result = _approval_dict(approval, include_payload=membership.role in OWNER_ADMIN)
+    result["history"] = await _approval_history(db, approval)
+    return result
 
 
 @router.post("/approvals/{approval_id}/approve", summary="Approve a pending request")

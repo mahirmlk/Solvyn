@@ -23,6 +23,7 @@ from solvyn.db.models import (
     IntegrationCredential,
     MaintenanceSchedule,
     Memory,
+    OrchestrationEvent,
     Organization,
     OrganizationMembership,
     ProactiveEvent,
@@ -1791,6 +1792,7 @@ async def test_task_handoff_rls_is_tenant_scoped_and_validates_relationships() -
     teammate_a, teammate_b = uuid.uuid4(), uuid.uuid4()
     parent_a, child_a, parent_b, child_b = (uuid.uuid4() for _ in range(4))
     handoff_a, handoff_b = uuid.uuid4(), uuid.uuid4()
+    approval_a, approval_b = uuid.uuid4(), uuid.uuid4()
 
     try:
         async with engine.connect() as connection:
@@ -1803,12 +1805,16 @@ async def test_task_handoff_rls_is_tenant_scoped_and_validates_relationships() -
             protected = (
                 await connection.execute(
                     text(
-                        "SELECT relrowsecurity, relforcerowsecurity FROM pg_class "
-                        "WHERE relname = 'task_handoffs'"
+                        "SELECT relation_row.relname, relation_row.relrowsecurity, relation_row.relforcerowsecurity "
+                        "FROM pg_class relation_row JOIN pg_namespace namespace_row "
+                        "ON namespace_row.oid = relation_row.relnamespace "
+                        "WHERE namespace_row.nspname = 'public' "
+                        "AND relation_row.relname IN ('task_handoffs', 'orchestration_events')"
                     )
                 )
-            ).one()
-            assert protected == (True, True)
+            ).all()
+            assert {row[0] for row in protected} == {"task_handoffs", "orchestration_events"}
+            assert all(row[1:] == (True, True) for row in protected)
 
         async with engine.begin() as connection:
             await connection.execute(
@@ -1874,14 +1880,89 @@ async def test_task_handoff_rls_is_tenant_scoped_and_validates_relationships() -
                 text("INSERT INTO task_handoffs (id, tenant_id, parent_task_id, child_task_id, idempotency_key, teammate_id, project_id, delegated_from, delegated_to, reason, input_data) VALUES (:id, :tenant_id, :parent_task_id, :child_task_id, :idempotency_key, :teammate_id, :project_id, 'workflow', 'developer', 'valid', '{}')"),
                 {"id": handoff_b, "tenant_id": tenant_b, "parent_task_id": parent_b, "child_task_id": child_b, "idempotency_key": uuid.uuid4(), "teammate_id": teammate_b, "project_id": project_b},
             )
+            await connection.execute(
+                text(
+                    "INSERT INTO approvals "
+                    "(id, organization_id, project_id, teammate_id, task_handoff_id, kind, summary, requested_by) "
+                    "VALUES (:id, :organization_id, :project_id, :teammate_id, :handoff_id, "
+                    "'handoff', 'Review handoff', 'developer')"
+                ),
+                {
+                    "id": approval_b, "organization_id": org_b, "project_id": project_b,
+                    "teammate_id": teammate_b, "handoff_id": handoff_b,
+                },
+            )
+            await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
+            await connection.execute(
+                text(
+                    "INSERT INTO approvals "
+                    "(id, organization_id, project_id, teammate_id, task_handoff_id, kind, summary, requested_by) "
+                    "VALUES (:id, :organization_id, :project_id, :teammate_id, :handoff_id, "
+                    "'handoff', 'Review handoff', 'developer')"
+                ),
+                {
+                    "id": approval_a, "organization_id": org_a, "project_id": project_a,
+                    "teammate_id": teammate_a, "handoff_id": handoff_a,
+                },
+            )
 
         tenant_context.clear()
         async with sessions() as session:
             assert (await session.execute(select(TaskHandoff.id))).scalars().all() == []
+            assert (await session.execute(select(OrchestrationEvent.id))).scalars().all() == []
 
         tenant_context.set(tenant_a, "rls-handoff-a")
         async with sessions() as session:
             assert (await session.execute(select(TaskHandoff.id))).scalars().all() == [handoff_a]
+            initial_history = (
+                await session.execute(select(OrchestrationEvent).order_by(OrchestrationEvent.entity_type))
+            ).scalars().all()
+            assert {(item.entity_type, item.entity_id, item.status) for item in initial_history} == {
+                ("approval", approval_a, "pending"),
+                ("handoff", handoff_a, "pending"),
+            }
+            assert {item.task_id for item in initial_history} == {child_a}
+            actor_id = uuid.uuid4()
+            await session.execute(
+                text("SELECT set_config('app.task_event_actor_user_id', :actor, true)"),
+                {"actor": str(actor_id)},
+            )
+            await session.execute(
+                text("UPDATE task_handoffs SET status = 'running' WHERE id = :id"),
+                {"id": handoff_a},
+            )
+            await session.execute(
+                text("UPDATE approvals SET status = 'approved' WHERE id = :id"),
+                {"id": approval_a},
+            )
+            transitions = (
+                await session.execute(
+                    select(OrchestrationEvent)
+                    .where(OrchestrationEvent.event_type == "status_changed")
+                    .order_by(OrchestrationEvent.entity_type)
+                )
+            ).scalars().all()
+            assert {(item.entity_type, item.previous_status, item.status) for item in transitions} == {
+                ("approval", "pending", "approved"),
+                ("handoff", "pending", "running"),
+            }
+            assert {item.task_id for item in transitions} == {child_a}
+            assert all(item.actor_user_id == actor_id for item in transitions)
+            await session.commit()
+            with pytest.raises(DBAPIError):
+                await session.execute(
+                    text("INSERT INTO orchestration_events "
+                         "(tenant_id, entity_type, entity_id, event_type, status, source) "
+                         "VALUES (:tenant_id, 'approval', :entity_id, 'created', 'pending', 'test')"),
+                    {"tenant_id": tenant_a, "entity_id": uuid.uuid4()},
+                )
+            await session.rollback()
+            with pytest.raises(DBAPIError):
+                await session.execute(
+                    text("UPDATE orchestration_events SET status = 'tampered' WHERE entity_id = :entity_id"),
+                    {"entity_id": handoff_a},
+                )
+            await session.rollback()
             session.add(
                 TaskHandoff(
                     id=uuid.uuid4(), tenant_id=tenant_b, parent_task_id=parent_b, child_task_id=child_b,
@@ -1916,12 +1997,22 @@ async def test_task_handoff_rls_is_tenant_scoped_and_validates_relationships() -
             with pytest.raises(DBAPIError):
                 await session.flush()
             await session.rollback()
+
+        tenant_context.set(tenant_b, "rls-handoff-b")
+        async with sessions() as session:
+            tenant_b_history = (await session.execute(select(OrchestrationEvent))).scalars().all()
+            assert {(item.entity_type, item.entity_id, item.status) for item in tenant_b_history} == {
+                ("approval", approval_b, "pending"),
+                ("handoff", handoff_b, "pending"),
+            }
     finally:
         tenant_context.clear()
         async with engine.begin() as connection:
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
+            await connection.execute(text("DELETE FROM approvals WHERE id = :id"), {"id": approval_a})
             await connection.execute(text("DELETE FROM task_handoffs WHERE id = :id"), {"id": handoff_a})
             await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
+            await connection.execute(text("DELETE FROM approvals WHERE id = :id"), {"id": approval_b})
             await connection.execute(text("DELETE FROM task_handoffs WHERE id = :id"), {"id": handoff_b})
             for tenant_id, teammate_id in ((tenant_a, teammate_a), (tenant_b, teammate_b)):
                 await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_id)})
