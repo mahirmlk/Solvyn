@@ -13,7 +13,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import func, or_, select, text, update
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1523,7 +1523,13 @@ async def list_task_activity(
             select(OrchestrationEvent)
             .where(
                 OrchestrationEvent.tenant_id == task.tenant_id,
-                OrchestrationEvent.task_id.in_(task_ids),
+                or_(
+                    OrchestrationEvent.task_id.in_(task_ids),
+                    and_(
+                        OrchestrationEvent.execution_id == execution_id,
+                        OrchestrationEvent.entity_type == "workflow_execution",
+                    ),
+                ),
             )
             .order_by(OrchestrationEvent.occurred_at.desc(), OrchestrationEvent.id.desc())
             .limit(_ACTIVITY_SOURCE_LIMIT + 1)
@@ -1616,6 +1622,7 @@ async def list_task_activity(
             "handoff": "Task handoff",
             "acceptance_criterion": "Acceptance criterion",
             "dependency": "Task dependency",
+            "workflow_execution": "Workflow execution",
         }.get(transition.entity_type, "Task record")
         transition_task_id = transition.task_id
         prefix = task_prefix(transition_task_id) if transition_task_id is not None else ""
@@ -1625,6 +1632,8 @@ async def list_task_activity(
             summary = f"{prefix}{entity_name} removed"
         elif transition.event_type == "updated":
             summary = f"{prefix}{entity_name} details updated"
+        elif transition.event_type == "claimed":
+            summary = f"{prefix}{entity_name} worker claimed the run again at {transition.status.replace('_', ' ')}"
         else:
             summary = (
                 f"{prefix}{entity_name} changed from "

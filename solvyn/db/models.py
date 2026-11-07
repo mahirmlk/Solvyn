@@ -182,14 +182,15 @@ class OrchestrationEvent(Base):
     __tablename__ = "orchestration_events"
     __table_args__ = (
         CheckConstraint(
-            "entity_type IN ('approval', 'handoff', 'acceptance_criterion', 'dependency')",
+            "entity_type IN ('approval', 'handoff', 'acceptance_criterion', 'dependency', 'workflow_execution')",
             name="ck_orchestration_events_entity_type",
         ),
         CheckConstraint(
-            "event_type IN ('created', 'status_changed', 'updated', 'deleted')",
+            "event_type IN ('created', 'status_changed', 'updated', 'deleted', 'claimed')",
             name="ck_orchestration_events_event_type",
         ),
         Index("ix_orchestration_events_tenant_task_time", "tenant_id", "task_id", "occurred_at", "id"),
+        Index("ix_orchestration_events_tenant_execution_time", "tenant_id", "execution_id", "occurred_at", "id"),
         Index(
             "ix_orchestration_events_tenant_entity_time",
             "tenant_id",
