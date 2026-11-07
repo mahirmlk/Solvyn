@@ -111,6 +111,20 @@ export default function VerificationQueuePage() {
     }
   }
 
+  async function updateHourlyRate(control: VerificationQueueResponse["controls"][number], value: number) {
+    setControlUpdatingId(control.organization_id);
+    setActionMessage(null);
+    try {
+      await api.setVerificationQueueRate(control.organization_id, value);
+      setActionMessage(`Hourly verification limit updated for ${control.organization_name}. Running verifications will continue.`);
+      await refresh();
+    } catch (reason) {
+      setActionMessage(reason instanceof Error ? reason.message : "Could not update the hourly verification limit.");
+    } finally {
+      setControlUpdatingId(null);
+    }
+  }
+
   async function redrive(itemId: string) {
     setRedrivingId(itemId);
     setActionMessage(null);
@@ -170,7 +184,7 @@ export default function VerificationQueuePage() {
             <span className="eyebrow">Organization controls</span>
             <h2 id="queue-controls-title">New verification claims</h2>
           </div>
-          <p>Pausing blocks new worker claims after the change is saved. The concurrency cap also blocks claims at its limit; lowering it leaves current runs active until they finish. Approval requests remain available.</p>
+          <p>Pausing blocks new worker claims after the change is saved. Concurrency limits leave current runs active, while the hourly cap counts starts in a rolling 60-minute window. Approval requests remain available.</p>
         </div>
         <div className={styles.controlList}>
           {queue?.controls.map((control) => (
@@ -179,6 +193,7 @@ export default function VerificationQueuePage() {
                 <strong>{control.organization_name}</strong>
                 <span className={styles.subtle}>{control.paused ? "New claims are paused" : "New claims are allowed"}</span>
                 <span className={styles.subtle}>{control.active_runs} running / {control.max_concurrent_runs} allowed</span>
+                <span className={styles.subtle}>{control.max_runs_per_hour} starts per hour</span>
               </div>
               <div className={styles.controlActions}>
                 <label className={styles.concurrencyControl}>
@@ -191,6 +206,18 @@ export default function VerificationQueuePage() {
                     value={control.max_concurrent_runs}
                   >
                     {[1, 2, 3, 4, 5].map((value) => <option key={value} value={value}>{value}</option>)}
+                  </select>
+                </label>
+                <label className={styles.concurrencyControl}>
+                  <span className="field-label">Max starts per hour</span>
+                  <select
+                    className="editorial-input"
+                    aria-label={`Maximum verification starts per hour for ${control.organization_name}`}
+                    disabled={loading || controlUpdatingId !== null}
+                    onChange={(event) => void updateHourlyRate(control, Number(event.target.value))}
+                    value={control.max_runs_per_hour}
+                  >
+                    {[1, 5, 10, 20, 30, 60, 90, 120].map((value) => <option key={value} value={value}>{value}</option>)}
                   </select>
                 </label>
                 <button
