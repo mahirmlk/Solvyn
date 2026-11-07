@@ -46,7 +46,9 @@ def test_settings(monkeypatch) -> Generator[Settings, None, None]:
         mock.db_max_overflow = 10
         mock.db_pool_recycle_seconds = 1800
         mock.rate_limit_per_ip = 100
-        mock.rate_limit_per_tenant = 500
+        # E2E cases share the test tenant within the minute window; dedicated
+        # rate-limit tests configure their own low caps explicitly.
+        mock.rate_limit_per_tenant = 1000
         mock.rate_limit_window = 60
         mock.allowed_origins = ["http://localhost:3000"]
         mock.sandbox_workspace_root = ".solvyn/test-workspaces"
