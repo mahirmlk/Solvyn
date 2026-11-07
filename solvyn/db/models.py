@@ -9,6 +9,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     Integer,
     LargeBinary,
     Numeric,
@@ -277,6 +278,49 @@ class VerificationRun(Base):
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class VerificationAttemptEvent(Base):
+    """Append-only start and outcome evidence for one verification attempt."""
+
+    __tablename__ = "verification_attempt_events"
+    __table_args__ = (
+        CheckConstraint("attempt_number >= 0", name="ck_verification_attempt_events_attempt_number"),
+        CheckConstraint(
+            "event_type IN ('started', 'finished', 'snapshot')",
+            name="ck_verification_attempt_events_type",
+        ),
+        Index(
+            "ix_verification_attempt_events_tenant_task_time",
+            "tenant_id",
+            "task_id",
+            "occurred_at",
+            "id",
+        ),
+        Index(
+            "ix_verification_attempt_events_run_attempt",
+            "verification_run_id",
+            "attempt_number",
+            "occurred_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    verification_run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    verification_kind: Mapped[str] = mapped_column(String(30), nullable=False)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    timed_out: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    output_truncated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    stdout: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default=text("''"))
+    stderr: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default=text("''"))
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_seconds: Mapped[float | None] = mapped_column(Numeric(10, 3), nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class TaskAcceptanceCriterion(Base):

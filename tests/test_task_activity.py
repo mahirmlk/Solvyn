@@ -67,6 +67,20 @@ async def test_task_activity_combines_durable_records_in_reverse_chronological_o
         id=run_id, task_id=task_id, kind="test", status="passed", exit_code=0, timed_out=False,
         started_at=_time(9, 45), completed_at=_time(9, 50),
     )
+    attempt_events = [
+        SimpleNamespace(
+            id=uuid.uuid4(), tenant_id=tenant_id, task_id=task_id, verification_run_id=run_id,
+            verification_kind="test", attempt_number=1, event_type="started", status="running",
+            exit_code=None, timed_out=False, output_truncated=False, error=None,
+            occurred_at=_time(9, 46),
+        ),
+        SimpleNamespace(
+            id=uuid.uuid4(), tenant_id=tenant_id, task_id=task_id, verification_run_id=run_id,
+            verification_kind="test", attempt_number=1, event_type="finished", status="passed",
+            exit_code=0, timed_out=False, output_truncated=False, error=None,
+            occurred_at=_time(9, 49),
+        ),
+    ]
     delivery = SimpleNamespace(
         id=delivery_id, task_id=task_id, status="pull_request_open", updated_at=_time(9, 42), created_at=_time(9, 40),
         pull_request_title="Implement feature", branch_name="solvyn/task-42", pull_request_number=42,
@@ -85,7 +99,9 @@ async def test_task_activity_combines_durable_records_in_reverse_chronological_o
         previous_status="running", status="completed", source="user_request", actor_user_id=uuid.uuid4(),
         occurred_at=_time(9, 10),
     )
-    session = _ActivitySession([[child_task_id], [], [invocation], [run], [delivery], [handoff], [task_event], [approval]])
+    session = _ActivitySession(
+        [[child_task_id], [], [invocation], [run], attempt_events, [delivery], [handoff], [task_event], [approval]]
+    )
     monkeypatch.setattr(verification, "_owned_task", AsyncMock(return_value=task))
     monkeypatch.setattr(
         verification,
@@ -113,14 +129,17 @@ async def test_task_activity_combines_durable_records_in_reverse_chronological_o
 
     feed = await verification.list_task_activity(execution_id, task_id, session)  # type: ignore[arg-type]
 
-    assert feed["count"] == 6
+    assert feed["count"] == 8
     assert feed["truncated"] is False
     assert [event["type"] for event in feed["activity"]] == [
-        "tool", "verification", "delivery", "handoff", "approval", "task_lifecycle",
+        "tool", "verification", "verification_attempt", "verification_attempt",
+        "delivery", "handoff", "approval", "task_lifecycle",
     ]
-    delivery_event = feed["activity"][2]
+    delivery_event = feed["activity"][4]
     assert delivery_event["details"]["pull_request_status"]["review_status"]["state"] == "review_required"
-    assert feed["activity"][4]["details"]["decision_note"] == ""
+    assert feed["activity"][6]["details"]["decision_note"] == ""
+    assert feed["activity"][2]["details"]["attempt_number"] == 1
+    assert feed["activity"][2]["status"] == "passed"
     assert feed["activity"][-1]["status"] == "completed"
     assert str(child_task_id)[:8] in feed["activity"][-1]["summary"]
     assert feed["activity"][-1]["details"]["task_id"] == str(child_task_id)

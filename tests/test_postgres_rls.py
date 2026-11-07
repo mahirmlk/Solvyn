@@ -40,6 +40,7 @@ from solvyn.db.models import (
     TeammateToolInvocation,
     TenantRole,
     TokenUsage,
+    VerificationAttemptEvent,
     VerificationRun,
     Workspace,
 )
@@ -102,7 +103,7 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                         "SELECT relname, relrowsecurity, relforcerowsecurity "
                         "FROM pg_class WHERE relname IN "
                         "('tasks', 'task_acceptance_criteria', 'task_deliveries', 'task_workspaces', "
-                        "'teammate_tool_invocations', 'task_dependencies', 'verification_runs', "
+                        "'teammate_tool_invocations', 'task_dependencies', 'verification_runs', 'verification_attempt_events', "
                         "'task_handoffs', 'teammate_memory', 'sessions', 'execution_graphs', 'memory', 'token_usage', "
                         "'approvals', 'proactive_events', 'maintenance_schedules', 'integrations', "
                         "'integration_credentials', 'projects', 'repositories', 'project_knowledge', "
@@ -119,6 +120,7 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                 "teammate_tool_invocations",
                 "task_dependencies",
                 "verification_runs",
+                "verification_attempt_events",
                 "task_handoffs",
                 "teammate_memory",
                 "sessions",
@@ -227,6 +229,15 @@ async def test_task_rls_is_tenant_scoped_and_validates_ownership_links() -> None
                 )
             ).one()
             assert protected == (True, True)
+            attempt_history_protected = (
+                await connection.execute(
+                    text(
+                        "SELECT relrowsecurity, relforcerowsecurity FROM pg_class "
+                        "WHERE relname = 'verification_attempt_events'"
+                    )
+                )
+            ).one()
+            assert attempt_history_protected == (True, True)
 
         async with engine.begin() as connection:
             await connection.execute(
@@ -1930,8 +1941,8 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                 {"id": workspace_b, "tenant_id": tenant_b, "task_id": task_b},
             )
             for tenant_id, task_id, workspace_id, run_id, attempt_count in (
-                (tenant_a, task_a, workspace_a, run_a, 0),
-                (tenant_b, task_b, workspace_b, run_b, 0),
+                (tenant_a, task_a, workspace_a, run_a, 1),
+                (tenant_b, task_b, workspace_b, run_b, 1),
                 (tenant_a, task_a, workspace_a, run_exhausted, 3),
             ):
                 await connection.execute(
@@ -1942,7 +1953,7 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                     text(
                         "INSERT INTO verification_runs "
                         "(id, tenant_id, task_id, workspace_id, kind, command, status, runner_version, started_at, attempt_count) "
-                        "VALUES (:id, :tenant_id, :task_id, :workspace_id, 'test', '[]', 'running', 'test', :started_at, :attempt_count)"
+                        "VALUES (:id, :tenant_id, :task_id, :workspace_id, 'test', '[]', 'approved', 'test', :started_at, 0)"
                     ),
                     {
                         "id": run_id,
@@ -1950,9 +1961,20 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                         "task_id": task_id,
                         "workspace_id": workspace_id,
                         "started_at": stale_started_at,
-                        "attempt_count": attempt_count,
                     },
                 )
+                await connection.execute(
+                    text(
+                        "UPDATE verification_runs SET status = 'running', attempt_count = :attempt_count, "
+                        "attempt_started_at = :started_at, lease_expires_at = :started_at WHERE id = :id"
+                    ),
+                    {"id": run_id, "attempt_count": attempt_count, "started_at": stale_started_at},
+                )
+                if run_id == run_a:
+                    await connection.execute(
+                        text("UPDATE verification_runs SET stdout = repeat('x', 40000) WHERE id = :id"),
+                        {"id": run_id},
+                    )
 
         tenant_context.clear()
         async with sessions() as session:
@@ -1961,6 +1983,13 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
         tenant_context.set(tenant_a, "rls-a")
         async with sessions() as session:
             assert set((await session.execute(select(VerificationRun.id))).scalars().all()) == {run_a, run_exhausted}
+            started_events = (
+                await session.execute(
+                    select(VerificationAttemptEvent.verification_run_id, VerificationAttemptEvent.status)
+                    .where(VerificationAttemptEvent.verification_run_id.in_([run_a, run_exhausted]))
+                )
+            ).all()
+            assert set(started_events) == {(run_a, "running"), (run_exhausted, "running")}
             session.add(
                 VerificationRun(
                     id=uuid.uuid4(),
@@ -1970,6 +1999,21 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                     kind="test",
                     command="[]",
                     runner_version="test",
+                )
+            )
+            with pytest.raises(DBAPIError):
+                await session.flush()
+            await session.rollback()
+
+            session.add(
+                VerificationAttemptEvent(
+                    tenant_id=tenant_a,
+                    task_id=task_a,
+                    verification_run_id=run_a,
+                    verification_kind="test",
+                    attempt_number=1,
+                    event_type="snapshot",
+                    status="running",
                 )
             )
             with pytest.raises(DBAPIError):
@@ -2009,10 +2053,50 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                 )
             ).one()
             assert exhausted == ("dead_letter", None, None)
+            attempt_events_a = (
+                await session.execute(
+                    select(VerificationAttemptEvent.verification_run_id, VerificationAttemptEvent.event_type, VerificationAttemptEvent.status)
+                    .where(VerificationAttemptEvent.verification_run_id.in_([run_a, run_exhausted]))
+                    .order_by(VerificationAttemptEvent.verification_run_id)
+                )
+            ).all()
+            assert set(attempt_events_a) == {
+                (run_a, "started", "running"),
+                (run_a, "finished", "interrupted"),
+                (run_exhausted, "started", "running"),
+                (run_exhausted, "finished", "dead_letter"),
+            }
+            retained_output = (
+                await session.execute(
+                    select(
+                        VerificationAttemptEvent.stdout,
+                        VerificationAttemptEvent.output_truncated,
+                    ).where(
+                        VerificationAttemptEvent.verification_run_id == run_a,
+                        VerificationAttemptEvent.event_type == "finished",
+                    )
+                )
+            ).one()
+            assert len(retained_output.stdout) == 32768
+            assert retained_output.output_truncated is True
+            with pytest.raises(DBAPIError):
+                await session.execute(
+                    update(VerificationAttemptEvent)
+                    .where(VerificationAttemptEvent.verification_run_id == run_a)
+                    .values(status="passed")
+                )
+            await session.rollback()
         tenant_context.set(tenant_b, "rls-b")
         async with sessions() as session:
             status_b = (await session.execute(select(VerificationRun.status).where(VerificationRun.id == run_b))).scalar_one()
             assert status_b == "interrupted"
+            events_b = (
+                await session.execute(
+                    select(VerificationAttemptEvent.verification_run_id, VerificationAttemptEvent.status)
+                    .where(VerificationAttemptEvent.verification_run_id == run_b)
+                )
+            ).all()
+            assert set(events_b) == {(run_b, "running"), (run_b, "interrupted")}
     finally:
         tenant_context.clear()
         async with engine.begin() as connection:
