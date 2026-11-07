@@ -400,6 +400,7 @@ Base URL: `http://localhost:8000/api/v1`
 | `POST` | `/workflows/executions/{execution_id}/tasks/{task_id}/deliver` | Owner/admin | Confirm the current preview digest, create a Solvyn branch from the pinned commit, commit text changes and supported selected-file deletions, and open a draft PR |
 | `POST` | `/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs` | Required | Run an argv command in the isolated sandbox and persist bounded evidence |
 | `GET` | `/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs` | Required | Read verification history for a task |
+| `GET` | `/verification-queue` | Organization owner/admin | Inspect bounded verification queue counts and runs, including dead-letter and claim eligibility |
 | `GET` | `/workflows/executions/{execution_id}/tasks/{task_id}/tool-invocations` | Required | Read content-free teammate file-tool audit records for a task |
 | `POST` | `/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria` | Required | Define task acceptance criteria in a pending state |
 | `GET` | `/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria` | Required | Read criteria and their review decisions |
