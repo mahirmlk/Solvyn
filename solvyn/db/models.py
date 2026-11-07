@@ -819,6 +819,7 @@ class VerificationQueueControl(Base):
     __tablename__ = "verification_queue_controls"
     __table_args__ = (
         CheckConstraint("max_concurrent_runs BETWEEN 1 AND 5", name="ck_verification_queue_controls_concurrency"),
+        CheckConstraint("max_runs_per_hour BETWEEN 1 AND 120", name="ck_verification_queue_controls_hourly_rate"),
     )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
@@ -829,6 +830,7 @@ class VerificationQueueControl(Base):
     )
     paused: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
     max_concurrent_runs: Mapped[int] = mapped_column(Integer, default=2, server_default=text("2"), nullable=False)
+    max_runs_per_hour: Mapped[int] = mapped_column(Integer, default=30, server_default=text("30"), nullable=False)
     updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )

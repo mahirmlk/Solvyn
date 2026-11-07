@@ -456,6 +456,7 @@ export interface VerificationQueueResponse {
     organization_name: string;
     paused: boolean;
     max_concurrent_runs: number;
+    max_runs_per_hour: number;
     active_runs: number;
     updated_at: string | null;
   }[];
@@ -546,6 +547,7 @@ export const api = {
       organization_id: string;
       paused: boolean;
       max_concurrent_runs: number;
+      max_runs_per_hour: number;
       updated_at: string;
       updated_by_user_id: string | null;
     }>(
@@ -554,9 +556,15 @@ export const api = {
     ),
 
   setVerificationQueueConcurrency: (organizationId: string, max_concurrent_runs: number) =>
-    request<{ organization_id: string; paused: boolean; max_concurrent_runs: number; updated_at: string }>(
+    request<{ organization_id: string; paused: boolean; max_concurrent_runs: number; max_runs_per_hour: number; updated_at: string }>(
       `/verification-queue/organizations/${organizationId}/control`,
       { method: "PATCH", body: JSON.stringify({ max_concurrent_runs }) },
+    ),
+
+  setVerificationQueueRate: (organizationId: string, max_runs_per_hour: number) =>
+    request<{ organization_id: string; paused: boolean; max_runs_per_hour: number; updated_at: string }>(
+      `/verification-queue/organizations/${organizationId}/control`,
+      { method: "PATCH", body: JSON.stringify({ max_runs_per_hour }) },
     ),
 
   redriveVerification: (verificationRunId: string) =>

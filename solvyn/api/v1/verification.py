@@ -1060,7 +1060,11 @@ async def _execute_approved_verification(
     )
     control = (
         await db.execute(
-            select(VerificationQueueControl.paused, VerificationQueueControl.max_concurrent_runs).where(
+            select(
+                VerificationQueueControl.paused,
+                VerificationQueueControl.max_concurrent_runs,
+                VerificationQueueControl.max_runs_per_hour,
+            ).where(
                 VerificationQueueControl.organization_id == approval.organization_id,
                 VerificationQueueControl.tenant_id == task.tenant_id,
             )
@@ -1085,6 +1089,23 @@ async def _execute_approved_verification(
     if int(active_runs or 0) >= max_concurrent_runs:
         await db.rollback()
         raise HTTPException(status_code=409, detail="Organization verification concurrency limit reached")
+
+    max_runs_per_hour = control[2] if control is not None else 30
+    recent_attempts = await db.scalar(
+        select(func.count())
+        .select_from(VerificationAttemptEvent)
+        .join(Approval, Approval.verification_run_id == VerificationAttemptEvent.verification_run_id)
+        .where(
+            VerificationAttemptEvent.tenant_id == task.tenant_id,
+            VerificationAttemptEvent.event_type == "started",
+            VerificationAttemptEvent.occurred_at >= func.now() - timedelta(hours=1),
+            VerificationAttemptEvent.occurred_at <= func.now(),
+            Approval.organization_id == approval.organization_id,
+        )
+    )
+    if int(recent_attempts or 0) >= max_runs_per_hour:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="Organization verification hourly rate limit reached")
 
     lease_owner = uuid.uuid4()
     run_claim = await db.execute(

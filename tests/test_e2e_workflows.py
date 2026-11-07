@@ -410,6 +410,7 @@ async def test_task_verification_is_sandboxed_and_durable(
     control = next(item for item in queue.json()["controls"] if item["organization_id"] == str(organization_id))
     assert control["paused"] is True
     assert control["max_concurrent_runs"] == 1
+    assert control["max_runs_per_hour"] == 30
     assert control["active_runs"] == 1
     queue_item = next(item for item in queue.json()["items"] if item["id"] == verification.json()["verification_run"]["id"])
     assert queue_item["retryable"] is True and queue_item["claimable"] is False
@@ -456,12 +457,40 @@ async def test_task_verification_is_sandboxed_and_durable(
         json={"kind": "test"},
     )
     assert regression.status_code == 202
-    regression = await approve_and_execute(regression)
+    regression_approval = await client.post(
+        f"/api/v1/approvals/{regression.json()['approval_id']}/approve",
+        json={"note": "Approved regression verification"},
+    )
+    assert regression_approval.status_code == 200
+    hourly_limit = await client.patch(
+        f"/api/v1/verification-queue/organizations/{organization_id}/control",
+        json={"max_runs_per_hour": 1},
+    )
+    assert hourly_limit.status_code == 200
+    assert hourly_limit.json()["max_runs_per_hour"] == 1
+    rate_limited = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs/{regression.json()['verification_run']['id']}/execute"
+    )
+    assert rate_limited.status_code == 409
+    assert "hourly rate limit" in rate_limited.json()["detail"].lower()
+    assert len(verification_calls) == 1
+    hourly_limit = await client.patch(
+        f"/api/v1/verification-queue/organizations/{organization_id}/control",
+        json={"max_runs_per_hour": 2},
+    )
+    assert hourly_limit.status_code == 200
+    regression = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs/{regression.json()['verification_run']['id']}/execute"
+    )
     assert regression.status_code == 200
     assert regression.json()["status"] == "failed"
     assert regression.json()["regression_status"] == "regressed"
     assert regression.json()["compared_to_run_id"] == verification.json()["verification_run"]["id"]
     assert regression.json()["source_changed"] is False
+    await client.patch(
+        f"/api/v1/verification-queue/organizations/{organization_id}/control",
+        json={"max_runs_per_hour": 30},
+    )
 
     history = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
     first_task = next(task for task in history.json()["tasks"] if task["task_id"] == task_id)
