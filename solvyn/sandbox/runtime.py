@@ -33,7 +33,7 @@ class SandboxLimits:
     memory_mb: int = 512
     cpus: float = 1.0
     pids: int = 128
-    workspace_bytes: int = 64 * 1024 * 1024
+    workspace_bytes: int = 128 * 1024 * 1024
     tmp_bytes: int = 16 * 1024 * 1024
     output_bytes: int = 128 * 1024
 
