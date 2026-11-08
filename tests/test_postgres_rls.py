@@ -2421,7 +2421,6 @@ async def test_task_dependency_rls_is_tenant_scoped_and_rejects_cross_tenant_edg
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(os.name == "nt", reason="Process-level worker recovery test requires POSIX signal handling")
 async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3153,7 +3152,10 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                 release_recovery_request.set()
                 for worker_process in worker_processes:
                     if worker_process.poll() is None:
-                        worker_process.send_signal(signal.SIGINT)
+                        if os.name == "nt":
+                            worker_process.kill()
+                        else:
+                            worker_process.send_signal(signal.SIGINT)
                 for worker_process in worker_processes:
                     if worker_process.poll() is None:
                         try:
