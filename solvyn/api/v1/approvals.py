@@ -28,6 +28,7 @@ from solvyn.db.models import (
 )
 from solvyn.db.session import get_session
 from solvyn.multi_tenant.middleware import tenant_context
+from solvyn.proactive import task_assignment_event
 
 router = APIRouter(tags=["approvals"])
 
@@ -189,6 +190,33 @@ async def approve(approval_id: uuid.UUID, payload: DecisionIn, db: AsyncSession 
         if resumed_task.scalar_one_or_none() is None:
             await db.rollback()
             raise HTTPException(status_code=409, detail="Task handoff is no longer waiting for approval")
+        resolved_handoff = (
+            await db.execute(
+                select(TaskHandoff, Task)
+                .join(Task, Task.id == TaskHandoff.child_task_id)
+                .where(
+                    TaskHandoff.id == approval.task_handoff_id,
+                    TaskHandoff.tenant_id == tenant_id,
+                    Task.id == child_task_id,
+                    Task.tenant_id == tenant_id,
+                )
+            )
+        ).one_or_none()
+        if resolved_handoff is None:
+            await db.rollback()
+            raise HTTPException(status_code=409, detail="Approved task assignment could not be resolved")
+        handoff, assigned_task = resolved_handoff
+        if approval.project_id is None:
+            await db.rollback()
+            raise HTTPException(status_code=409, detail="Approved task assignment has no project")
+        db.add(
+            task_assignment_event(
+                organization_id=approval.organization_id,
+                project_id=approval.project_id,
+                handoff=handoff,
+                task=assigned_task,
+            )
+        )
     if approval.verification_run_id is not None:
         tenant_id = require_tenant()
         verification = await db.execute(

@@ -806,6 +806,7 @@ async def test_feature_workflow_runs_to_completion(client: AsyncClient) -> None:
     from solvyn.db.models import (
         Organization,
         OrganizationMembership,
+        ProactiveEvent,
         Project,
         TeammateProfile,
         TeammateProjectAssignment,
@@ -887,6 +888,16 @@ async def test_feature_workflow_runs_to_completion(client: AsyncClient) -> None:
     assert approval_replay.status_code == 200
     assert approval_replay.json()["approval_id"] == pending_handoff["approval_id"]
 
+    async with async_session_factory() as db:
+        await bind_tenant_scope(db, tenant.id)
+        assert (
+            await db.execute(
+                select(ProactiveEvent).where(
+                    ProactiveEvent.source_event_id == f"task-handoff:{pending_handoff['handoff_id']}:assigned"
+                )
+            )
+        ).scalars().all() == []
+
     from solvyn.identity.security import create_access_token
 
     client.headers["Authorization"] = f"Bearer {create_access_token(subject=str(user_id))}"
@@ -897,6 +908,18 @@ async def test_feature_workflow_runs_to_completion(client: AsyncClient) -> None:
     approved = await client.post(f"/api/v1/approvals/{approval['id']}/approve", json={"note": "Approved for execution"})
     assert approved.status_code == 200
     assert approved.json()["status"] == "approved"
+    async with async_session_factory() as db:
+        await bind_tenant_scope(db, tenant.id)
+        assignment_signals = (
+            await db.execute(
+                select(ProactiveEvent).where(
+                    ProactiveEvent.source_event_id == f"task-handoff:{pending_handoff['handoff_id']}:assigned"
+                )
+            )
+        ).scalars().all()
+        assert len(assignment_signals) == 1
+        assert assignment_signals[0].event_type == "task_assignment"
+        assert assignment_signals[0].status == "pending"
 
     handoff_response = await client.post(
         f"/api/v1/workflows/executions/{data['execution_id']}/tasks/{tasks[0]['task_id']}/handoffs/{pending_handoff['handoff_id']}/resume"
@@ -967,6 +990,16 @@ async def test_feature_workflow_runs_to_completion(client: AsyncClient) -> None:
     )
     assert rejected.status_code == 200
     assert rejected.json()["status"] == "rejected"
+    async with async_session_factory() as db:
+        await bind_tenant_scope(db, tenant.id)
+        assert (
+            await db.execute(
+                select(ProactiveEvent).where(
+                    ProactiveEvent.source_event_id
+                    == f"task-handoff:{rejected_request.json()['handoff_id']}:assigned"
+                )
+            )
+        ).scalars().all() == []
     rejected_tasks = await client.get(f"/api/v1/workflows/executions/{data['execution_id']}/tasks")
     rejected_handoff = next(
         handoff

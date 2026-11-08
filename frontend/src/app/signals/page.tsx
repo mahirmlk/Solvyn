@@ -22,6 +22,7 @@ function signalLabel(event: ProactiveEventInfo): string {
   if (event.event_type === "scheduled_maintenance") return "Scheduled maintenance";
   if (event.event_type === "issues") return "GitHub issue";
   if (event.event_type === "pull_request") return "Pull request";
+  if (event.event_type === "task_assignment") return "Teammate assignment";
   return event.event_type.replaceAll("_", " ");
 }
 
@@ -125,7 +126,7 @@ export default function SignalsPage() {
             ))}
           </select>
         </label>
-        <p>CI failures, open security alerts, and scheduled maintenance events for this organization. GitHub supplied text is untrusted and is displayed for human review only.</p>
+        <p>CI failures, security alerts, GitHub issues and pull requests, teammate assignments, and scheduled maintenance for this organization. Signals are for human review; assignments do not start work automatically.</p>
       </section>
 
       {error && <p className={styles.message} role="alert">{error}</p>}

@@ -42,6 +42,7 @@ from solvyn.db.models import (
 )
 from solvyn.db.session import async_session_factory, bind_tenant_scope, get_session
 from solvyn.multi_tenant.middleware import tenant_context
+from solvyn.proactive import task_assignment_event
 from solvyn.workflows.executor import workflow_executor
 from solvyn.workflows.task_generator import TaskGenerator
 from solvyn.workflows.templates import WORKFLOW_TEMPLATES
@@ -935,6 +936,15 @@ async def create_task_handoff(
                             }
                         ),
                         requested_by=parent.assigned_agent or "workflow",
+                    )
+                )
+            else:
+                db.add(
+                    task_assignment_event(
+                        organization_id=teammate.organization_id,
+                        project_id=payload.project_id,
+                        handoff=handoff,
+                        task=child,
                     )
                 )
             await db.commit()
