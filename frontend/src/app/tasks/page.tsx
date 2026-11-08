@@ -5,7 +5,7 @@ import Link from "next/link";
 import { api, WorkflowTaskInfo } from "@/lib/api";
 import styles from "@/components/WorkspacePages.module.css";
 
-const TASK_STATUSES = ["all", "pending", "running", "waiting_approval", "completed", "failed", "cancelled"];
+const TASK_STATUSES = ["all", "pending", "running", "waiting_approval", "review_required", "completed", "failed", "cancelled"];
 const STATUS_CLASS: Record<string, string> = {
   completed: "success",
   failed: "error",

@@ -57,8 +57,12 @@ def test_settings(monkeypatch) -> Generator[Settings, None, None]:
         mock.sandbox_image = "solvyn-sandbox:local"
         mock.sandbox_runtime_url = ""
         mock.sandbox_runtime_token = ""
+        mock.enable_workflow_scheduler = False
         mock.otel_enabled = False
         mock.otlp_endpoint = None
+        from solvyn import main
+
+        monkeypatch.setattr(main.settings, "enable_workflow_scheduler", False)
         yield mock
 
 

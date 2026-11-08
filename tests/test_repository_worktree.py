@@ -38,6 +38,9 @@ class _WorkspaceSession:
     def add(self, value: Any) -> None:
         self.added.append(value)
 
+    async def flush(self) -> None:
+        return None
+
     async def commit(self) -> None:
         return None
 
@@ -220,7 +223,13 @@ async def test_full_repository_workspace_persists_marker_and_cleans_failed_check
     from solvyn.api.v1 import verification as verification_api
 
     manager = WorkspaceManager(tmp_path / "workspaces")
-    task = SimpleNamespace(id=uuid.uuid4(), tenant_id=uuid.uuid4())
+    task = SimpleNamespace(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        status="running",
+        completed_at=None,
+        acceptance_criteria_defined=False,
+    )
     project_id = uuid.uuid4()
     repository = SimpleNamespace(id=uuid.uuid4(), full_name="octo/repo", provider="github")
     project = SimpleNamespace(id=project_id, organization_id=uuid.uuid4())
@@ -228,6 +237,10 @@ async def test_full_repository_workspace_persists_marker_and_cleans_failed_check
     db = _WorkspaceSession(handoff)
     monkeypatch.setattr(verification_api, "_owned_task", lambda *_args: _return(task))
     monkeypatch.setattr(verification_api, "_workspace_manager", lambda: manager)
+    async def no_completion_gates(_db: Any, active_task: Any) -> str:
+        return active_task.status
+
+    monkeypatch.setattr(verification_api, "refresh_task_completion_state", no_completion_gates)
     monkeypatch.setattr(verification_api, "_load_authorized_repository", lambda *_args: _return((repository, project)))
     monkeypatch.setattr(
         verification_api, "get_authorized_repository_provider", lambda *_args: _return(_WorkspaceGitHub())

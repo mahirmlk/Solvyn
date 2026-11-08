@@ -467,6 +467,7 @@ async def redrive_verification_run(
         kind=source.kind,
         command=json.dumps(command),
         status="pending_approval",
+        required_for_completion=source.required_for_completion,
         exit_code=None,
         timed_out=False,
         output_truncated=False,

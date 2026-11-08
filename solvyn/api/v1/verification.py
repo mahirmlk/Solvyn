@@ -55,6 +55,7 @@ from solvyn.sandbox.remote import RemoteSandboxResult, RemoteSandboxRunner
 from solvyn.sandbox.runtime import DockerSandboxRunner, SandboxResult, SandboxRuntimeError
 from solvyn.sandbox.workspaces import WorkspaceError, WorkspaceManager, safe_relative_path
 from solvyn.workflows.executor import workflow_executor
+from solvyn.workflows.task_completion import refresh_task_completion_state, require_task_review
 
 router = APIRouter(prefix="/workflows/executions/{execution_id}/tasks/{task_id}", tags=["verification"])
 _MAX_INITIAL_FILES_BYTES = 16 * 1024 * 1024
@@ -86,6 +87,7 @@ class TaskWorkspaceCreate(BaseModel):
 class VerificationRequest(BaseModel):
     kind: VerificationKind
     command: list[str] | None = Field(default=None, min_length=1, max_length=128)
+    required_for_completion: bool = True
 
 
 class AcceptanceCriteriaCreate(BaseModel):
@@ -544,6 +546,7 @@ def _verification_dict(run: VerificationRun) -> dict[str, Any]:
         "kind": run.kind,
         "command": json.loads(run.command),
         "status": run.status,
+        "required_for_completion": run.required_for_completion,
         "exit_code": run.exit_code,
         "timed_out": run.timed_out,
         "output_truncated": run.output_truncated,
@@ -729,6 +732,7 @@ def _criterion_dict(criterion: TaskAcceptanceCriterion) -> dict[str, Any]:
         "reviewer_user_id": str(criterion.reviewer_user_id) if criterion.reviewer_user_id else None,
         "reviewer_organization_id": str(criterion.reviewer_organization_id) if criterion.reviewer_organization_id else None,
         "decision_note": criterion.decision_note,
+        "decision_workspace_digest": criterion.decision_workspace_digest,
         "created_at": criterion.created_at.isoformat() if criterion.created_at else None,
         "decided_at": criterion.decided_at.isoformat() if criterion.decided_at else None,
     }
@@ -781,6 +785,13 @@ async def _finish_run(
         await db.refresh(run)
         evidence = await _verification_history_for_task(db, run.tenant_id, run.task_id)
         return next(item for item in evidence if item["id"] == str(run.id))
+    task = (
+        await db.execute(
+            select(Task).where(Task.id == run.task_id, Task.tenant_id == run.tenant_id)
+        )
+    ).scalar_one_or_none()
+    if task is not None:
+        await refresh_task_completion_state(db, task)
     await db.commit()
     await bind_tenant_scope(db, run.tenant_id)
     await db.refresh(run)
@@ -945,6 +956,9 @@ async def create_task_workspace(
             source_paths=json.dumps(source_paths) if source_paths else None,
         )
         db.add(record)
+        await db.flush()
+        require_task_review(task)
+        await refresh_task_completion_state(db, task)
         await db.commit()
     except WorkspaceError as exc:
         manager.delete(workspace.id)
@@ -1016,6 +1030,7 @@ async def run_task_verification(
         kind=payload.kind,
         command=json.dumps(command),
         status="pending_approval",
+        required_for_completion=payload.required_for_completion,
         runner_version="sandbox-service/1" if settings.sandbox_runtime_url else "docker-sandbox/1",
         source_digest=source_digest,
     )
@@ -1044,6 +1059,9 @@ async def run_task_verification(
     )
     db.add(run)
     await db.flush()
+    if run.required_for_completion:
+        require_task_review(task)
+    await refresh_task_completion_state(db, task)
     db.add(approval)
     await db.commit()
     await bind_tenant_scope(db, task.tenant_id)
@@ -1960,6 +1978,9 @@ async def create_task_acceptance_criteria(
 
     records = [TaskAcceptanceCriterion(tenant_id=task.tenant_id, task_id=task.id, text=criterion) for criterion in criteria_text]
     db.add_all(records)
+    await db.flush()
+    require_task_review(task)
+    await refresh_task_completion_state(db, task)
     await db.commit()
     return {"task_id": str(task.id), "acceptance_criteria": [_criterion_dict(record) for record in records]}
 
@@ -1978,7 +1999,35 @@ async def list_task_acceptance_criteria(
             .order_by(TaskAcceptanceCriterion.created_at, TaskAcceptanceCriterion.id)
         )
     ).scalars().all()
-    return {"task_id": str(task.id), "acceptance_criteria": [_criterion_dict(record) for record in criteria]}
+    workspace = (
+        await db.execute(
+            select(TaskWorkspace).where(
+                TaskWorkspace.tenant_id == task.tenant_id,
+                TaskWorkspace.task_id == task.id,
+            )
+        )
+    ).scalar_one_or_none()
+    workspace_digest: str | None = None
+    if workspace is not None:
+        try:
+            manager = _workspace_manager()
+            workspace_digest = manager.fingerprint(manager.get(workspace.id))
+        except WorkspaceError:
+            workspace_digest = None
+    verification_supported = (
+        await db.execute(
+            select(TaskHandoff.id).where(
+                TaskHandoff.tenant_id == task.tenant_id,
+                TaskHandoff.child_task_id == task.id,
+            )
+        )
+    ).scalar_one_or_none() is not None
+    return {
+        "task_id": str(task.id),
+        "workspace_digest": workspace_digest,
+        "verification_supported": verification_supported,
+        "acceptance_criteria": [_criterion_dict(record) for record in criteria],
+    }
 
 
 @router.post("/acceptance-criteria/{criterion_id}/decision", summary="Record an owner/admin acceptance decision")
@@ -1991,6 +2040,21 @@ async def decide_task_acceptance_criterion(
 ) -> dict[str, Any]:
     task = await _owned_task(execution_id, task_id, db)
     reviewer_user_id, reviewer_organization_id = await _require_acceptance_reviewer(db, task)
+    workspace_record = (
+        await db.execute(
+            select(TaskWorkspace).where(
+                TaskWorkspace.tenant_id == task.tenant_id,
+                TaskWorkspace.task_id == task.id,
+            )
+        )
+    ).scalar_one_or_none()
+    decision_workspace_digest: str | None = None
+    if workspace_record is not None:
+        try:
+            manager = _workspace_manager()
+            decision_workspace_digest = manager.fingerprint(manager.get(workspace_record.id))
+        except WorkspaceError as exc:
+            raise HTTPException(status_code=409, detail="Task workspace is missing or invalid") from exc
     await db.execute(
         text("SELECT set_config('app.task_event_actor_user_id', :actor, true)"),
         {"actor": str(reviewer_user_id)},
@@ -2001,13 +2065,17 @@ async def decide_task_acceptance_criterion(
             TaskAcceptanceCriterion.id == criterion_id,
             TaskAcceptanceCriterion.tenant_id == task.tenant_id,
             TaskAcceptanceCriterion.task_id == task.id,
-            TaskAcceptanceCriterion.status == "pending",
+            or_(
+                TaskAcceptanceCriterion.status == "pending",
+                TaskAcceptanceCriterion.decision_workspace_digest.is_distinct_from(decision_workspace_digest),
+            ),
         )
         .values(
             status=payload.decision,
             reviewer_user_id=reviewer_user_id,
             reviewer_organization_id=reviewer_organization_id,
             decision_note=payload.note,
+            decision_workspace_digest=decision_workspace_digest,
             decided_at=datetime.now(UTC),
         )
         .returning(TaskAcceptanceCriterion.id)
@@ -2027,6 +2095,7 @@ async def decide_task_acceptance_criterion(
             raise HTTPException(status_code=404, detail="Acceptance criterion not found")
         raise HTTPException(status_code=409, detail=f"Acceptance criterion is already {existing_status}")
 
+    await refresh_task_completion_state(db, task)
     await db.commit()
     record = (
         await db.execute(

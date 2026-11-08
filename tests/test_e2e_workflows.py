@@ -14,6 +14,7 @@ import asyncio
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -225,9 +226,14 @@ async def test_task_verification_is_sandboxed_and_durable(
     from sqlalchemy import select
 
     from solvyn.config import settings
+    from solvyn.api.v1 import verification as verification_api
     from solvyn.sandbox.runtime import DockerSandboxRunner, SandboxResult
+    from solvyn.workflows import task_completion
 
-    monkeypatch.setattr(settings, "sandbox_workspace_root", str(tmp_path / "workspaces"))
+    workspace_root = str(tmp_path / "workspaces")
+    monkeypatch.setattr(settings, "sandbox_workspace_root", workspace_root)
+    monkeypatch.setattr(verification_api.settings, "sandbox_workspace_root", workspace_root)
+    monkeypatch.setattr(task_completion.settings, "sandbox_workspace_root", workspace_root)
 
     workflow = await client.post("/api/v1/workflows/feature/run", json={"requirement": "Verify a generated feature"})
     assert workflow.status_code == 200
@@ -247,6 +253,7 @@ async def test_task_verification_is_sandboxed_and_durable(
         OrganizationMembership,
         Project,
         Task,
+        TaskAcceptanceCriterion,
         TaskHandoff,
         TaskWorkspace,
         TeammateProfile,
@@ -257,6 +264,7 @@ async def test_task_verification_is_sandboxed_and_durable(
         VerificationRun,
     )
     from solvyn.db.session import async_session_factory, bind_tenant_scope
+    from solvyn.sandbox.workspaces import WorkspaceManager
 
     user_id = uuid.uuid4()
     organization_id = uuid.uuid4()
@@ -293,6 +301,8 @@ async def test_task_verification_is_sandboxed_and_durable(
         await db.flush()
         child_task = (await db.execute(select(Task).where(Task.id == uuid.UUID(task_id)))).scalar_one()
         child_task.parent_task_id = parent_task_id
+        child_task.status = "completed"
+        child_task.completed_at = datetime.now(UTC)
         db.add_all(
             [
                 organization,
@@ -326,6 +336,23 @@ async def test_task_verification_is_sandboxed_and_durable(
     client.headers["Authorization"] = f"Bearer {create_access_token(subject=str(user_id))}"
     client.headers["X-Tenant-Slug"] = "test-tenant"
 
+    criteria = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria",
+        json={"criteria": ["The sample test passes"]},
+    )
+    assert criteria.status_code == 201
+    accepted = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria/{criteria.json()['acceptance_criteria'][0]['id']}/decision",
+        json={"decision": "accepted", "note": "Reviewed the verification requirement"},
+    )
+    assert accepted.status_code == 200
+    accepted_criteria = await client.get(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria"
+    )
+    assert accepted_criteria.json()["verification_supported"] is True
+    assert len(accepted_criteria.json()["workspace_digest"]) == 64
+    assert accepted.json()["decision_workspace_digest"] == accepted_criteria.json()["workspace_digest"]
+
     async def approve_and_execute(response):
         approval_id = response.json()["approval_id"]
         approval = await client.post(f"/api/v1/approvals/{approval_id}/approve", json={"note": "Approved verification"})
@@ -347,6 +374,7 @@ async def test_task_verification_is_sandboxed_and_durable(
     )
     assert verification.status_code == 202
     assert verification.json()["verification_run"]["status"] == "pending_approval"
+    assert verification.json()["verification_run"]["required_for_completion"] is True
     assert verification.json()["verification_run"]["command"] == ["pytest", "-q"]
     assert len(verification.json()["verification_run"]["source_digest"]) == 64
     approval_id = verification.json()["approval_id"]
@@ -443,10 +471,71 @@ async def test_task_verification_is_sandboxed_and_durable(
     first_result = await client.post(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs/{verification.json()['verification_run']['id']}/execute"
     )
-    assert first_result.status_code == 200
+    assert first_result.status_code == 200, first_result.text
     assert first_result.json()["status"] == "passed"
     assert first_result.json()["stdout"] == "1 passed"
     assert first_result.json()["regression_status"] == "baseline"
+    async with async_session_factory() as db:
+        await bind_tenant_scope(db, tenant.id)
+        persisted_criterion = (
+            await db.execute(
+                select(TaskAcceptanceCriterion).where(TaskAcceptanceCriterion.task_id == uuid.UUID(task_id))
+            )
+        ).scalar_one()
+        persisted_run = (
+            await db.execute(
+                select(VerificationRun).where(
+                    VerificationRun.id == uuid.UUID(verification.json()["verification_run"]["id"])
+                )
+            )
+        ).scalar_one()
+        persisted_workspace = (
+            await db.execute(select(TaskWorkspace).where(TaskWorkspace.task_id == uuid.UUID(task_id)))
+        ).scalar_one()
+    manager = WorkspaceManager(Path(settings.sandbox_workspace_root))
+    assert persisted_workspace.id == uuid.UUID(workspace.json()["workspace_id"])
+    workspace_path = manager.root / str(persisted_workspace.id)
+    assert workspace_path.is_dir(), f"Workspace path disappeared after verification: {workspace_path}"
+    current_digest = manager.fingerprint(manager.get(persisted_workspace.id))
+    assert persisted_criterion.status == "accepted"
+    assert persisted_criterion.decision_workspace_digest == current_digest
+    assert persisted_run.status == "passed"
+    assert persisted_run.source_digest == current_digest
+    after_pass = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
+    assert next(item for item in after_pass.json()["tasks"] if item["task_id"] == task_id)["status"] == "completed"
+
+    async with async_session_factory() as db:
+        await bind_tenant_scope(db, tenant.id)
+        task_workspace = (
+            await db.execute(select(TaskWorkspace).where(TaskWorkspace.task_id == uuid.UUID(task_id)))
+        ).scalar_one()
+        criterion = (
+            await db.execute(
+                select(TaskAcceptanceCriterion).where(TaskAcceptanceCriterion.task_id == uuid.UUID(task_id))
+            )
+        ).scalar_one()
+    manager = WorkspaceManager(Path(settings.sandbox_workspace_root))
+    managed_workspace = manager.get(task_workspace.id)
+    manager.write_file(managed_workspace, "test_sample.py", b"def test_sample():\n    assert 2 + 2 == 4\n")
+    reverification = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs",
+        json={"kind": "test"},
+    )
+    assert reverification.status_code == 202
+    assert reverification.json()["verification_run"]["source_digest"] != verification.json()["verification_run"]["source_digest"]
+    reverification_result = await approve_and_execute(reverification)
+    assert reverification_result.status_code == 200
+    assert reverification_result.json()["status"] == "passed"
+    after_reverification = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
+    assert next(item for item in after_reverification.json()["tasks"] if item["task_id"] == task_id)["status"] == "review_required"
+    rereview = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria/{criterion.id}/decision",
+        json={"decision": "accepted", "note": "Reviewed the updated workspace contents"},
+    )
+    assert rereview.status_code == 200
+    assert rereview.json()["decision_workspace_digest"] == reverification.json()["verification_run"]["source_digest"]
+    after_rereview = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
+    assert next(item for item in after_rereview.json()["tasks"] if item["task_id"] == task_id)["status"] == "completed"
 
     async def failed_run(self: DockerSandboxRunner, managed_workspace: Any, command: list[str]) -> SandboxResult:
         return SandboxResult(uuid.uuid4(), tuple(command), 1, False, "1 failed", "", False, 0.05)
@@ -473,7 +562,7 @@ async def test_task_verification_is_sandboxed_and_durable(
     )
     assert rate_limited.status_code == 409
     assert "hourly rate limit" in rate_limited.json()["detail"].lower()
-    assert len(verification_calls) == 1
+    assert len(verification_calls) == 2
     hourly_limit = await client.patch(
         f"/api/v1/verification-queue/organizations/{organization_id}/control",
         json={"max_runs_per_hour": 120, "max_concurrent_runs": 5},
@@ -485,8 +574,10 @@ async def test_task_verification_is_sandboxed_and_durable(
     assert regression.status_code == 200, regression.json()
     assert regression.json()["status"] == "failed"
     assert regression.json()["regression_status"] == "regressed"
-    assert regression.json()["compared_to_run_id"] == verification.json()["verification_run"]["id"]
+    assert regression.json()["compared_to_run_id"] == reverification.json()["verification_run"]["id"]
     assert regression.json()["source_changed"] is False
+    after_failure = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
+    assert next(item for item in after_failure.json()["tasks"] if item["task_id"] == task_id)["status"] == "review_required"
     await client.patch(
         f"/api/v1/verification-queue/organizations/{organization_id}/control",
         json={"max_runs_per_hour": 30, "max_concurrent_runs": 2},
@@ -687,7 +778,7 @@ async def test_task_verification_is_sandboxed_and_durable(
 async def test_acceptance_criteria_require_an_owner_admin_decision(client: AsyncClient) -> None:
     from sqlalchemy import select
 
-    from solvyn.db.models import Organization, OrganizationMembership, Tenant, User
+    from solvyn.db.models import Organization, OrganizationMembership, Task, Tenant, User
     from solvyn.db.session import async_session_factory, bind_tenant_scope
 
     workflow = await client.post("/api/v1/workflows/feature/run", json={"requirement": "Track task acceptance criteria"})
@@ -695,6 +786,13 @@ async def test_acceptance_criteria_require_an_owner_admin_decision(client: Async
     execution_id = workflow.json()["execution_id"]
     task_history = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
     task_id = task_history.json()["tasks"][0]["task_id"]
+    async with async_session_factory() as db:
+        tenant = (await db.execute(select(Tenant).where(Tenant.slug == "test-tenant"))).scalar_one()
+        await bind_tenant_scope(db, tenant.id)
+        task_record = (await db.execute(select(Task).where(Task.id == uuid.UUID(task_id)))).scalar_one()
+        task_record.status = "completed"
+        task_record.completed_at = datetime.now(UTC)
+        await db.commit()
 
     criteria = await client.post(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria",
@@ -702,6 +800,10 @@ async def test_acceptance_criteria_require_an_owner_admin_decision(client: Async
     )
     assert criteria.status_code == 201
     assert [criterion["status"] for criterion in criteria.json()["acceptance_criteria"]] == ["pending", "pending"]
+    task_after_criteria = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
+    task_after_criteria_item = next(item for item in task_after_criteria.json()["tasks"] if item["task_id"] == task_id)
+    assert task_after_criteria_item["status"] == "review_required"
+    assert task_after_criteria_item["completed_at"] is None
 
     unsigned_decision = await client.post(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria/{criteria.json()['acceptance_criteria'][0]['id']}/decision",
@@ -744,6 +846,18 @@ async def test_acceptance_criteria_require_an_owner_admin_decision(client: Async
     assert decision.json()["reviewer_user_id"] == str(user_id)
     assert decision.json()["reviewer_organization_id"] == str(organization_id)
     assert decision.json()["decided_at"] is not None
+
+    still_in_review = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
+    assert next(item for item in still_in_review.json()["tasks"] if item["task_id"] == task_id)["status"] == "review_required"
+
+    second_criterion_id = criteria.json()["acceptance_criteria"][1]["id"]
+    second_decision = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria/{second_criterion_id}/decision",
+        json={"decision": "accepted", "note": "Failure cases are covered"},
+    )
+    assert second_decision.status_code == 200
+    all_accepted = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
+    assert next(item for item in all_accepted.json()["tasks"] if item["task_id"] == task_id)["status"] == "completed"
 
     repeated_decision = await client.post(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria/{criterion_id}/decision",

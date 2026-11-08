@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useState } from "react";
-import { api, TaskActivityEvent, TaskDeliveryDiff, TaskDeliveryEvidence, TaskDeliveryResult } from "@/lib/api";
+import { api, TaskActivityEvent, TaskDeliveryDiff, TaskDeliveryEvidence, TaskDeliveryResult, WorkflowExecutionTask } from "@/lib/api";
 import styles from "./page.module.css";
 
 export default function TaskDeliveryReviewPage() {
@@ -13,8 +13,16 @@ export default function TaskDeliveryReviewPage() {
   const [result, setResult] = useState<TaskDeliveryResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [activity, setActivity] = useState<TaskActivityEvent[]>([]);
+  const [taskInfo, setTaskInfo] = useState<WorkflowExecutionTask | null>(null);
   const [activityLoading, setActivityLoading] = useState(true);
   const [activityError, setActivityError] = useState<string | null>(null);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [reviewNotice, setReviewNotice] = useState<string | null>(null);
+  const [criteriaDraft, setCriteriaDraft] = useState("");
+  const [criteriaBusy, setCriteriaBusy] = useState(false);
+  const [decisionBusyId, setDecisionBusyId] = useState<string | null>(null);
+  const [verificationKind, setVerificationKind] = useState("test");
+  const [verificationBusy, setVerificationBusy] = useState(false);
   const [deliveryEvidence, setDeliveryEvidence] = useState<Record<string, TaskDeliveryEvidence>>({});
   const [evidenceLoading, setEvidenceLoading] = useState<string | null>(null);
   const [evidenceError, setEvidenceError] = useState<string | null>(null);
@@ -45,8 +53,19 @@ export default function TaskDeliveryReviewPage() {
     setActivityLoading(true);
     setActivityError(null);
     try {
-      const feed = await api.getTaskActivity(executionId, taskId);
+      const [feed, taskFeed, acceptance] = await Promise.all([
+        api.getTaskActivity(executionId, taskId),
+        api.getExecutionTasks(executionId),
+        api.getTaskAcceptanceCriteria(executionId, taskId),
+      ]);
       setActivity(feed.activity);
+      const task = taskFeed.tasks.find((item) => item.task_id === taskId);
+      setTaskInfo(task ? {
+        ...task,
+        acceptance_criteria: acceptance.acceptance_criteria,
+        workspace_digest: acceptance.workspace_digest,
+        verification_supported: acceptance.verification_supported,
+      } : null);
     } catch (reason) {
       setActivityError(reason instanceof Error ? reason.message : "Could not load task activity.");
     } finally {
@@ -55,6 +74,59 @@ export default function TaskDeliveryReviewPage() {
   }, [executionId, taskId]);
 
   useEffect(() => { void loadActivity(); }, [loadActivity]);
+
+  async function addAcceptanceCriteria(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const criteria = criteriaDraft.split("\n").map((value) => value.trim()).filter(Boolean);
+    if (criteria.length === 0) {
+      setReviewError("Add at least one acceptance criterion.");
+      return;
+    }
+    setCriteriaBusy(true);
+    setReviewError(null);
+    setReviewNotice(null);
+    try {
+      await api.createTaskAcceptanceCriteria(executionId, taskId, criteria);
+      setCriteriaDraft("");
+      setReviewNotice("Acceptance criteria saved. The task remains in review until every criterion and required check passes.");
+      await loadActivity();
+    } catch (reason) {
+      setReviewError(reason instanceof Error ? reason.message : "Could not save acceptance criteria.");
+    } finally {
+      setCriteriaBusy(false);
+    }
+  }
+
+  async function decideCriterion(criterionId: string, decision: "accepted" | "rejected") {
+    setDecisionBusyId(criterionId);
+    setReviewError(null);
+    setReviewNotice(null);
+    try {
+      await api.decideTaskAcceptanceCriterion(executionId, taskId, criterionId, decision);
+      setReviewNotice(`Criterion ${decision}.`);
+      await loadActivity();
+    } catch (reason) {
+      setReviewError(reason instanceof Error ? reason.message : "Could not record the criterion decision.");
+    } finally {
+      setDecisionBusyId(null);
+    }
+  }
+
+  async function requestVerification(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setVerificationBusy(true);
+    setReviewError(null);
+    setReviewNotice(null);
+    try {
+      const requested = await api.requestTaskVerification(executionId, taskId, verificationKind);
+      setReviewNotice(`Required ${requested.verification_run.kind} check requested. Approve and run it in the approvals inbox.`);
+      await loadActivity();
+    } catch (reason) {
+      setReviewError(reason instanceof Error ? reason.message : "Could not request verification.");
+    } finally {
+      setVerificationBusy(false);
+    }
+  }
 
   async function submitDelivery(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -141,6 +213,73 @@ export default function TaskDeliveryReviewPage() {
       </section>
 
       {error && <section className={styles.notice} role="alert"><p>{error}</p></section>}
+
+      <section className={`${styles.diffPanel} pearl-pane`} aria-labelledby="completion-review-heading">
+        <div className={styles.sectionHead}>
+          <div>
+            <span className="eyebrow">Completion gate</span>
+            <h2 id="completion-review-heading">Acceptance and verification</h2>
+          </div>
+          {taskInfo && <span className="status-pill">{taskInfo.status.replaceAll("_", " ")}</span>}
+        </div>
+        <p className={styles.intro}>A task with a workspace is complete after its acceptance criteria are accepted and a required verification passes on the current workspace contents.</p>
+        {reviewError && <p className={styles.activityError} role="alert">{reviewError}</p>}
+        {reviewNotice && <p className={styles.success} role="status">{reviewNotice}</p>}
+        {taskInfo?.acceptance_criteria_defined ? (
+          <div className={styles.activityList}>
+            {taskInfo.acceptance_criteria.map((criterion) => (
+              <article className={styles.activityItem} key={criterion.id}>
+                <div>
+                  <strong>{criterion.text}</strong>
+                  <span className="status-pill">{criterion.status}</span>
+                  {criterion.decision_note && <p>{criterion.decision_note}</p>}
+                </div>
+                {(criterion.status === "pending" || (
+                  taskInfo.status === "review_required" && criterion.decision_workspace_digest !== taskInfo.workspace_digest
+                )) && (
+                  <div className={styles.eventActions}>
+                    <button className="action-button secondary" disabled={decisionBusyId !== null} onClick={() => void decideCriterion(criterion.id, "accepted")} type="button">
+                      {decisionBusyId === criterion.id ? "Saving…" : criterion.status === "pending" ? "Accept" : "Review current version"}
+                    </button>
+                    <button className="action-button secondary" disabled={decisionBusyId !== null} onClick={() => void decideCriterion(criterion.id, "rejected")} type="button">
+                      {criterion.status === "pending" ? "Reject" : "Reject current version"}
+                    </button>
+                  </div>
+                )}
+              </article>
+            ))}
+          </div>
+        ) : (
+          <form className={styles.reviewForm} onSubmit={(event) => void addAcceptanceCriteria(event)}>
+            <label>
+              <span className="field-label">Acceptance criteria</span>
+              <textarea className="editorial-input" onChange={(event) => setCriteriaDraft(event.target.value)} placeholder="One criterion per line" rows={4} value={criteriaDraft} />
+            </label>
+            <button className="action-button" disabled={criteriaBusy} type="submit">{criteriaBusy ? "Saving…" : "Add criteria"}</button>
+          </form>
+        )}
+        {taskInfo?.verification_supported ? <form className={styles.reviewForm} onSubmit={(event) => void requestVerification(event)}>
+          <label>
+            <span className="field-label">Required check</span>
+            <select className="editorial-input" onChange={(event) => setVerificationKind(event.target.value)} value={verificationKind}>
+              {["test", "build", "lint", "typecheck", "security"].map((kind) => <option key={kind} value={kind}>{kind}</option>)}
+            </select>
+          </label>
+          <button className="action-button secondary" disabled={verificationBusy} type="submit">{verificationBusy ? "Requesting…" : "Request required check"}</button>
+          <Link href="/approvals">Open approvals inbox</Link>
+        </form> : <p className={styles.intro}>This task has no assigned teammate approval scope, so completion is based on accepted criteria.</p>}
+        {taskInfo && taskInfo.verification_runs.length > 0 && (
+          <ul className={styles.activityList} aria-label="Verification history">
+            {taskInfo.verification_runs.map((run) => (
+              <li className={styles.activityItem} key={run.id}>
+                <strong>{run.kind}{run.required_for_completion ? " · required" : " · informational"}</strong>
+                <span className="status-pill">{run.status.replaceAll("_", " ")}</span>
+                {run.source_digest && <code>{run.source_digest.slice(0, 12)}</code>}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
 
       <section className={`${styles.diffPanel} pearl-pane`} aria-labelledby="activity-heading" aria-busy={activityLoading}>
         <div className={styles.sectionHead}>

@@ -341,6 +341,7 @@ class VerificationRun(Base):
     kind: Mapped[str] = mapped_column(String(30), nullable=False)
     command: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="running", server_default="running")
+    required_for_completion: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
     exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     timed_out: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
     output_truncated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
@@ -425,6 +426,7 @@ class TaskAcceptanceCriterion(Base):
         UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True
     )
     decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    decision_workspace_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
