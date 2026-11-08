@@ -34,8 +34,10 @@ class _Rows:
 class _ActivitySession:
     def __init__(self, results: list[list[Any]]) -> None:
         self.results = iter(results)
+        self.statements: list[Any] = []
 
-    async def execute(self, _statement: Any) -> _Rows:
+    async def execute(self, statement: Any) -> _Rows:
+        self.statements.append(statement)
         return _Rows(next(self.results))
 
 
@@ -162,6 +164,11 @@ async def test_task_activity_combines_durable_records_in_reverse_chronological_o
     )
 
     feed = await verification.list_task_activity(execution_id, task_id, session)  # type: ignore[arg-type]
+
+    usage_query = next(statement for statement in session.statements if "token_usage" in str(statement))
+    query_parameters = usage_query.compile().params
+    task_filter = next(value for key, value in query_parameters.items() if key.startswith("task_id"))
+    assert set(task_filter) == {task_id, child_task_id}
 
     assert feed["count"] == 13
     assert feed["truncated"] is False
