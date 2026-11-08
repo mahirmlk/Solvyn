@@ -80,6 +80,8 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://solvyn_runtime:solvyn_runtime@localhost:5432/solvyn
           REDIS_URL: redis://localhost:6379/0
           API_KEY_SECRET: test-secret-key-for-ci-only
+      - name: Smoke test database backup and restore
+        run: bash scripts/backup-restore-smoke.sh
       - name: Check for dependency vulnerabilities
         run: pip install pip-audit && pip-audit
 
