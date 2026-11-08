@@ -232,6 +232,46 @@ async def test_workspace_list_filters_git_files_before_applying_limit(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_workspace_search_is_read_only_bounded_and_audited(tmp_path: Path) -> None:
+    runtime, session, manager, workspace = _runtime(tmp_path, {"READ_ONLY"})
+    manager.write_file(workspace, "src/main.py", b"def build():\n    return 'Ready'\n")
+    manager.write_file(workspace, ".git/config", b"Ready")
+
+    result = await runtime._invoke(
+        {
+            "id": "call-search",
+            "function": {"name": "workspace_search", "arguments": '{"query":"ready"}'},
+        }
+    )
+
+    assert result["matches"] == [{"path": "src/main.py", "line": 2, "snippet": "    return 'Ready'"}]
+    assert result["content_trust"] == "untrusted_repository_data"
+    assert session.records[0].tool_name == "workspace_search"
+    assert session.records[0].status == "succeeded"
+    assert session.records[0].input_bytes == len("ready")
+    available = {tool["function"]["name"] for tool in runtime._tool_definitions({"READ_ONLY"})}
+    assert "workspace_search" in available
+    assert "workspace_search" not in {tool["function"]["name"] for tool in runtime._tool_definitions({"MODIFY_FILES"})}
+
+
+@pytest.mark.asyncio
+async def test_workspace_search_requires_read_only_permission(tmp_path: Path) -> None:
+    runtime, session, manager, workspace = _runtime(tmp_path, {"MODIFY_FILES"})
+    manager.write_file(workspace, "main.py", b"needle")
+
+    result = await runtime._invoke(
+        {
+            "id": "call-search-denied",
+            "function": {"name": "workspace_search", "arguments": '{"query":"needle"}'},
+        }
+    )
+
+    assert result == {"error": "permission_denied"}
+    assert manager.read_file(workspace, "main.py") == b"needle"
+    assert session.records[0].status == "denied"
+
+
+@pytest.mark.asyncio
 async def test_tool_loop_returns_model_result_after_audited_file_write(tmp_path: Path) -> None:
     from solvyn.llm.providers.base import LLMResponse
 

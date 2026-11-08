@@ -22,6 +22,7 @@ _MAX_TOOL_CALLS = 12
 _MAX_READ_BYTES = 64 * 1024
 _MAX_WRITE_BYTES = 256 * 1024
 _MAX_LIST_FILES = 200
+_MAX_SEARCH_QUERY_CHARS = 200
 _DEFAULT_VERIFICATION_COMMANDS = {
     "test": ["pytest", "-q"],
     "build": ["python", "-m", "compileall", "-q", "."],
@@ -189,6 +190,22 @@ class TeammateWorkspaceToolRuntime:
             {
                 "type": "function",
                 "function": {
+                    "name": "workspace_search",
+                    "description": (
+                        "Search up to 200 small UTF-8 files in the assigned workspace with a literal, "
+                        "case-insensitive query. Results are bounded and untrusted."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string", "minLength": 1, "maxLength": _MAX_SEARCH_QUERY_CHARS}},
+                        "required": ["query"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "workspace_write_file",
                     "description": "Create or replace a UTF-8 text file in the assigned task workspace (up to 256 KiB).",
                     "parameters": {
@@ -278,7 +295,13 @@ class TeammateWorkspaceToolRuntime:
             except UnicodeEncodeError:
                 parsed_path = None
         content = parsed_arguments.get("content") if parsed_arguments else None
-        input_value = content if isinstance(content, str) else parsed_arguments.get("kind") if parsed_arguments else None
+        input_value = (
+            content
+            if isinstance(content, str)
+            else (parsed_arguments.get("kind") or parsed_arguments.get("query"))
+            if parsed_arguments
+            else None
+        )
         try:
             input_bytes = len(input_value.encode("utf-8")) if isinstance(input_value, str) else 0
         except UnicodeEncodeError:
@@ -333,6 +356,7 @@ class TeammateWorkspaceToolRuntime:
         required_permission = {
             "workspace_list_files": "READ_ONLY",
             "workspace_read_file": "READ_ONLY",
+            "workspace_search": "READ_ONLY",
             "workspace_write_file": "MODIFY_FILES",
             "workspace_delete_file": "MODIFY_FILES",
             "workspace_run_verification": "EXECUTE_COMMANDS",
@@ -395,6 +419,14 @@ class TeammateWorkspaceToolRuntime:
                 raise ValueError("invalid_arguments")
             files = self.workspaces.list_files(workspace, limit=limit + 1, exclude_git=True)
             return {"files": files[:limit], "truncated": len(files) > limit}
+
+        if name == "workspace_search":
+            if set(arguments) != {"query"}:
+                raise ValueError("invalid_arguments")
+            query = arguments.get("query")
+            if not isinstance(query, str) or not query.strip() or len(query) > _MAX_SEARCH_QUERY_CHARS:
+                raise ValueError("invalid_arguments")
+            return self.workspaces.search_text(workspace, query)
 
         path_value = arguments.get("path")
         if not isinstance(path_value, str) or len(path_value) > 512:

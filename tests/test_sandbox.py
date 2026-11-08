@@ -8,6 +8,7 @@ import os
 import sys
 import tarfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -55,6 +56,122 @@ def test_workspace_fingerprint_tracks_paths_and_content(tmp_path: Path) -> None:
     assert changed_content != original
     manager.write_file(workspace, "src/renamed.py", b"after")
     assert manager.fingerprint(workspace) != changed_content
+
+
+def test_workspace_search_matches_utf8_literals_and_skips_binary_and_git(tmp_path: Path) -> None:
+    manager = WorkspaceManager(tmp_path / "workspaces")
+    workspace = manager.create()
+    manager.write_file(workspace, "src/main.py", b"first line\nCall `FOO.*` here\n")
+    manager.write_file(workspace, "src/binary.dat", b"needle\x00binary")
+    manager.write_file(workspace, "src/invalid.txt", b"needle\xff")
+    manager.write_file(workspace, "src/large.txt", b"needle " + b"x" * (128 * 1024))
+    manager.write_file(workspace, ".git/config", b"needle should stay hidden")
+
+    result = manager.search_text(workspace, "foo.*")
+
+    assert result["matches"] == [{"path": "src/main.py", "line": 2, "snippet": "Call `FOO.*` here"}]
+    assert result["content_trust"] == "untrusted_repository_data"
+    assert result["skipped_files"] == 3
+    assert result["truncated"] is False
+
+
+def test_workspace_search_enforces_file_and_result_caps(tmp_path: Path) -> None:
+    manager = WorkspaceManager(tmp_path / "workspaces")
+    workspace = manager.create()
+    for index in range(201):
+        (workspace.path / f"{index:03}.txt").write_text("no match", encoding="utf-8")
+
+    result = manager.search_text(workspace, "needle")
+
+    assert result["scanned_files"] == 200
+    assert result["truncated"] is True
+
+    for index in range(201):
+        (workspace.path / f"{index:03}.txt").write_text(f"needle {index}", encoding="utf-8")
+    matches = manager.search_text(workspace, "needle")
+    assert matches["count"] == 50
+    assert matches["truncated"] is True
+
+
+def test_workspace_search_bounds_directory_entries_even_without_files(tmp_path: Path) -> None:
+    manager = WorkspaceManager(tmp_path / "workspaces")
+    workspace = manager.create()
+    for index in range(2_001):
+        (workspace.path / f"empty-{index:04}").mkdir()
+
+    result = manager.search_text(workspace, "needle")
+
+    assert result["scanned_entries"] == 2_000
+    assert result["scanned_files"] == 0
+    assert result["truncated"] is True
+
+
+def test_workspace_search_enforces_total_byte_budget_and_query_validation(tmp_path: Path) -> None:
+    manager = WorkspaceManager(tmp_path / "workspaces")
+    workspace = manager.create()
+    for index in range(20):
+        (workspace.path / f"{index:02}.txt").write_bytes(b"x" * (128 * 1024))
+
+    result = manager.search_text(workspace, "needle")
+
+    assert result["scanned_bytes"] == 2 * 1024 * 1024
+    assert result["truncated"] is True
+    with pytest.raises(WorkspaceError, match="Search query"):
+        manager.search_text(workspace, " ")
+
+
+def test_workspace_search_enforces_response_size_cap(tmp_path: Path) -> None:
+    manager = WorkspaceManager(tmp_path / "workspaces")
+    workspace = manager.create()
+    for index in range(50):
+        directory = workspace.path / f"source-{index:02}" / ("nested-" + "x" * 100)
+        directory.mkdir(parents=True)
+        (directory / "match.txt").write_text("needle " + "context " * 100, encoding="utf-8")
+
+    result = manager.search_text(workspace, "needle")
+
+    assert result["truncated"] is True
+    assert len(result["matches"]) < 50
+    assert len(json.dumps(result, ensure_ascii=False).encode("utf-8")) <= 16 * 1024
+
+
+def test_workspace_search_does_not_follow_symlink_directories(tmp_path: Path) -> None:
+    manager = WorkspaceManager(tmp_path / "workspaces")
+    workspace = manager.create()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("needle secret", encoding="utf-8")
+    try:
+        (workspace.path / "escape").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable")
+
+    result = manager.search_text(workspace, "needle")
+
+    assert result["matches"] == []
+
+
+def test_workspace_search_prunes_git_directories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import solvyn.sandbox.workspaces as workspaces_module
+
+    manager = WorkspaceManager(tmp_path / "workspaces")
+    workspace = manager.create()
+    git_objects = workspace.path / ".git" / "objects"
+    git_objects.mkdir(parents=True)
+    (git_objects / "large-pack.txt").write_text("needle", encoding="utf-8")
+    visited: list[Path] = []
+    real_scandir = workspaces_module.os.scandir
+
+    def tracking_scandir(path: Any):
+        visited.append(Path(path).relative_to(workspace.path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(workspaces_module.os, "scandir", tracking_scandir)
+
+    result = manager.search_text(workspace, "needle")
+
+    assert result["matches"] == []
+    assert all(".git" not in path.parts for path in visited)
 
 
 def test_workspace_deletes_only_confined_regular_files(tmp_path: Path) -> None:
