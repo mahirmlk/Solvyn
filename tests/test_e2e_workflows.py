@@ -482,7 +482,7 @@ async def test_task_verification_is_sandboxed_and_durable(
     regression = await client.post(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs/{regression.json()['verification_run']['id']}/execute"
     )
-    assert regression.status_code == 200
+    assert regression.status_code == 200, regression.json()
     assert regression.json()["status"] == "failed"
     assert regression.json()["regression_status"] == "regressed"
     assert regression.json()["compared_to_run_id"] == verification.json()["verification_run"]["id"]
