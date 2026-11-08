@@ -1,6 +1,6 @@
 """Mark verification runs that are required before task completion.
 
-Revision ID: 0057_task_completion_verification_gates
+Revision ID: 0057_task_completion_gates
 Revises: 0056_task_delivery_evidence
 Create Date: 2026-11-08 00:00:00
 """
@@ -10,7 +10,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0057_task_completion_verification_gates"
+revision: str = "0057_task_completion_gates"
 down_revision: str | None = "0056_task_delivery_evidence"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | None = None
