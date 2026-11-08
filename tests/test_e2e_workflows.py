@@ -226,9 +226,14 @@ async def test_task_verification_is_sandboxed_and_durable(
     from sqlalchemy import select
 
     from solvyn.config import settings
+    from solvyn.api.v1 import verification as verification_api
     from solvyn.sandbox.runtime import DockerSandboxRunner, SandboxResult
+    from solvyn.workflows import task_completion
 
-    monkeypatch.setattr(settings, "sandbox_workspace_root", str(tmp_path / "workspaces"))
+    workspace_root = str(tmp_path / "workspaces")
+    monkeypatch.setattr(settings, "sandbox_workspace_root", workspace_root)
+    monkeypatch.setattr(verification_api.settings, "sandbox_workspace_root", workspace_root)
+    monkeypatch.setattr(task_completion.settings, "sandbox_workspace_root", workspace_root)
 
     workflow = await client.post("/api/v1/workflows/feature/run", json={"requirement": "Verify a generated feature"})
     assert workflow.status_code == 200
