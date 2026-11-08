@@ -79,6 +79,7 @@ async def refresh_task_completion_state(db: AsyncSession, task: Task) -> str:
                 VerificationRun.required_for_completion.is_(True),
             )
             .order_by(VerificationRun.kind, VerificationRun.started_at.desc(), VerificationRun.id.desc())
+            .execution_options(populate_existing=True)
         )
     ).scalars().all()
     latest_by_kind: dict[str, VerificationRun] = {}

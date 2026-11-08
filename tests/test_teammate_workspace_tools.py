@@ -130,7 +130,7 @@ async def test_workspace_write_is_scoped_and_audited_without_file_contents(tmp_p
     assert record.input_bytes == 8
     assert not hasattr(record, "content")
     assert session.task.status == "review_required"
-    assert session.committed_task_statuses[0] == "review_required"
+    assert session.committed_task_statuses[1] == "review_required"
 
 
 @pytest.mark.asyncio
@@ -271,8 +271,14 @@ async def test_tool_loop_returns_model_result_after_audited_file_write(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_verification_tool_requests_approval_without_executing(tmp_path: Path) -> None:
+async def test_verification_tool_requests_approval_without_executing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from solvyn.agents import workspace_tools
+
     runtime, session, _manager, workspace = _runtime(tmp_path, {"EXECUTE_COMMANDS"})
+    refresh = AsyncMock()
+    monkeypatch.setattr(workspace_tools, "refresh_task_completion_state", refresh)
     del workspace
 
     result = await runtime._invoke(
@@ -287,6 +293,7 @@ async def test_verification_tool_requests_approval_without_executing(tmp_path: P
 
     assert result["kind"] == "test"
     assert result["status"] == "pending_approval"
+    refresh.assert_awaited_once_with(session, session.task)
     assert session.records[0].status == "succeeded"
     verification = session.records[1]
     assert verification.status == "pending_approval"
