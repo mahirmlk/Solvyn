@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from solvyn.db.models import Task
+
 
 class _Result:
     def __init__(self, value):
@@ -32,7 +34,7 @@ class _Session:
 
     async def execute(self, statement):
         sql = str(statement)
-        if "FROM tasks" in sql:
+        if statement.column_descriptions and statement.column_descriptions[0].get("expr") is Task:
             return _Result(self.task)
         if "verification_runs" in sql:
             return _Result(uuid.uuid4() if self.active_verification_approval else None)

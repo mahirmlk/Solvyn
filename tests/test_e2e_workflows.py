@@ -293,6 +293,8 @@ async def test_task_verification_is_sandboxed_and_durable(
         await db.flush()
         child_task = (await db.execute(select(Task).where(Task.id == uuid.UUID(task_id)))).scalar_one()
         child_task.parent_task_id = parent_task_id
+        child_task.status = "completed"
+        child_task.completed_at = datetime.now(UTC)
         db.add_all(
             [
                 organization,
@@ -747,7 +749,7 @@ async def test_task_verification_is_sandboxed_and_durable(
 async def test_acceptance_criteria_require_an_owner_admin_decision(client: AsyncClient) -> None:
     from sqlalchemy import select
 
-    from solvyn.db.models import Organization, OrganizationMembership, Tenant, User
+    from solvyn.db.models import Organization, OrganizationMembership, Task, Tenant, User
     from solvyn.db.session import async_session_factory, bind_tenant_scope
 
     workflow = await client.post("/api/v1/workflows/feature/run", json={"requirement": "Track task acceptance criteria"})
@@ -755,6 +757,13 @@ async def test_acceptance_criteria_require_an_owner_admin_decision(client: Async
     execution_id = workflow.json()["execution_id"]
     task_history = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
     task_id = task_history.json()["tasks"][0]["task_id"]
+    async with async_session_factory() as db:
+        tenant = (await db.execute(select(Tenant).where(Tenant.slug == "test-tenant"))).scalar_one()
+        await bind_tenant_scope(db, tenant.id)
+        task_record = (await db.execute(select(Task).where(Task.id == uuid.UUID(task_id)))).scalar_one()
+        task_record.status = "completed"
+        task_record.completed_at = datetime.now(UTC)
+        await db.commit()
 
     criteria = await client.post(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria",
