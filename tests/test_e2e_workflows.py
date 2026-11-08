@@ -488,6 +488,9 @@ async def test_task_verification_is_sandboxed_and_durable(
             await db.execute(select(TaskWorkspace).where(TaskWorkspace.task_id == uuid.UUID(task_id)))
         ).scalar_one()
     manager = WorkspaceManager(Path(settings.sandbox_workspace_root))
+    assert persisted_workspace.id == uuid.UUID(workspace.json()["workspace_id"])
+    workspace_path = manager.root / str(persisted_workspace.id)
+    assert workspace_path.is_dir(), f"Workspace path disappeared after verification: {workspace_path}"
     current_digest = manager.fingerprint(manager.get(persisted_workspace.id))
     assert persisted_criterion.status == "accepted"
     assert persisted_criterion.decision_workspace_digest == current_digest
