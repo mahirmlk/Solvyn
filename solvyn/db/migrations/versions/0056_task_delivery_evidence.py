@@ -39,10 +39,14 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute(
         """DO $$
+        DECLARE tenant_row record;
         BEGIN
-            IF EXISTS (SELECT 1 FROM task_deliveries WHERE evidence_snapshot IS NOT NULL) THEN
-                RAISE EXCEPTION 'task delivery evidence exists; export/archive it before downgrading';
-            END IF;
+            FOR tenant_row IN SELECT id FROM tenants LOOP
+                PERFORM set_config('app.tenant_id', tenant_row.id::text, true);
+                IF EXISTS (SELECT 1 FROM task_deliveries WHERE evidence_snapshot IS NOT NULL) THEN
+                    RAISE EXCEPTION 'task delivery evidence exists; export/archive it before downgrading';
+                END IF;
+            END LOOP;
         END;
         $$"""
     )

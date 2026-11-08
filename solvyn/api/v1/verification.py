@@ -2094,6 +2094,23 @@ async def get_task_delivery_evidence(
     ).scalar_one_or_none()
     if delivery is None:
         raise HTTPException(status_code=404, detail="Task delivery not found")
+    handoff = (
+        await db.execute(
+            select(TaskHandoff).where(
+                TaskHandoff.tenant_id == task.tenant_id,
+                TaskHandoff.child_task_id == task.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if handoff is None or handoff.status not in {"pending", "running", "failed", "completed"}:
+        raise HTTPException(status_code=403, detail="Task has no approved project handoff for delivery review")
+    _repository, project = await _load_authorized_repository(
+        delivery.repository_id,
+        db,
+        roles=OWNER_ADMIN,
+    )
+    if project.id != handoff.project_id:
+        raise HTTPException(status_code=403, detail="Task delivery is outside its assigned project")
     evidence = json.loads(delivery.evidence_snapshot) if delivery.evidence_snapshot is not None else None
     return {"delivery_id": str(delivery.id), "evidence": evidence}
 

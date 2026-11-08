@@ -623,42 +623,60 @@ async def test_delivery_blocks_retry_for_unresolved_persisted_attempt(
 @pytest.mark.asyncio
 async def test_delivery_evidence_is_task_scoped_and_legacy_rows_are_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     verification_api = _verification_api()
-    execution_id, task_id, tenant_id, delivery_id = (uuid.uuid4() for _ in range(4))
+    execution_id, task_id, tenant_id, delivery_id, repository_id, project_id = (uuid.uuid4() for _ in range(6))
     task = SimpleNamespace(id=task_id, tenant_id=tenant_id)
     delivery = SimpleNamespace(
         id=delivery_id,
         tenant_id=tenant_id,
         task_id=task_id,
+        repository_id=repository_id,
         evidence_snapshot=json.dumps({"version": 1, "files": [], "deleted_paths": [], "diffs": []}),
     )
+    handoff = SimpleNamespace(status="completed", project_id=project_id)
+    repository, project = SimpleNamespace(id=repository_id), SimpleNamespace(id=project_id)
 
     async def owned_task(*_args: Any) -> Any:
         return task
 
     class Session:
-        def __init__(self, result: Any) -> None:
-            self.result = result
+        def __init__(self, delivery_record: Any, results: list[Any]) -> None:
+            self.delivery_record = delivery_record
+            self.results = iter(results)
 
         async def execute(self, statement: Any) -> Any:
             params = statement.compile().params
-            assert task_id in params.values()
-            assert tenant_id in params.values()
-            assert delivery_id in params.values()
-            return SimpleNamespace(scalar_one_or_none=lambda: self.result)
+            assert task_id in params.values() and tenant_id in params.values()
+            if delivery_id in params.values():
+                result = self.delivery_record
+            else:
+                result = next(self.results)
+            return SimpleNamespace(scalar_one_or_none=lambda: result)
+
+    async def authorized_repository(repository_ref: Any, _db: Any, *, roles: Any) -> tuple[Any, Any]:
+        assert repository_ref == repository_id
+        assert roles == verification_api.OWNER_ADMIN
+        return repository, project
 
     monkeypatch.setattr(verification_api, "_owned_task", owned_task)
+    monkeypatch.setattr(verification_api, "_load_authorized_repository", authorized_repository)
     response = await verification_api.get_task_delivery_evidence(
-        execution_id, task_id, delivery_id, Session(delivery)  # type: ignore[arg-type]
+        execution_id, task_id, delivery_id, Session(delivery, [handoff])  # type: ignore[arg-type]
     )
     assert response["evidence"] == json.loads(delivery.evidence_snapshot)
 
     legacy = SimpleNamespace(id=delivery_id, tenant_id=tenant_id, task_id=task_id, evidence_snapshot=None)
+    legacy.repository_id = repository_id
     legacy_response = await verification_api.get_task_delivery_evidence(
-        execution_id, task_id, delivery_id, Session(legacy)  # type: ignore[arg-type]
+        execution_id, task_id, delivery_id, Session(legacy, [handoff])  # type: ignore[arg-type]
     )
     assert legacy_response["evidence"] is None
+
+    async def denied_repository(*_args: Any, **_kwargs: Any) -> Any:
+        raise HTTPException(status_code=403, detail="Owner or admin role required")
+
+    monkeypatch.setattr(verification_api, "_load_authorized_repository", denied_repository)
     with pytest.raises(HTTPException) as error:
         await verification_api.get_task_delivery_evidence(
-            execution_id, task_id, delivery_id, Session(None)  # type: ignore[arg-type]
+            execution_id, task_id, delivery_id, Session(delivery, [handoff])  # type: ignore[arg-type]
         )
-    assert error.value.status_code == 404
+    assert error.value.status_code == 403
