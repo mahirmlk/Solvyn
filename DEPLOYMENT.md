@@ -466,7 +466,7 @@ Push/PR to main
     │       ├── kubectl set image (API + Frontend)
     │       └── kubectl rollout status (5min timeout)
     │
-    └──► 5. deploy-prod (manual approval gate)
+    └──► 5. deploy-prod (manual workflow dispatch + protected environment)
             ├── Environment: production
             ├── kubectl set image (API + Frontend, prod namespace)
             └── kubectl rollout status (5min timeout)
@@ -486,7 +486,9 @@ ghcr.io/<org>/<repo>:<sha>
 | Secret | Used In |
 |--------|---------|
 | `GITHUB_TOKEN` | Docker login to ghcr.io |
-| `KUBECONFIG` (or cloud auth) | kubectl deploy steps |
+| `KUBE_CONFIG` | Base64-encoded kubeconfig stored as a secret separately in the `staging` and `production` GitHub Environments |
+
+Create the kubeconfig secret for each GitHub Environment with a command such as `base64 -w0 kubeconfig` on Linux (or the platform equivalent). Grant each credential access only to its environment namespace. The workflow decodes it into a temporary runner file with mode `0600`, checks the required job and deployment permissions in that namespace, then removes it when the runner is discarded.
 
 ---
 
@@ -494,11 +496,13 @@ ghcr.io/<org>/<repo>:<sha>
 
 | Aspect | Staging | Production |
 |--------|---------|------------|
-| **Trigger** | Automatic on main push | Manual approval gate |
+| **Trigger** | Automatic on main push | Manual workflow dispatch with `deploy_production` enabled, after staging succeeds |
 | **Environment** | `staging` | `production` |
 | **Namespace** | `solvyn` | `solvyn-prod` |
 | **Deployment** | `kubectl set image` + `rollout status` | `kubectl set image` + `rollout status` |
-| **Approval** | None (auto-deploy) | Required before execution |
+| **Approval** | None (auto-deploy) | Configure required reviewers and deployment branch restrictions in the GitHub `production` Environment settings |
+
+The workflow does not implement approval by printing a message. Production runs only when a maintainer manually dispatches the workflow from `main` with `deploy_production` enabled. GitHub Environment protection rules must be configured separately to require human approval before the production job receives its secret and starts.
 
 > **⚠️ HUMAN INPUT NEEDED**: The CI/CD file assumes separate staging and production Kubernetes namespaces (`solvyn` for staging, `solvyn-prod` for production). Ensure both namespaces exist and have the correct RBAC configured.
 

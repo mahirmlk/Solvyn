@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      deploy_production:
+        description: Deploy the validated commit to production after staging succeeds
+        required: false
+        default: false
+        type: boolean
 
 env:
   REGISTRY: ghcr.io
@@ -127,10 +134,37 @@ jobs:
     environment: staging
     steps:
       - uses: actions/checkout@v4
+      - name: Configure Kubernetes access
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [[ -z "${KUBE_CONFIG:-}" ]]; then
+            echo "KUBE_CONFIG is missing from the staging GitHub Environment. Store the base64-encoded kubeconfig as the staging environment secret named KUBE_CONFIG." >&2
+            exit 1
+          fi
+          config_path="$RUNNER_TEMP/kubeconfig"
+          if ! printf '%s' "$KUBE_CONFIG" | base64 --decode > "$config_path"; then
+            echo "KUBE_CONFIG is not valid base64." >&2
+            exit 1
+          fi
+          if [[ ! -s "$config_path" ]]; then
+            echo "KUBE_CONFIG decoded to an empty file." >&2
+            exit 1
+          fi
+          chmod 600 "$config_path"
+          echo "KUBECONFIG=$config_path" >> "$GITHUB_ENV"
+          KUBECONFIG="$config_path" kubectl auth can-i --quiet create jobs -n solvyn
+          KUBECONFIG="$config_path" kubectl auth can-i --quiet delete jobs -n solvyn
+          KUBECONFIG="$config_path" kubectl auth can-i --quiet get jobs -n solvyn
+          KUBECONFIG="$config_path" kubectl auth can-i --quiet watch jobs -n solvyn
+          KUBECONFIG="$config_path" kubectl auth can-i --quiet patch deployments -n solvyn
+          KUBECONFIG="$config_path" kubectl auth can-i --quiet get deployments -n solvyn
+          KUBECONFIG="$config_path" kubectl auth can-i --quiet watch deployments -n solvyn
       - name: Run database migrations
         run: |
           kubectl delete job solvyn-migrate -n solvyn --ignore-not-found
-          kubectl apply -f k8s/migration-job.yaml
+          sed "s|image: solvyn/api:latest|image: ${{ env.REGISTRY }}/${{ needs.build.outputs.image_name }}:${{ github.sha }}|" k8s/migration-job.yaml \
+            | kubectl apply -f - -n solvyn
           kubectl wait --for=condition=complete job/solvyn-migrate -n solvyn --timeout=120s
       - name: Deploy to staging
         run: |
@@ -142,16 +176,42 @@ jobs:
   deploy-prod:
     runs-on: ubuntu-latest
     needs: [build, deploy-staging]
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.deploy_production
     environment: production
     steps:
       - uses: actions/checkout@v4
-      - name: Manual approval gate
-        run: echo "Deploying to production..."
+      - name: Configure Kubernetes access
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [[ -z "${KUBE_CONFIG:-}" ]]; then
+            echo "KUBE_CONFIG is missing from the production GitHub Environment. Store the base64-encoded kubeconfig as the production environment secret named KUBE_CONFIG." >&2
+            exit 1
+          fi
+          config_path="$RUNNER_TEMP/kubeconfig"
+          if ! printf '%s' "$KUBE_CONFIG" | base64 --decode > "$config_path"; then
+            echo "KUBE_CONFIG is not valid base64." >&2
+            exit 1
+          fi
+          if [[ ! -s "$config_path" ]]; then
+            echo "KUBE_CONFIG decoded to an empty file." >&2
+            exit 1
+          fi
+          chmod 600 "$config_path"
+          echo "KUBECONFIG=$config_path" >> "$GITHUB_ENV"
+          KUBECONFIG="$config_path" kubectl auth can-i --quiet create jobs -n solvyn-prod
+          KUBECONFIG="$config_path" kubectl auth can-i --quiet delete jobs -n solvyn-prod
+          KUBECONFIG="$config_path" kubectl auth can-i --quiet get jobs -n solvyn-prod
+          KUBECONFIG="$config_path" kubectl auth can-i --quiet watch jobs -n solvyn-prod
+          KUBECONFIG="$config_path" kubectl auth can-i --quiet patch deployments -n solvyn-prod
+          KUBECONFIG="$config_path" kubectl auth can-i --quiet get deployments -n solvyn-prod
+          KUBECONFIG="$config_path" kubectl auth can-i --quiet watch deployments -n solvyn-prod
       - name: Run database migrations
         run: |
           kubectl delete job solvyn-migrate -n solvyn-prod --ignore-not-found
-          kubectl apply -f k8s/migration-job.yaml -n solvyn-prod
+          sed -e "s|image: solvyn/api:latest|image: ${{ env.REGISTRY }}/${{ needs.build.outputs.image_name }}:${{ github.sha }}|" \
+              -e 's|namespace: solvyn|namespace: solvyn-prod|' k8s/migration-job.yaml \
+            | kubectl apply -f - -n solvyn-prod
           kubectl wait --for=condition=complete job/solvyn-migrate -n solvyn-prod --timeout=120s
       - name: Deploy to production
         run: |
