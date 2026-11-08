@@ -14,6 +14,7 @@ import asyncio
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -247,6 +248,7 @@ async def test_task_verification_is_sandboxed_and_durable(
         OrganizationMembership,
         Project,
         Task,
+        TaskAcceptanceCriterion,
         TaskHandoff,
         TaskWorkspace,
         TeammateProfile,
@@ -257,6 +259,7 @@ async def test_task_verification_is_sandboxed_and_durable(
         VerificationRun,
     )
     from solvyn.db.session import async_session_factory, bind_tenant_scope
+    from solvyn.sandbox.workspaces import WorkspaceManager
 
     user_id = uuid.uuid4()
     organization_id = uuid.uuid4()
@@ -467,13 +470,31 @@ async def test_task_verification_is_sandboxed_and_durable(
     assert first_result.json()["status"] == "passed"
     assert first_result.json()["stdout"] == "1 passed"
     assert first_result.json()["regression_status"] == "baseline"
+    async with async_session_factory() as db:
+        await bind_tenant_scope(db, tenant.id)
+        persisted_criterion = (
+            await db.execute(
+                select(TaskAcceptanceCriterion).where(TaskAcceptanceCriterion.task_id == uuid.UUID(task_id))
+            )
+        ).scalar_one()
+        persisted_run = (
+            await db.execute(
+                select(VerificationRun).where(
+                    VerificationRun.id == uuid.UUID(verification.json()["verification_run"]["id"])
+                )
+            )
+        ).scalar_one()
+        persisted_workspace = (
+            await db.execute(select(TaskWorkspace).where(TaskWorkspace.task_id == uuid.UUID(task_id)))
+        ).scalar_one()
+    manager = WorkspaceManager(Path(settings.sandbox_workspace_root))
+    current_digest = manager.fingerprint(manager.get(persisted_workspace.id))
+    assert persisted_criterion.status == "accepted"
+    assert persisted_criterion.decision_workspace_digest == current_digest
+    assert persisted_run.status == "passed"
+    assert persisted_run.source_digest == current_digest
     after_pass = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
     assert next(item for item in after_pass.json()["tasks"] if item["task_id"] == task_id)["status"] == "completed"
-
-    from pathlib import Path
-
-    from solvyn.db.models import TaskAcceptanceCriterion
-    from solvyn.sandbox.workspaces import WorkspaceManager
 
     async with async_session_factory() as db:
         await bind_tenant_scope(db, tenant.id)
