@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import stat
@@ -20,6 +21,15 @@ _WINDOWS_RESERVED_NAMES = {
     "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
     "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 }
+
+_SEARCH_MAX_QUERY_CHARS = 200
+_SEARCH_MAX_ENTRIES = 2_000
+_SEARCH_MAX_FILES = 200
+_SEARCH_MAX_FILE_BYTES = 128 * 1024
+_SEARCH_MAX_TOTAL_BYTES = 2 * 1024 * 1024
+_SEARCH_MAX_RESULTS = 50
+_SEARCH_MAX_SNIPPET_CHARS = 240
+_SEARCH_MAX_OUTPUT_BYTES = 16 * 1024
 
 
 def safe_relative_path(value: str) -> PurePosixPath:
@@ -128,6 +138,143 @@ class WorkspaceManager:
             files.append(relative.as_posix())
         files.sort()
         return files[:limit]
+
+    def search_text(self, workspace: ManagedWorkspace, query: str) -> dict[str, object]:
+        """Search a bounded set of regular UTF-8 files using literal case-insensitive matching."""
+        if not isinstance(query, str) or not query.strip() or len(query) > _SEARCH_MAX_QUERY_CHARS or "\x00" in query:
+            raise WorkspaceError("Search query must be non-empty and at most 200 characters")
+        current = self.get(workspace.id)
+        if current.path != workspace.path:
+            raise WorkspaceError("Workspace handle is invalid")
+        files: list[str] = []
+        pending_directories = [workspace.path]
+        scanned_entries = 0
+        truncated = False
+        while pending_directories:
+            directory = pending_directories.pop()
+            try:
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        if scanned_entries >= _SEARCH_MAX_ENTRIES:
+                            truncated = True
+                            break
+                        scanned_entries += 1
+                        if entry.name.casefold() == ".git":
+                            continue
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                pending_directories.append(Path(entry.path))
+                            elif entry.is_file(follow_symlinks=False):
+                                files.append(Path(entry.path).relative_to(workspace.path).as_posix())
+                        except OSError:
+                            truncated = True
+                            continue
+                        if len(files) > _SEARCH_MAX_FILES:
+                            truncated = True
+                            break
+            except OSError:
+                truncated = True
+                continue
+            if truncated:
+                break
+        if len(files) > _SEARCH_MAX_FILES:
+            truncated = True
+        matches: list[dict[str, object]] = []
+        scanned_files = 0
+        scanned_bytes = 0
+        skipped_files = 0
+        needle = query.casefold()
+        output_bytes = 0
+        stop_search = False
+
+        for relative_path in files[:_SEARCH_MAX_FILES]:
+            scanned_files += 1
+            try:
+                path = self._resolve_path(workspace, relative_path)
+            except WorkspaceError:
+                skipped_files += 1
+                truncated = True
+                continue
+            try:
+                file_descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            except OSError:
+                skipped_files += 1
+                truncated = True
+                continue
+            with os.fdopen(file_descriptor, "rb") as stream:
+                file_mode = os.fstat(stream.fileno()).st_mode
+                size = os.fstat(stream.fileno()).st_size
+                if not stat.S_ISREG(file_mode):
+                    skipped_files += 1
+                    continue
+                if size > _SEARCH_MAX_FILE_BYTES:
+                    skipped_files += 1
+                    continue
+                if scanned_bytes + size > _SEARCH_MAX_TOTAL_BYTES:
+                    truncated = True
+                    break
+                try:
+                    content = stream.read(_SEARCH_MAX_FILE_BYTES + 1)
+                except OSError:
+                    skipped_files += 1
+                    continue
+            if len(content) > _SEARCH_MAX_FILE_BYTES:
+                skipped_files += 1
+                continue
+            if scanned_bytes + len(content) > _SEARCH_MAX_TOTAL_BYTES:
+                truncated = True
+                break
+            scanned_bytes += len(content)
+            if b"\x00" in content:
+                skipped_files += 1
+                continue
+            try:
+                text = content.decode("utf-8")
+            except UnicodeDecodeError:
+                skipped_files += 1
+                continue
+
+            for line_number, line in enumerate(text.splitlines(), start=1):
+                if needle not in line.casefold():
+                    continue
+                if len(matches) >= _SEARCH_MAX_RESULTS:
+                    truncated = True
+                    stop_search = True
+                    break
+                start = max(0, line.casefold().find(needle) - (_SEARCH_MAX_SNIPPET_CHARS // 3))
+                snippet = line[start : start + _SEARCH_MAX_SNIPPET_CHARS]
+                if start > 0:
+                    snippet = "…" + snippet
+                if start + _SEARCH_MAX_SNIPPET_CHARS < len(line):
+                    snippet += "…"
+                match = {"path": relative_path, "line": line_number, "snippet": snippet}
+                encoded_size = len(json.dumps(match, ensure_ascii=False).encode("utf-8"))
+                # Reserve room for the response envelope, query, commas, and metadata.
+                if output_bytes + encoded_size + 1 > _SEARCH_MAX_OUTPUT_BYTES - 1024:
+                    truncated = True
+                    stop_search = True
+                    break
+                matches.append(match)
+                output_bytes += encoded_size
+            if stop_search:
+                break
+
+        response: dict[str, object] = {
+            "query": query,
+            "matches": matches,
+            "count": len(matches),
+            "scanned_entries": scanned_entries,
+            "scanned_files": scanned_files,
+            "scanned_bytes": scanned_bytes,
+            "skipped_files": skipped_files,
+            "truncated": truncated,
+            "content_trust": "untrusted_repository_data",
+        }
+        while len(json.dumps(response, ensure_ascii=False).encode("utf-8")) > _SEARCH_MAX_OUTPUT_BYTES:
+            matches.pop()
+            response["count"] = len(matches)
+            response["truncated"] = True
+        return response
 
     def delete(self, workspace_id: uuid.UUID) -> None:
         workspace = self.get(workspace_id)
