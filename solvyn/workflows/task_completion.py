@@ -65,7 +65,7 @@ async def refresh_task_completion_state(db: AsyncSession, task: Task) -> str:
                 )
             )
         ).all()
-        criteria_pass = bool(criteria) and all(
+        criteria_pass = bool(criteria) and (workspace is None or current_digest is not None) and all(
             status == "accepted" and (workspace is None or digest == current_digest)
             for status, digest in criteria
         )

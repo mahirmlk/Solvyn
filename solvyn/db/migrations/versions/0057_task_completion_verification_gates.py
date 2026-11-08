@@ -41,14 +41,6 @@ def upgrade() -> None:
                       EXISTS (
                           SELECT 1 FROM task_workspaces AS workspace
                           WHERE workspace.tenant_id = task.tenant_id AND workspace.task_id = task.id
-                            AND (
-                                task.acceptance_criteria_defined IS TRUE
-                                OR EXISTS (
-                                    SELECT 1 FROM task_handoffs AS handoff
-                                    WHERE handoff.tenant_id = task.tenant_id
-                                      AND handoff.child_task_id = task.id
-                                )
-                            )
                       )
                       OR (
                           task.acceptance_criteria_defined IS TRUE

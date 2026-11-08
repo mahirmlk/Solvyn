@@ -190,3 +190,40 @@ async def test_manual_workspace_without_handoff_can_complete_on_accepted_criteri
 
     assert status == "completed"
     assert task.completed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_workspace_fingerprint_failure_never_satisfies_acceptance_or_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from solvyn.sandbox.workspaces import WorkspaceError
+    from solvyn.workflows import task_completion
+
+    task = _task(criteria_defined=True, status="review_required")
+    workspace = SimpleNamespace(id=uuid.uuid4())
+    run = SimpleNamespace(kind="test", status="passed", source_digest=None)
+    db = AsyncMock()
+    db.execute.side_effect = [
+        _scalar(task),
+        _scalar(workspace),
+        _scalar(uuid.uuid4()),
+        _rows([("accepted", None)]),
+        _scalar_rows([run]),
+    ]
+
+    class BrokenWorkspaceManager:
+        def __init__(self, _root: Path) -> None:
+            pass
+
+        def get(self, _workspace_id: uuid.UUID) -> object:
+            return workspace
+
+        def fingerprint(self, _workspace: object) -> str:
+            raise WorkspaceError("workspace unavailable")
+
+    monkeypatch.setattr(task_completion, "WorkspaceManager", BrokenWorkspaceManager)
+
+    status = await refresh_task_completion_state(db, task)
+
+    assert status == "review_required"
+    assert task.completed_at is None
