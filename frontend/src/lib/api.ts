@@ -326,6 +326,7 @@ export interface TaskActivityEvent {
   type:
     | "task"
     | "task_lifecycle"
+    | "task_outcome"
     | "tool"
     | "llm_usage"
     | "verification"
@@ -349,6 +350,9 @@ export interface TaskActivityEvent {
     entity_id?: string;
     event_type?: "created" | "status_changed" | "updated" | "deleted" | "claimed";
     previous_status?: string | null;
+    outcome?: "success" | "failure" | "cancelled";
+    result_sha256?: string | null;
+    attempt_count?: number;
     path?: string | null;
     error_code?: string | null;
     agent_type?: string;

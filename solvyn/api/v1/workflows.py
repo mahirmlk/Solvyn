@@ -43,6 +43,7 @@ from solvyn.db.models import (
 from solvyn.db.session import async_session_factory, bind_tenant_scope, get_session
 from solvyn.multi_tenant.middleware import tenant_context
 from solvyn.proactive import task_assignment_event
+from solvyn.task_results import result_metadata
 from solvyn.workflows.executor import workflow_executor
 from solvyn.workflows.task_generator import TaskGenerator
 from solvyn.workflows.templates import WORKFLOW_TEMPLATES
@@ -233,7 +234,13 @@ async def _execute_task_handoff(
         await db.execute(
             update(Task)
             .where(Task.id == child.id, Task.tenant_id == tenant_id)
-            .values(status="failed", error=str(exc), completed_at=func.now())
+            .values(
+                status="failed",
+                error=str(exc),
+                result_summary="The assigned teammate failed during execution.",
+                result_sha256=None,
+                completed_at=func.now(),
+            )
         )
         await db.commit()
         return {"handoff_id": str(handoff.id), "task_id": str(child.id), "status": "failed", "error": str(exc)}
@@ -254,10 +261,18 @@ async def _execute_task_handoff(
     if finalized.scalar_one_or_none() != handoff.id:
         await db.rollback()
         raise HandoffLeaseLostError("Task handoff lease was lost before saving its result")
+    summary, result_sha256 = result_metadata(output)
     await db.execute(
         update(Task)
         .where(Task.id == child.id, Task.tenant_id == tenant_id)
-        .values(status="completed", result=json.dumps(output), error=None, completed_at=func.now())
+        .values(
+            status="completed",
+            result=json.dumps(output),
+            result_summary=summary,
+            result_sha256=result_sha256,
+            error=None,
+            completed_at=func.now(),
+        )
     )
     await db.commit()
     return {"handoff_id": str(handoff.id), "task_id": str(child.id), "status": "completed", "output": output}

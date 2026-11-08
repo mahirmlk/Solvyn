@@ -151,6 +151,13 @@ export default function TaskDeliveryReviewPage() {
                     <time dateTime={event.timestamp ?? undefined}>{formatActivityTime(event.timestamp)}</time>
                   </div>
                   <strong className={styles.activitySummary}>{event.summary}</strong>
+                  {event.type === "task_outcome" && (
+                    <p className={styles.muted}>
+                      {event.details.outcome ?? event.status}
+                      {event.details.attempt_count !== undefined ? ` · attempt ${event.details.attempt_count}` : ""}
+                      {event.details.result_sha256 ? ` · canonical result SHA-256 ${event.details.result_sha256}` : ""}
+                    </p>
+                  )}
                   {event.type === "tool" && event.details.path && <p className={styles.muted}>Path <code>{event.details.path}</code></p>}
                   {event.type === "llm_usage" && (
                     <p className={styles.muted}>

@@ -147,6 +147,8 @@ class Task(Base):
     attempt_count: Mapped[int] = mapped_column(Integer, default=0)
     max_attempts: Mapped[int | None] = mapped_column(Integer, nullable=True)
     result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_summary: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    result_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     acceptance_criteria_defined: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -173,6 +175,7 @@ class TaskEvent(Base):
     status: Mapped[str] = mapped_column(String(50), nullable=False)
     source: Mapped[str] = mapped_column(String(64), nullable=False)
     actor_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    payload: Mapped[dict[str, object] | None] = mapped_column(JSON().with_variant(JSONB, "postgresql"), nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
