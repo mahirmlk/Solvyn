@@ -466,7 +466,7 @@ async def test_task_verification_is_sandboxed_and_durable(
     first_result = await client.post(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs/{verification.json()['verification_run']['id']}/execute"
     )
-    assert first_result.status_code == 200
+    assert first_result.status_code == 200, first_result.text
     assert first_result.json()["status"] == "passed"
     assert first_result.json()["stdout"] == "1 passed"
     assert first_result.json()["regression_status"] == "baseline"
