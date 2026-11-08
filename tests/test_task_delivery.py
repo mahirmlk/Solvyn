@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -357,6 +358,16 @@ async def test_delivery_preview_rejects_source_file_directory_prefix_collisions(
     assert "conflicts" in error.value.detail
 
 
+def test_delivery_evidence_snapshot_has_a_separate_storage_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    verification_api = _verification_api()
+    monkeypatch.setattr(verification_api, "_MAX_DELIVERY_EVIDENCE_BYTES", 1)
+    with pytest.raises(HTTPException) as error:
+        verification_api._delivery_evidence_snapshot(
+            {"files": [], "deleted_paths": [], "diffs": []}
+        )
+    assert error.value.status_code == 413
+
+
 @pytest.mark.asyncio
 async def test_delivery_rejects_stale_preview_before_creating_remote_branch(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
@@ -426,6 +437,13 @@ async def test_delivery_creates_pinned_branch_commit_and_draft_pr(
     assert len(db.records) == 1
     assert db.records[0].status == "pull_request_open"
     assert db.records[0].pull_request_number == 12
+    saved_evidence = json.loads(db.records[0].evidence_snapshot)
+    assert saved_evidence["version"] == 1
+    assert saved_evidence["files"] == preview["files"]
+    assert saved_evidence["deleted_paths"] == preview["deleted_paths"]
+    assert saved_evidence["diffs"] == preview["diffs"]
+    context[5].write_file(context[6], "src/main.py", b"print('later')\n")
+    assert json.loads(db.records[0].evidence_snapshot) == saved_evidence
 
 
 @pytest.mark.asyncio
@@ -501,6 +519,7 @@ async def test_ambiguous_pull_request_failure_reports_unknown_outcome(
     assert len(db.records) == 1
     assert db.records[0].status == "unknown"
     assert db.records[0].commit_sha == "b" * 40
+    assert json.loads(db.records[0].evidence_snapshot)["diffs"] == preview["diffs"]
 
 
 @pytest.mark.asyncio
@@ -599,3 +618,47 @@ async def test_delivery_blocks_retry_for_unresolved_persisted_attempt(
     assert error.value.status_code == 409
     assert error.value.detail["delivery"]["status"] == "unknown"
     assert github.writes == []
+
+
+@pytest.mark.asyncio
+async def test_delivery_evidence_is_task_scoped_and_legacy_rows_are_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    verification_api = _verification_api()
+    execution_id, task_id, tenant_id, delivery_id = (uuid.uuid4() for _ in range(4))
+    task = SimpleNamespace(id=task_id, tenant_id=tenant_id)
+    delivery = SimpleNamespace(
+        id=delivery_id,
+        tenant_id=tenant_id,
+        task_id=task_id,
+        evidence_snapshot=json.dumps({"version": 1, "files": [], "deleted_paths": [], "diffs": []}),
+    )
+
+    async def owned_task(*_args: Any) -> Any:
+        return task
+
+    class Session:
+        def __init__(self, result: Any) -> None:
+            self.result = result
+
+        async def execute(self, statement: Any) -> Any:
+            params = statement.compile().params
+            assert task_id in params.values()
+            assert tenant_id in params.values()
+            assert delivery_id in params.values()
+            return SimpleNamespace(scalar_one_or_none=lambda: self.result)
+
+    monkeypatch.setattr(verification_api, "_owned_task", owned_task)
+    response = await verification_api.get_task_delivery_evidence(
+        execution_id, task_id, delivery_id, Session(delivery)  # type: ignore[arg-type]
+    )
+    assert response["evidence"] == json.loads(delivery.evidence_snapshot)
+
+    legacy = SimpleNamespace(id=delivery_id, tenant_id=tenant_id, task_id=task_id, evidence_snapshot=None)
+    legacy_response = await verification_api.get_task_delivery_evidence(
+        execution_id, task_id, delivery_id, Session(legacy)  # type: ignore[arg-type]
+    )
+    assert legacy_response["evidence"] is None
+    with pytest.raises(HTTPException) as error:
+        await verification_api.get_task_delivery_evidence(
+            execution_id, task_id, delivery_id, Session(None)  # type: ignore[arg-type]
+        )
+    assert error.value.status_code == 404

@@ -1489,8 +1489,8 @@ async def test_project_repository_knowledge_rls_is_tenant_and_link_scoped() -> N
                 await connection.execute(
                     text(
                         "INSERT INTO task_deliveries "
-                        "(id, tenant_id, task_id, workspace_id, repository_id, source_commit_sha, base_branch, diff_digest, branch_name) "
-                        "VALUES (:id, :tenant_id, :task_id, :workspace_id, :repository_id, 'abc123', 'main', :digest, :branch)"
+                        "(id, tenant_id, task_id, workspace_id, repository_id, source_commit_sha, base_branch, diff_digest, branch_name, evidence_snapshot) "
+                        "VALUES (:id, :tenant_id, :task_id, :workspace_id, :repository_id, 'abc123', 'main', :digest, :branch, :evidence)"
                     ),
                     {
                         "id": delivery_id,
@@ -1500,6 +1500,7 @@ async def test_project_repository_knowledge_rls_is_tenant_and_link_scoped() -> N
                         "repository_id": repository_id,
                         "digest": f"digest-{delivery_id}",
                         "branch": f"codex/rls-{delivery_id}",
+                        "evidence": '{"version":1,"files":[],"deleted_paths":[],"diffs":[]}',
                     },
                 )
             await connection.execute(
@@ -1535,7 +1536,15 @@ async def test_project_repository_knowledge_rls_is_tenant_and_link_scoped() -> N
             assert (await db.execute(select(Project.id))).scalars().all() == [project_a]
             assert (await db.execute(select(Repository.id))).scalars().all() == [repository_a]
             assert (await db.execute(select(ProjectKnowledge.id))).scalars().all() == [knowledge_a]
-            assert (await db.execute(select(TaskDelivery.id))).scalars().all() == [delivery_a]
+            deliveries = (await db.execute(select(TaskDelivery.id, TaskDelivery.evidence_snapshot))).all()
+            assert deliveries == [(delivery_a, '{"version":1,"files":[],"deleted_paths":[],"diffs":[]}')]
+            evidence_savepoint = await db.begin_nested()
+            with pytest.raises(DBAPIError):
+                await db.execute(
+                    text("UPDATE task_deliveries SET evidence_snapshot = :snapshot WHERE id = :id"),
+                    {"snapshot": '{"version":2}', "id": delivery_a},
+                )
+            await evidence_savepoint.rollback()
             hidden_repository_update = await db.execute(
                 text("UPDATE repositories SET full_name = 'hidden/repo' WHERE id = :id"), {"id": repository_b}
             )

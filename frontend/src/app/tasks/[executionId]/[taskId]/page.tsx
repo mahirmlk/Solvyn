@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useState } from "react";
-import { api, TaskActivityEvent, TaskDeliveryDiff, TaskDeliveryResult } from "@/lib/api";
+import { api, TaskActivityEvent, TaskDeliveryDiff, TaskDeliveryEvidence, TaskDeliveryResult } from "@/lib/api";
 import styles from "./page.module.css";
 
 export default function TaskDeliveryReviewPage() {
@@ -15,6 +15,9 @@ export default function TaskDeliveryReviewPage() {
   const [activity, setActivity] = useState<TaskActivityEvent[]>([]);
   const [activityLoading, setActivityLoading] = useState(true);
   const [activityError, setActivityError] = useState<string | null>(null);
+  const [deliveryEvidence, setDeliveryEvidence] = useState<Record<string, TaskDeliveryEvidence>>({});
+  const [evidenceLoading, setEvidenceLoading] = useState<string | null>(null);
+  const [evidenceError, setEvidenceError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [branchName, setBranchName] = useState(`solvyn/task-${taskId.slice(0, 8)}`);
@@ -79,6 +82,19 @@ export default function TaskDeliveryReviewPage() {
       }
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function loadDeliveryEvidence(deliveryId: string) {
+    setEvidenceLoading(deliveryId);
+    setEvidenceError(null);
+    try {
+      const saved = await api.getTaskDeliveryEvidence(executionId, taskId, deliveryId);
+      setDeliveryEvidence((current) => ({ ...current, [deliveryId]: saved }));
+    } catch (reason) {
+      setEvidenceError(reason instanceof Error ? reason.message : "Could not load saved delivery evidence.");
+    } finally {
+      setEvidenceLoading(null);
     }
   }
 
@@ -263,6 +279,24 @@ export default function TaskDeliveryReviewPage() {
                     <p className={styles.digest}>Digest <code>{delivery.diff_digest}</code></p>
                     <p className={styles.muted}>Branch <code>{delivery.branch}</code>{delivery.commit_sha ? <> · commit <code>{delivery.commit_sha.slice(0, 12)}</code></> : null}</p>
                     {delivery.pull_request_title && <p>{delivery.pull_request_title}</p>}
+                    {delivery.evidence_available ? (
+                      deliveryEvidence[delivery.id] ? (
+                        <div className={styles.fileList}>
+                          {deliveryEvidence[delivery.id].evidence?.diffs.map((file) => (
+                            <details className={styles.file} key={file.path}>
+                              <summary><code>{file.path}</code><span>Saved diff</span></summary>
+                              <pre>{file.diff || "No textual diff available for this path."}</pre>
+                            </details>
+                          )) ?? <p className={styles.muted}>This older delivery has no saved file snapshot.</p>}
+                        </div>
+                      ) : (
+                        <button className="action-button secondary" disabled={evidenceLoading === delivery.id} onClick={() => void loadDeliveryEvidence(delivery.id)} type="button">
+                          {evidenceLoading === delivery.id ? "Loading saved diff…" : "View saved diff"}
+                        </button>
+                      )
+                    ) : (
+                      <p className={styles.muted}>This attempt predates saved diff history.</p>
+                    )}
                     {delivery.status === "pull_request_open" && <p className={styles.muted}>This records the state when created. Current GitHub status and reviews are not refreshed here.</p>}
                     {delivery.error && <p className={styles.blocker}>{delivery.error}</p>}
                     {delivery.pull_request_url && <a href={delivery.pull_request_url} rel="noreferrer" target="_blank">Open pull request #{delivery.pull_request_number}</a>}
@@ -273,6 +307,7 @@ export default function TaskDeliveryReviewPage() {
             ) : (
               <p className={styles.muted}>No delivery attempts have been recorded for this task.</p>
             )}
+            {evidenceError && <p className={styles.activityError} role="alert">{evidenceError}</p>}
           </section>
 
           <section className={`${styles.deliveryPanel} pearl-pane`} aria-labelledby="delivery-heading">
