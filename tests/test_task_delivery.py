@@ -68,6 +68,7 @@ class FullRepositoryDeliveryGitHub(FullRepositoryGitHub):
         self.writes: list[str] = []
         self.committed_files: list[dict[str, str]] = []
         self.deleted_paths: list[str] = []
+        self.delivery_session: Any | None = None
 
     async def __aenter__(self) -> FullRepositoryDeliveryGitHub:
         return self
@@ -76,6 +77,9 @@ class FullRepositoryDeliveryGitHub(FullRepositoryGitHub):
         return None
 
     async def create_branch_at_commit(self, _repo: str, branch: str, sha: str) -> dict[str, str]:
+        assert self.delivery_session is not None
+        assert len(self.delivery_session.records) == 1
+        assert self.delivery_session.records[0].evidence_snapshot
         self.writes.append("branch")
         return {"name": branch, "sha": sha}
 
@@ -495,6 +499,7 @@ async def test_full_repository_delivery_records_reviewable_file_and_deletion_evi
     )
     github = FullRepositoryDeliveryGitHub()
     db = FakeDeliverySession()
+    github.delivery_session = db
     preview = await verification_api._build_delivery_preview(
         context[2], context[1], None, manager, workspace, github  # type: ignore[arg-type]
     )
@@ -517,8 +522,8 @@ async def test_full_repository_delivery_records_reviewable_file_and_deletion_evi
     )
 
     assert github.writes == ["branch", "commit", "pull-request"]
-    assert [item["path"] for item in github.committed_files] == ["docs/new.md", "src/main.py"]
-    assert github.deleted_paths == ["README.md"]
+    assert github.committed_files == preview["files"]
+    assert github.deleted_paths == preview["deleted_paths"] == ["README.md"]
     assert result["pull_request"]["draft"] is True
     evidence = json.loads(db.records[0].evidence_snapshot)
     assert evidence["files"] == preview["files"]
