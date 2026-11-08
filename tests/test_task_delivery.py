@@ -63,6 +63,37 @@ class FullRepositoryGitHub(FakeGitHub):
         return self.sources.get(path)
 
 
+class FullRepositoryDeliveryGitHub(FullRepositoryGitHub):
+    def __init__(self) -> None:
+        self.writes: list[str] = []
+        self.committed_files: list[dict[str, str]] = []
+        self.deleted_paths: list[str] = []
+        self.delivery_session: Any | None = None
+
+    async def __aenter__(self) -> FullRepositoryDeliveryGitHub:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+    async def create_branch_at_commit(self, _repo: str, branch: str, sha: str) -> dict[str, str]:
+        assert self.delivery_session is not None
+        assert len(self.delivery_session.records) == 1
+        assert self.delivery_session.records[0].evidence_snapshot
+        self.writes.append("branch")
+        return {"name": branch, "sha": sha}
+
+    async def commit_files(self, _repo: str, branch: str, **kwargs: Any) -> dict[str, str]:
+        self.writes.append("commit")
+        self.committed_files = kwargs["files"]
+        self.deleted_paths = kwargs["deleted_paths"]
+        return {"branch": branch, "sha": "b" * 40}
+
+    async def create_pull_request(self, _repo: str, **_kwargs: str) -> dict[str, Any]:
+        self.writes.append("pull-request")
+        return {"number": 12, "url": "https://github.com/octo/repo/pull/12", "draft": True}
+
+
 class ExecutableSourceGitHub(FakeGitHub):
     async def repository_tree(self, _full_name: str, _revision: str) -> tuple[str, list[dict[str, Any]]]:
         return "tree-sha", [{"path": "src/main.py", "type": "blob", "mode": "100755"}]
@@ -444,6 +475,60 @@ async def test_delivery_creates_pinned_branch_commit_and_draft_pr(
     assert saved_evidence["diffs"] == preview["diffs"]
     context[5].write_file(context[6], "src/main.py", b"print('later')\n")
     assert json.loads(db.records[0].evidence_snapshot) == saved_evidence
+
+
+@pytest.mark.asyncio
+async def test_full_repository_delivery_records_reviewable_file_and_deletion_evidence(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verification_api = _verification_api()
+    manager = WorkspaceManager(tmp_path / "workspaces")
+    workspace = manager.create()
+    manager.write_file(workspace, "src/main.py", b"print('after')\n")
+    manager.write_file(workspace, "docs/new.md", b"new file\n")
+    task_id, tenant_id, workspace_id, repository_id = (uuid.uuid4() for _ in range(4))
+    context = (
+        SimpleNamespace(id=task_id, tenant_id=tenant_id),
+        SimpleNamespace(id=workspace_id, source_commit_sha="a" * 40),
+        SimpleNamespace(id=repository_id, full_name="octo/repo"),
+        SimpleNamespace(id=uuid.uuid4()),
+        None,
+        manager,
+        workspace,
+        "github-token",
+    )
+    github = FullRepositoryDeliveryGitHub()
+    db = FakeDeliverySession()
+    github.delivery_session = db
+    preview = await verification_api._build_delivery_preview(
+        context[2], context[1], None, manager, workspace, github  # type: ignore[arg-type]
+    )
+
+    async def load_context(*_args: Any) -> tuple[Any, ...]:
+        return context
+
+    monkeypatch.setattr(verification_api, "_task_delivery_context", load_context)
+    monkeypatch.setattr(verification_api, "GitHubClient", lambda **_kwargs: github)
+    result = await verification_api.deliver_task_workspace(
+        execution_id=uuid.uuid4(),
+        task_id=task_id,
+        payload=verification_api.TaskDeliveryRequest(
+            expected_diff_digest=preview["diff_digest"],
+            branch_name="solvyn/task-13",
+            commit_message="Update full repository",
+            pull_request_title="Update full repository",
+        ),
+        db=db,  # type: ignore[arg-type]
+    )
+
+    assert github.writes == ["branch", "commit", "pull-request"]
+    assert github.committed_files == preview["files"]
+    assert github.deleted_paths == preview["deleted_paths"] == ["README.md"]
+    assert result["pull_request"]["draft"] is True
+    evidence = json.loads(db.records[0].evidence_snapshot)
+    assert evidence["files"] == preview["files"]
+    assert evidence["deleted_paths"] == ["README.md"]
+    assert evidence["diffs"] == preview["diffs"]
 
 
 @pytest.mark.asyncio
