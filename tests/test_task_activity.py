@@ -104,7 +104,15 @@ async def test_task_activity_combines_durable_records_in_reverse_chronological_o
     task_event = SimpleNamespace(
         id=uuid.uuid4(), task_id=child_task_id, parent_task_id=task_id, event_type="status_changed",
         previous_status="running", status="completed", source="user_request", actor_user_id=uuid.uuid4(),
-        occurred_at=_time(9, 10),
+        occurred_at=_time(9, 10), payload=None,
+    )
+    outcome_event = SimpleNamespace(
+        id=uuid.uuid4(), task_id=child_task_id, parent_task_id=task_id, event_type="result_recorded",
+        previous_status="running", status="completed", source="teammate", actor_user_id=None,
+        occurred_at=_time(9, 11), payload={
+            "outcome": "success", "summary": "Implemented the requested change.",
+            "result_sha256": "a" * 64, "attempt_count": 1,
+        },
     )
     orchestration_events = [
         SimpleNamespace(
@@ -134,7 +142,7 @@ async def test_task_activity_combines_durable_records_in_reverse_chronological_o
     ]
     session = _ActivitySession(
         [
-            [child_task_id], [], [invocation], [run], attempt_events, [delivery], [handoff], [task_event],
+            [child_task_id], [], [invocation], [run], attempt_events, [delivery], [handoff], [outcome_event, task_event],
             orchestration_events, [usage], [approval],
         ]
     )
@@ -170,12 +178,12 @@ async def test_task_activity_combines_durable_records_in_reverse_chronological_o
     task_filter = next(value for key, value in query_parameters.items() if key.startswith("task_id"))
     assert set(task_filter) == {task_id, child_task_id}
 
-    assert feed["count"] == 13
+    assert feed["count"] == 14
     assert feed["truncated"] is False
     assert [event["type"] for event in feed["activity"]] == [
         "tool", "verification", "verification_attempt", "verification_attempt",
         "delivery", "handoff", "orchestration_transition", "orchestration_transition",
-        "orchestration_transition", "approval", "orchestration_transition", "task_lifecycle", "llm_usage",
+        "orchestration_transition", "approval", "orchestration_transition", "task_outcome", "task_lifecycle", "llm_usage",
     ]
     delivery_event = feed["activity"][4]
     assert delivery_event["details"]["pull_request_status"]["review_status"]["state"] == "review_required"
@@ -187,9 +195,13 @@ async def test_task_activity_combines_durable_records_in_reverse_chronological_o
     assert feed["activity"][7]["summary"] == "Acceptance criterion created as pending"
     assert feed["activity"][2]["details"]["attempt_number"] == 1
     assert feed["activity"][2]["status"] == "passed"
-    assert feed["activity"][-2]["status"] == "completed"
-    assert str(child_task_id)[:8] in feed["activity"][-2]["summary"]
-    assert feed["activity"][-2]["details"]["task_id"] == str(child_task_id)
+    assert feed["activity"][-3]["status"] == "completed"
+    assert str(child_task_id)[:8] in feed["activity"][-3]["summary"]
+    assert feed["activity"][-3]["details"]["task_id"] == str(child_task_id)
+    outcome_activity = next(event for event in feed["activity"] if event["type"] == "task_outcome")
+    assert outcome_activity["summary"] == "Child task " + str(child_task_id)[:8] + ": Implemented the requested change."
+    assert outcome_activity["details"]["result_sha256"] == "a" * 64
+    assert outcome_activity["details"]["attempt_count"] == 1
     assert feed["activity"][-1]["details"] == {
         "task_id": str(child_task_id), "agent_type": "software-engineer", "provider": "openrouter",
         "model": "openai/gpt-4o-mini", "prompt_tokens": 120, "completion_tokens": 80,

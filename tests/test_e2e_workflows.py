@@ -941,6 +941,14 @@ async def test_feature_workflow_runs_to_completion(client: AsyncClient) -> None:
     )
     assert handoff_response.status_code == 200
     assert handoff_response.json()["status"] == "completed"
+    task_activity = await client.get(
+        f"/api/v1/workflows/executions/{data['execution_id']}/tasks/{pending_handoff['child_task_id']}/activity"
+    )
+    assert task_activity.status_code == 200
+    outcome_events = [event for event in task_activity.json()["activity"] if event["type"] == "task_outcome"]
+    assert len(outcome_events) == 1
+    assert outcome_events[0]["details"]["outcome"] == "success"
+    assert len(outcome_events[0]["details"]["result_sha256"]) == 64
 
     updated_tasks = await client.get(f"/api/v1/workflows/executions/{data['execution_id']}/tasks")
     handoffs = updated_tasks.json()["handoffs"]

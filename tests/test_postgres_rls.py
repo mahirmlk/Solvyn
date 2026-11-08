@@ -4106,13 +4106,17 @@ async def test_task_event_history_is_atomic_immutable_and_tree_scoped() -> None:
                     text("UPDATE tasks SET status = 'running' WHERE id = :id"), {"id": root_id}
                 )
                 await connection.execute(
-                    text("UPDATE tasks SET status = 'completed' WHERE id = :id"), {"id": child_id}
+                    text(
+                        "UPDATE tasks SET status = 'completed', result_summary = 'Verified output', "
+                        "result_sha256 = :digest, attempt_count = 1 WHERE id = :id"
+                    ),
+                    {"id": child_id, "digest": "a" * 64},
                 )
 
                 events = (
                     await connection.execute(
                         text(
-                            "SELECT task_id, event_type, previous_status, status, source, actor_user_id "
+                            "SELECT task_id, event_type, previous_status, status, source, actor_user_id, payload "
                             "FROM task_events WHERE tenant_id = :tenant_id ORDER BY occurred_at, id"
                         ),
                         {"tenant_id": tenant_a},
@@ -4123,7 +4127,15 @@ async def test_task_event_history_is_atomic_immutable_and_tree_scoped() -> None:
                     ("created", None, "pending"),
                     ("status_changed", "pending", "running"),
                     ("status_changed", "pending", "completed"),
+                    ("result_recorded", "pending", "completed"),
                 ]
+                result_event = next(row for row in events if row.event_type == "result_recorded")
+                assert result_event.payload == {
+                    "outcome": "success",
+                    "summary": "Verified output",
+                    "result_sha256": "a" * 64,
+                    "attempt_count": 1,
+                }
                 assert {row.task_id for row in events} == {root_id, child_id}
                 assert all(row.source == "user_request" and row.actor_user_id == actor_id for row in events)
 
@@ -4138,19 +4150,53 @@ async def test_task_event_history_is_atomic_immutable_and_tree_scoped() -> None:
                 await connection.execute(
                     text("UPDATE tasks SET status = 'failed' WHERE id = :id"), {"id": root_id}
                 )
+                failed_outcome = (
+                    await connection.execute(
+                        text(
+                            "SELECT payload FROM task_events WHERE task_id = :task_id "
+                            "AND event_type = 'result_recorded' ORDER BY occurred_at DESC, id DESC LIMIT 1"
+                        ),
+                        {"task_id": root_id},
+                    )
+                ).scalar_one()
+                assert failed_outcome["outcome"] == "failure"
+                assert failed_outcome["summary"] == "Task failed during execution."
                 assert (
                     await connection.execute(
                         text("SELECT count(*) FROM task_events WHERE tenant_id = :tenant_id"),
                         {"tenant_id": tenant_a},
                     )
-                ).scalar_one() == 5
+                ).scalar_one() == 7
                 await savepoint.rollback()
                 assert (
                     await connection.execute(
                         text("SELECT count(*) FROM task_events WHERE tenant_id = :tenant_id"),
                         {"tenant_id": tenant_a},
                     )
-                ).scalar_one() == 4
+                ).scalar_one() == 5
+
+                retry_savepoint = await connection.begin_nested()
+                await connection.execute(text("UPDATE tasks SET status = 'running' WHERE id = :id"), {"id": child_id})
+                await connection.execute(
+                    text(
+                        "UPDATE tasks SET status = 'completed', result_summary = 'Verified output again', "
+                        "result_sha256 = :digest, attempt_count = 2 WHERE id = :id"
+                    ),
+                    {"id": child_id, "digest": "b" * 64},
+                )
+                retry_outcomes = (
+                    await connection.execute(
+                        text(
+                            "SELECT payload FROM task_events WHERE task_id = :task_id "
+                            "AND event_type = 'result_recorded' ORDER BY occurred_at, id"
+                        ),
+                        {"task_id": child_id},
+                    )
+                ).scalars().all()
+                assert len(retry_outcomes) == 2
+                assert retry_outcomes[-1]["summary"] == "Verified output again"
+                assert retry_outcomes[-1]["result_sha256"] == "b" * 64
+                await retry_savepoint.rollback()
 
                 assert (
                     await connection.execute(

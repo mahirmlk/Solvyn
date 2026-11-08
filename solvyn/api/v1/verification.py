@@ -1660,6 +1660,26 @@ async def list_task_activity(
     events: list[dict[str, Any]] = []
     for task_event in task_events:
         prefix = task_prefix(task_event.task_id)
+        if task_event.event_type == "result_recorded":
+            payload = task_event.payload or {}
+            outcome_summary = str(payload.get("summary") or "Task outcome recorded.")
+            events.append(
+                {
+                    "id": f"task_outcome:{task_event.id}",
+                    "type": "task_outcome",
+                    "status": task_event.status,
+                    "timestamp": _activity_timestamp(task_event.occurred_at),
+                    "summary": f"{prefix}{outcome_summary}",
+                    "details": {
+                        "task_id": str(task_event.task_id),
+                        "outcome": payload.get("outcome"),
+                        "result_sha256": payload.get("result_sha256"),
+                        "attempt_count": payload.get("attempt_count"),
+                        "source": task_event.source,
+                    },
+                }
+            )
+            continue
         if task_event.event_type == "baseline":
             summary = f"{prefix}History baseline: {task_event.status.replace('_', ' ')}"
         elif task_event.event_type == "created":
