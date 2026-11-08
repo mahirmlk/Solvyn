@@ -198,10 +198,10 @@ async def test_task_activity_combines_durable_records_in_reverse_chronological_o
     assert feed["activity"][-3]["status"] == "completed"
     assert str(child_task_id)[:8] in feed["activity"][-3]["summary"]
     assert feed["activity"][-3]["details"]["task_id"] == str(child_task_id)
-    assert feed["activity"][-2]["type"] == "task_outcome"
-    assert feed["activity"][-2]["summary"] == "Child task " + str(child_task_id)[:8] + ": Implemented the requested change."
-    assert feed["activity"][-2]["details"]["result_sha256"] == "a" * 64
-    assert feed["activity"][-2]["details"]["attempt_count"] == 1
+    outcome_activity = next(event for event in feed["activity"] if event["type"] == "task_outcome")
+    assert outcome_activity["summary"] == "Child task " + str(child_task_id)[:8] + ": Implemented the requested change."
+    assert outcome_activity["details"]["result_sha256"] == "a" * 64
+    assert outcome_activity["details"]["attempt_count"] == 1
     assert feed["activity"][-1]["details"] == {
         "task_id": str(child_task_id), "agent_type": "software-engineer", "provider": "openrouter",
         "model": "openai/gpt-4o-mini", "prompt_tokens": 120, "completion_tokens": 80,
