@@ -993,7 +993,7 @@ The cache key is `SHA256(prompt + ":" + model + ":" + system_prompt)` — it doe
 2. **Rate limiter production readiness**: In-memory token bucket won't work across workers. Redis-backed replacement needed?
 3. **Tracing persistence**: In-memory traces are lost on restart. Should they be persisted to DB or an external system?
 4. **LLM cache provider gap**: Cache key doesn't include provider — same model from different providers shares cache.
-5. **Dependency vulnerability scanning**: No `pip-audit` or Dependabot configured.
+5. **Dependency scanning and updates**: CI runs `pip-audit` for Python dependency vulnerabilities. Automated dependency version-update discovery/PRs (such as Dependabot) are not configured.
 
 ### Known Risks
 

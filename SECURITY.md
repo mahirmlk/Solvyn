@@ -357,7 +357,7 @@ All logs are JSON-formatted (configurable) with timestamp, level, logger name, m
 
 ### Dependency Scanning
 
-> **⚠️ HUMAN INPUT NEEDED**: No automated dependency vulnerability scanning (e.g., Dependabot, Snyk, pip-audit) is currently configured. Consider adding a `pip-audit` step to the CI pipeline.
+> Python dependency vulnerability scanning runs in CI with `pip-audit` on every workflow run. This does not provide general dependency version-update discovery or replace a dedicated update service such as Dependabot.
 
 ---
 
@@ -431,7 +431,7 @@ We aim to acknowledge reports within 48 hours and publish fixes within 7 days fo
    - Replace in-memory `RateLimitMiddleware` and `RateLimiter` with Redis-backed equivalents for multi-worker deployments
 
 4. **Add dependency scanning**:
-   - Integrate `pip-audit` or Dependabot for automated vulnerability detection
+   - Keep the existing CI `pip-audit` check enabled; consider Dependabot for dependency version update PRs
 
 5. **Configure backup strategy**:
    - Schedule regular PostgreSQL backups (pg_dump or cloud provider snapshots)
