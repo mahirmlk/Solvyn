@@ -34,6 +34,7 @@ from solvyn.db.models import (
     TaskHandoff,
     TaskWorkspace,
     TeammateToolInvocation,
+    TokenUsage,
     User,
     VerificationAttemptEvent,
     VerificationQueueControl,
@@ -1591,6 +1592,14 @@ async def list_task_activity(
             .limit(_ACTIVITY_SOURCE_LIMIT + 1)
         )
     ).scalars().all()
+    usage_records = (
+        await db.execute(
+            select(TokenUsage)
+            .where(TokenUsage.tenant_id == task.tenant_id, TokenUsage.task_id.in_(task_ids))
+            .order_by(TokenUsage.created_at.desc(), TokenUsage.id.desc())
+            .limit(_ACTIVITY_SOURCE_LIMIT + 1)
+        )
+    ).scalars().all()
 
     handoff_ids = [item.id for item in handoffs]
     run_ids = [item.id for item in runs]
@@ -1626,6 +1635,7 @@ async def list_task_activity(
             approvals,
             task_events,
             orchestration_events,
+            usage_records,
         )
     )
     source_truncated = source_truncated or tree_truncated
@@ -1637,6 +1647,7 @@ async def list_task_activity(
     approvals = approvals[:_ACTIVITY_SOURCE_LIMIT]
     task_events = task_events[:_ACTIVITY_SOURCE_LIMIT]
     orchestration_events = orchestration_events[:_ACTIVITY_SOURCE_LIMIT]
+    usage_records = usage_records[:_ACTIVITY_SOURCE_LIMIT]
 
     root_deliveries = [delivery for delivery in deliveries if delivery.task_id == task.id]
     live_pr_statuses = await _refresh_task_pull_request_statuses(db, task, root_deliveries)
@@ -1727,6 +1738,32 @@ async def list_task_activity(
                     "task_id": str(invocation.task_id),
                     "path": invocation.path,
                     "error_code": invocation.error_code,
+                },
+            }
+        )
+    for usage in usage_records:
+        if usage.task_id is None:
+            continue
+        cost = float(usage.cost or 0)
+        events.append(
+            {
+                "id": f"llm_usage:{usage.id}",
+                "type": "llm_usage",
+                "status": "recorded",
+                "timestamp": _activity_timestamp(usage.created_at),
+                "summary": (
+                    f"{task_prefix(usage.task_id)}{usage.agent_type} used {usage.total_tokens} tokens "
+                    f"with {usage.model} (cost ${cost:.6f})"
+                ),
+                "details": {
+                    "task_id": str(usage.task_id),
+                    "agent_type": usage.agent_type,
+                    "provider": usage.provider,
+                    "model": usage.model,
+                    "prompt_tokens": usage.prompt_tokens,
+                    "completion_tokens": usage.completion_tokens,
+                    "total_tokens": usage.total_tokens,
+                    "cost": cost,
                 },
             }
         )

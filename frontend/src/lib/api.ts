@@ -327,6 +327,7 @@ export interface TaskActivityEvent {
     | "task"
     | "task_lifecycle"
     | "tool"
+    | "llm_usage"
     | "verification"
     | "verification_attempt"
     | "delivery"
@@ -350,6 +351,13 @@ export interface TaskActivityEvent {
     previous_status?: string | null;
     path?: string | null;
     error_code?: string | null;
+    agent_type?: string;
+    provider?: string;
+    model?: string;
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    cost?: number;
     exit_code?: number | null;
     timed_out?: boolean;
     branch?: string;
