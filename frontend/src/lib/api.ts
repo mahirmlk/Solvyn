@@ -264,6 +264,29 @@ export interface WorkflowTaskInfo {
   completed_at: string | null;
 }
 
+export interface WorkflowExecutionTask {
+  task_id: string;
+  status: string;
+  acceptance_criteria_defined: boolean;
+  workspace_digest?: string | null;
+  verification_supported?: boolean;
+  acceptance_criteria: {
+    id: string;
+    text: string;
+    status: "pending" | "accepted" | "rejected";
+    decision_note: string | null;
+    decision_workspace_digest: string | null;
+  }[];
+  verification_runs: {
+    id: string;
+    kind: string;
+    status: string;
+    required_for_completion: boolean;
+    exit_code: number | null;
+    source_digest: string | null;
+  }[];
+}
+
 export interface TaskDeliveryDiff {
   repository_id: string;
   source_commit_sha: string;
@@ -624,6 +647,45 @@ export const api = {
     if (params?.status) query.set("status", params.status);
     return request<{ tasks: WorkflowTaskInfo[]; count: number }>(`/workflows/tasks?${query}`);
   },
+
+  getExecutionTasks: (executionId: string) =>
+    request<{ tasks: WorkflowExecutionTask[] }>(`/workflows/executions/${executionId}/tasks`),
+
+  getTaskAcceptanceCriteria: (executionId: string, taskId: string) =>
+    request<{
+      workspace_digest: string | null;
+      verification_supported: boolean;
+      acceptance_criteria: WorkflowExecutionTask["acceptance_criteria"];
+    }>(
+      `/workflows/executions/${executionId}/tasks/${taskId}/acceptance-criteria`,
+    ),
+
+  createTaskAcceptanceCriteria: (executionId: string, taskId: string, criteria: string[]) =>
+    request<{ task_id: string; acceptance_criteria: WorkflowExecutionTask["acceptance_criteria"] }>(
+      `/workflows/executions/${executionId}/tasks/${taskId}/acceptance-criteria`,
+      { method: "POST", body: JSON.stringify({ criteria }) },
+    ),
+
+  decideTaskAcceptanceCriterion: (
+    executionId: string,
+    taskId: string,
+    criterionId: string,
+    decision: "accepted" | "rejected",
+  ) =>
+    request<WorkflowExecutionTask["acceptance_criteria"][number]>(
+      `/workflows/executions/${executionId}/tasks/${taskId}/acceptance-criteria/${criterionId}/decision`,
+      { method: "POST", body: JSON.stringify({ decision, note: "Reviewed in the task workspace" }) },
+    ),
+
+  requestTaskVerification: (executionId: string, taskId: string, kind: string) =>
+    request<{
+      verification_run: { id: string; kind: string; status: string; required_for_completion: boolean };
+      approval_id: string;
+      approval_status: string;
+    }>(`/workflows/executions/${executionId}/tasks/${taskId}/verification-runs`, {
+      method: "POST",
+      body: JSON.stringify({ kind, required_for_completion: true }),
+    }),
 
   getTaskDeliveryPreview: (executionId: string, taskId: string) =>
     request<TaskDeliveryDiff>(`/workflows/executions/${executionId}/tasks/${taskId}/delivery-preview`),

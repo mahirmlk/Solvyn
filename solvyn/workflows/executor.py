@@ -14,6 +14,7 @@ from solvyn.db.models import ExecutionGraph as ExecutionGraphModel
 from solvyn.db.models import Session, Task, TaskDependency, Tenant
 from solvyn.db.session import async_session_factory, bind_tenant_scope
 from solvyn.multi_tenant.middleware import tenant_context
+from solvyn.workflows.task_completion import refresh_task_completion_state
 from solvyn.workflows.templates import WORKFLOW_TEMPLATES, WorkflowStep
 
 logger = logging.getLogger(__name__)
@@ -486,6 +487,9 @@ class WorkflowExecutor:
                 tasks_by_node[node.id] = task
 
             await db.flush()
+            for node in graph.nodes:
+                if node.status == "completed":
+                    await refresh_task_completion_state(db, tasks_by_node[node.id])
             for edge in graph.edges:
                 source = tasks_by_node.get(edge.source)
                 target = tasks_by_node.get(edge.target)

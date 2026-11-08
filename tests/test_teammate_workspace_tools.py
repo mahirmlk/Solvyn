@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -22,12 +24,16 @@ class _Session:
     def __init__(self, granted: set[str]) -> None:
         self.granted = granted
         self.records = []
+        self.committed_task_statuses = []
         self.active_verification_approval = False
         self.tenant_id = uuid.uuid4()
         self.organization_id = uuid.uuid4()
+        self.task = None
 
     async def execute(self, statement):
         sql = str(statement)
+        if "FROM tasks" in sql:
+            return _Result(self.task)
         if "verification_runs" in sql:
             return _Result(uuid.uuid4() if self.active_verification_approval else None)
         if "teammate_permissions" in sql:
@@ -53,6 +59,7 @@ class _Session:
         self.records.append(record)
 
     async def commit(self) -> None:
+        self.committed_task_statuses.append(self.task.status if self.task is not None else None)
         return None
 
     async def flush(self) -> None:
@@ -88,6 +95,14 @@ def _runtime(tmp_path: Path, granted: set[str]):
         teammate_id=uuid.uuid4(),
         handoff_lease_id=uuid.uuid4(),
     )
+    session.task = SimpleNamespace(
+        id=runtime.task_id,
+        tenant_id=session.tenant_id,
+        execution_id=uuid.uuid4(),
+        status="completed",
+        completed_at=datetime.now(UTC),
+        acceptance_criteria_defined=False,
+    )
     return runtime, session, manager, workspace
 
 
@@ -112,6 +127,8 @@ async def test_workspace_write_is_scoped_and_audited_without_file_contents(tmp_p
     assert record.path == "src/main.py"
     assert record.input_bytes == 8
     assert not hasattr(record, "content")
+    assert session.task.status == "review_required"
+    assert session.committed_task_statuses[0] == "review_required"
 
 
 @pytest.mark.asyncio
@@ -301,8 +318,12 @@ async def test_verification_tool_requires_execute_commands_grant(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_verification_approval_binds_current_workspace_fingerprint(tmp_path: Path) -> None:
+async def test_verification_approval_reopens_completed_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from solvyn.agents import workspace_tools
+
     runtime, session, _manager, _workspace = _runtime(tmp_path, {"EXECUTE_COMMANDS"})
+    refresh = AsyncMock()
+    monkeypatch.setattr(workspace_tools, "refresh_task_completion_state", refresh)
 
     result = await runtime._invoke(
         {
@@ -317,6 +338,8 @@ async def test_verification_approval_binds_current_workspace_fingerprint(tmp_pat
     assert result["status"] == "pending_approval"
     assert session.records[1].source_digest is not None
     assert session.records[2].verification_run_id == session.records[1].id
+    assert session.task.status == "review_required"
+    refresh.assert_awaited_once_with(session, session.task)
 
 
 @pytest.mark.asyncio

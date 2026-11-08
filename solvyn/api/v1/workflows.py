@@ -13,7 +13,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import Coroutine
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -45,6 +45,7 @@ from solvyn.multi_tenant.middleware import tenant_context
 from solvyn.proactive import task_assignment_event
 from solvyn.task_results import result_metadata
 from solvyn.workflows.executor import workflow_executor
+from solvyn.workflows.task_completion import refresh_task_completion_state
 from solvyn.workflows.task_generator import TaskGenerator
 from solvyn.workflows.templates import WORKFLOW_TEMPLATES
 
@@ -262,20 +263,15 @@ async def _execute_task_handoff(
         await db.rollback()
         raise HandoffLeaseLostError("Task handoff lease was lost before saving its result")
     summary, result_sha256 = result_metadata(output)
-    await db.execute(
-        update(Task)
-        .where(Task.id == child.id, Task.tenant_id == tenant_id)
-        .values(
-            status="completed",
-            result=json.dumps(output),
-            result_summary=summary,
-            result_sha256=result_sha256,
-            error=None,
-            completed_at=func.now(),
-        )
-    )
+    child.status = "completed"
+    child.result = json.dumps(output)
+    child.result_summary = summary
+    child.result_sha256 = result_sha256
+    child.error = None
+    child.completed_at = datetime.now(UTC)
+    await refresh_task_completion_state(db, child)
     await db.commit()
-    return {"handoff_id": str(handoff.id), "task_id": str(child.id), "status": "completed", "output": output}
+    return {"handoff_id": str(handoff.id), "task_id": str(child.id), "status": child.status, "output": output}
 
 
 class GenerateTasksRequest(BaseModel):
@@ -723,6 +719,7 @@ async def list_workflow_execution_tasks(
                         "id": str(run.id),
                         "kind": run.kind,
                         "status": run.status,
+                        "required_for_completion": run.required_for_completion,
                         "exit_code": run.exit_code,
                         "timed_out": run.timed_out,
                         "output_truncated": run.output_truncated,
@@ -741,6 +738,7 @@ async def list_workflow_execution_tasks(
                         "reviewer_user_id": str(criterion.reviewer_user_id) if criterion.reviewer_user_id else None,
                         "reviewer_organization_id": str(criterion.reviewer_organization_id) if criterion.reviewer_organization_id else None,
                         "decision_note": criterion.decision_note,
+                        "decision_workspace_digest": criterion.decision_workspace_digest,
                         "created_at": criterion.created_at.isoformat() if criterion.created_at else None,
                         "decided_at": criterion.decided_at.isoformat() if criterion.decided_at else None,
                     }

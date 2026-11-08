@@ -16,6 +16,7 @@ from solvyn.config import settings
 from solvyn.db.models import Approval, Project, Task, TaskHandoff, TaskWorkspace, TeammatePermission, TeammateProfile, TeammateToolInvocation, VerificationRun
 from solvyn.llm.providers.base import LLMResponse
 from solvyn.sandbox.workspaces import ManagedWorkspace, WorkspaceError, WorkspaceManager, safe_relative_path
+from solvyn.workflows.task_completion import refresh_task_completion_state, require_task_review
 
 _MAX_TOOL_CALLS = 12
 _MAX_READ_BYTES = 64 * 1024
@@ -421,6 +422,7 @@ class TeammateWorkspaceToolRuntime:
             )
             if active_verification.scalar_one_or_none() is not None:
                 raise ToolDeniedError("verification_approval_freezes_workspace")
+            await self._invalidate_completed_task()
             self.workspaces.delete_file(workspace, normalized)
             return {"path": normalized, "deleted": True}
 
@@ -444,17 +446,32 @@ class TeammateWorkspaceToolRuntime:
         )
         if active_verification.scalar_one_or_none() is not None:
             raise ToolDeniedError("verification_approval_freezes_workspace")
+        await self._invalidate_completed_task()
         self.workspaces.write_file(workspace, normalized, content)
         return {"path": normalized, "bytes_written": len(content)}
+
+    async def _invalidate_completed_task(self) -> None:
+        task = (
+            await self.db.execute(
+                select(Task).where(Task.id == self.task_id, Task.tenant_id == self.tenant_id)
+            )
+        ).scalar_one_or_none()
+        if task is not None:
+            was_completed = task.status == "completed"
+            require_task_review(task)
+            if was_completed:
+                # Persist review status before changing the external filesystem.
+                await self.db.commit()
 
     async def _run_verification(self, kind: str, workspace: ManagedWorkspace) -> dict[str, Any]:
         command = _DEFAULT_VERIFICATION_COMMANDS[kind]
         task_result = await self.db.execute(
-            select(Task.execution_id).where(Task.id == self.task_id, Task.tenant_id == self.tenant_id)
+            select(Task).where(Task.id == self.task_id, Task.tenant_id == self.tenant_id)
         )
-        execution_id = task_result.scalar_one_or_none()
-        if execution_id is None:
+        task = task_result.scalar_one_or_none()
+        if task is None or task.execution_id is None:
             raise ToolDeniedError("task_scope_lost")
+        execution_id = task.execution_id
         handoff_result = await self.db.execute(
             select(TaskHandoff.project_id).where(
                 TaskHandoff.tenant_id == self.tenant_id,
@@ -480,6 +497,7 @@ class TeammateWorkspaceToolRuntime:
             kind=kind,
             command=json.dumps(command),
             status="pending_approval",
+            required_for_completion=True,
             runner_version="sandbox-service/1" if settings.sandbox_runtime_url else "docker-sandbox/1",
             source_digest=source_digest,
         )
@@ -505,6 +523,8 @@ class TeammateWorkspaceToolRuntime:
         )
         self.db.add(run)
         await self.db.flush()
+        require_task_review(task)
+        await refresh_task_completion_state(self.db, task)
         self.db.add(approval)
         await self.db.commit()
         return {

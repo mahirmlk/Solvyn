@@ -81,6 +81,31 @@
   border-top: 1px solid var(--line-light);
 }
 
+.reviewForm {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.reviewForm label {
+  display: grid;
+  flex: 1 1 280px;
+  gap: 7px;
+}
+
+.eventActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.reviewForm > a {
+  align-self: center;
+  color: var(--color-ink);
+  font-size: 12px;
+}
+
 .activityItem {
   display: grid;
   gap: 8px;
