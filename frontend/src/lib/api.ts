@@ -281,6 +281,7 @@ export interface TaskDeliveryAttempt {
   id: string;
   status: "starting" | "branch_created" | "committed" | "pull_request_open" | "unknown";
   diff_digest: string;
+  evidence_available: boolean;
   base_branch: string;
   branch: string;
   branch_sha: string | null;
@@ -291,6 +292,16 @@ export interface TaskDeliveryAttempt {
   error: string | null;
   created_at: string | null;
   updated_at: string | null;
+}
+
+export interface TaskDeliveryEvidence {
+  delivery_id: string;
+  evidence: {
+    version: number;
+    files: { path: string; content: string }[];
+    deleted_paths: string[];
+    diffs: { path: string; diff: string }[];
+  } | null;
 }
 
 export interface TaskDeliveryResult {
@@ -616,6 +627,9 @@ export const api = {
 
   getTaskDeliveryPreview: (executionId: string, taskId: string) =>
     request<TaskDeliveryDiff>(`/workflows/executions/${executionId}/tasks/${taskId}/delivery-preview`),
+
+  getTaskDeliveryEvidence: (executionId: string, taskId: string, deliveryId: string) =>
+    request<TaskDeliveryEvidence>(`/workflows/executions/${executionId}/tasks/${taskId}/deliveries/${deliveryId}/evidence`),
 
   getTaskActivity: (executionId: string, taskId: string) =>
     request<TaskActivityFeed>(`/workflows/executions/${executionId}/tasks/${taskId}/activity`),

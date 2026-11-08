@@ -258,6 +258,7 @@ class TaskDelivery(Base):
     source_commit_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     base_branch: Mapped[str] = mapped_column(String(255), nullable=False)
     diff_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
     branch_name: Mapped[str] = mapped_column(String(240), nullable=False)
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="starting", server_default="starting")
     branch_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)

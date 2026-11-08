@@ -65,6 +65,7 @@ _MAX_STORED_OUTPUT_CHARS = 256 * 1024
 _MAX_DELIVERY_FILES = 50
 _MAX_DELIVERY_BYTES = 500_000
 _MAX_DELIVERY_DIFF_BYTES = 1_000_000
+_MAX_DELIVERY_EVIDENCE_BYTES = 16 * 1024 * 1024
 _ACTIVITY_SOURCE_LIMIT = 100
 _ACTIVITY_TOTAL_LIMIT = 200
 _ACTIVITY_TASK_TREE_LIMIT = 500
@@ -564,6 +565,7 @@ def _task_delivery_dict(delivery: TaskDelivery) -> dict[str, Any]:
         "id": str(delivery.id),
         "status": delivery.status,
         "diff_digest": delivery.diff_digest,
+        "evidence_available": getattr(delivery, "evidence_snapshot", None) is not None,
         "base_branch": delivery.base_branch,
         "branch": delivery.branch_name,
         "branch_sha": delivery.branch_sha,
@@ -575,6 +577,20 @@ def _task_delivery_dict(delivery: TaskDelivery) -> dict[str, Any]:
         "created_at": delivery.created_at.isoformat() if delivery.created_at else None,
         "updated_at": delivery.updated_at.isoformat() if delivery.updated_at else None,
     }
+
+
+def _delivery_evidence_snapshot(preview: dict[str, Any]) -> str:
+    """Serialize the exact validated file operations and patch for durable review."""
+    snapshot = {
+        "version": 1,
+        "files": preview["files"],
+        "deleted_paths": preview["deleted_paths"],
+        "diffs": preview["diffs"],
+    }
+    serialized = json.dumps(snapshot, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    if len(serialized.encode("ascii")) > _MAX_DELIVERY_EVIDENCE_BYTES:
+        raise HTTPException(status_code=413, detail="Delivery evidence exceeds the 16 MiB storage limit")
+    return serialized
 
 
 def _tool_invocation_dict(invocation: TeammateToolInvocation) -> dict[str, Any]:
@@ -2059,6 +2075,46 @@ async def preview_task_delivery(
     return preview
 
 
+@router.get("/deliveries/{delivery_id}/evidence", summary="Read immutable file and diff evidence for one delivery")
+async def get_task_delivery_evidence(
+    execution_id: uuid.UUID,
+    task_id: uuid.UUID,
+    delivery_id: uuid.UUID,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    task = await _owned_task(execution_id, task_id, db)
+    delivery = (
+        await db.execute(
+            select(TaskDelivery).where(
+                TaskDelivery.id == delivery_id,
+                TaskDelivery.tenant_id == task.tenant_id,
+                TaskDelivery.task_id == task.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if delivery is None:
+        raise HTTPException(status_code=404, detail="Task delivery not found")
+    handoff = (
+        await db.execute(
+            select(TaskHandoff).where(
+                TaskHandoff.tenant_id == task.tenant_id,
+                TaskHandoff.child_task_id == task.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if handoff is None or handoff.status not in {"pending", "running", "failed", "completed"}:
+        raise HTTPException(status_code=403, detail="Task has no approved project handoff for delivery review")
+    _repository, project = await _load_authorized_repository(
+        delivery.repository_id,
+        db,
+        roles=OWNER_ADMIN,
+    )
+    if project.id != handoff.project_id:
+        raise HTTPException(status_code=403, detail="Task delivery is outside its assigned project")
+    evidence = json.loads(delivery.evidence_snapshot) if delivery.evidence_snapshot is not None else None
+    return {"delivery_id": str(delivery.id), "evidence": evidence}
+
+
 @router.post("/deliver", status_code=201, summary="Create a draft PR from the approved workspace diff")
 async def deliver_task_workspace(
     execution_id: uuid.UUID,
@@ -2097,6 +2153,7 @@ async def deliver_task_workspace(
                     status_code=409,
                     detail="Delivery requires at least one supported change and no unsupported missing source files",
                 )
+            evidence_snapshot = _delivery_evidence_snapshot(preview)
             existing = (
                 await db.execute(
                     select(TaskDelivery)
@@ -2142,6 +2199,7 @@ async def deliver_task_workspace(
                 source_commit_sha=pinned_source_sha,
                 base_branch=preview["base_branch"],
                 diff_digest=preview["diff_digest"],
+                evidence_snapshot=evidence_snapshot,
                 branch_name=payload.branch_name,
                 status="starting",
             )
