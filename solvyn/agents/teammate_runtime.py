@@ -297,6 +297,7 @@ async def run_teammate(
     )
     agent._llm_provider = teammate.model_provider
     agent._llm_model = teammate.model_name
+    agent._task_id = str(task_id) if task_id is not None else None
     agent._teammate_system_context = context
     agent._teammate_repository_context = repository_context or ""
     agent._teammate_tool_runtime = agent_tool_runtime

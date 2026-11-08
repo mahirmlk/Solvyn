@@ -94,6 +94,11 @@ async def test_task_activity_combines_durable_records_in_reverse_chronological_o
         kind="verification", status="pending", decided_at=None,
         updated_at=_time(9, 25), created_at=_time(9, 25), summary="Run the test profile", decision_note=None,
     )
+    usage = SimpleNamespace(
+        id=uuid.uuid4(), task_id=child_task_id, created_at=_time(8, 0), agent_type="software-engineer",
+        provider="openrouter", model="openai/gpt-4o-mini", prompt_tokens=120, completion_tokens=80,
+        total_tokens=200, cost=0.000066,
+    )
     task_event = SimpleNamespace(
         id=uuid.uuid4(), task_id=child_task_id, parent_task_id=task_id, event_type="status_changed",
         previous_status="running", status="completed", source="user_request", actor_user_id=uuid.uuid4(),
@@ -128,7 +133,7 @@ async def test_task_activity_combines_durable_records_in_reverse_chronological_o
     session = _ActivitySession(
         [
             [child_task_id], [], [invocation], [run], attempt_events, [delivery], [handoff], [task_event],
-            orchestration_events, [approval],
+            orchestration_events, [usage], [approval],
         ]
     )
     monkeypatch.setattr(verification, "_owned_task", AsyncMock(return_value=task))
@@ -158,12 +163,12 @@ async def test_task_activity_combines_durable_records_in_reverse_chronological_o
 
     feed = await verification.list_task_activity(execution_id, task_id, session)  # type: ignore[arg-type]
 
-    assert feed["count"] == 12
+    assert feed["count"] == 13
     assert feed["truncated"] is False
     assert [event["type"] for event in feed["activity"]] == [
         "tool", "verification", "verification_attempt", "verification_attempt",
         "delivery", "handoff", "orchestration_transition", "orchestration_transition",
-        "orchestration_transition", "approval", "orchestration_transition", "task_lifecycle",
+        "orchestration_transition", "approval", "orchestration_transition", "task_lifecycle", "llm_usage",
     ]
     delivery_event = feed["activity"][4]
     assert delivery_event["details"]["pull_request_status"]["review_status"]["state"] == "review_required"
@@ -175,9 +180,14 @@ async def test_task_activity_combines_durable_records_in_reverse_chronological_o
     assert feed["activity"][7]["summary"] == "Acceptance criterion created as pending"
     assert feed["activity"][2]["details"]["attempt_number"] == 1
     assert feed["activity"][2]["status"] == "passed"
-    assert feed["activity"][-1]["status"] == "completed"
-    assert str(child_task_id)[:8] in feed["activity"][-1]["summary"]
-    assert feed["activity"][-1]["details"]["task_id"] == str(child_task_id)
+    assert feed["activity"][-2]["status"] == "completed"
+    assert str(child_task_id)[:8] in feed["activity"][-2]["summary"]
+    assert feed["activity"][-2]["details"]["task_id"] == str(child_task_id)
+    assert feed["activity"][-1]["details"] == {
+        "task_id": str(child_task_id), "agent_type": "software-engineer", "provider": "openrouter",
+        "model": "openai/gpt-4o-mini", "prompt_tokens": 120, "completion_tokens": 80,
+        "total_tokens": 200, "cost": 0.000066,
+    }
 
 
 @pytest.mark.asyncio

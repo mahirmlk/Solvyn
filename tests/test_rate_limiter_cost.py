@@ -1,3 +1,4 @@
+import uuid
 from unittest.mock import AsyncMock
 
 import pytest
@@ -48,19 +49,46 @@ def test_rate_limiter_get_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cost_tracker_record() -> None:
+async def test_cost_tracker_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    from solvyn.agents import cost_tracker as cost_tracker_module
+
+    class Session:
+        added = None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def add(self, record):
+            self.added = record
+
+        async def commit(self):
+            return None
+
+    session = Session()
+    monkeypatch.setattr(cost_tracker_module, "async_session_factory", lambda: session)
+    monkeypatch.setattr(cost_tracker_module, "bind_tenant_scope", AsyncMock())
     tracker = CostTracker()
-    tracker.record = AsyncMock()
+    tenant_id, session_id, task_id = (str(uuid.uuid4()) for _ in range(3))
     await tracker.record(
-        session_id="s1",
+        tenant_id=tenant_id,
+        session_id=session_id,
+        task_id=task_id,
         agent_type="a",
         provider="openrouter",
         model="gpt-4o",
         prompt_tokens=100,
         completion_tokens=50,
+        total_tokens=150,
         cost=0.002,
     )
-    tracker.record.assert_awaited_once()
+    assert session.added is not None
+    assert session.added.tenant_id == uuid.UUID(tenant_id)
+    assert session.added.session_id == uuid.UUID(session_id)
+    assert session.added.task_id == uuid.UUID(task_id)
+    assert session.added.total_tokens == 150
 
 
 @pytest.mark.asyncio

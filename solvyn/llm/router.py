@@ -207,6 +207,7 @@ class LLMRouter:
         tenant_id: str | None = None,
         session_id: str | None = None,
         agent_type: str | None = None,
+        task_id: str | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
         effective_model = model or settings.llm_default_model
@@ -269,6 +270,15 @@ class LLMRouter:
                             logger.error(f"Fallback {fallback_name} also failed: {fb_e}")
                             continue
                         _populate_trace_record(fb_trace, response)
+                        await self._record_task_usage(
+                            tenant_id=resolved_tenant,
+                            session_id=resolved_session,
+                            task_id=task_id,
+                            agent_type=agent_type or "unknown",
+                            response=response,
+                            fallback_provider=fallback_name,
+                            fallback_model=effective_model,
+                        )
                         if use_cache:
                             await self.cache.set(prompt, effective_model, response, system_prompt)
                         return response
@@ -276,9 +286,49 @@ class LLMRouter:
                 raise RuntimeError("All LLM providers failed")
 
             _populate_trace_record(trace, response)
+            await self._record_task_usage(
+                tenant_id=resolved_tenant,
+                session_id=resolved_session,
+                task_id=task_id,
+                agent_type=agent_type or "unknown",
+                response=response,
+                fallback_provider=effective_provider,
+                fallback_model=effective_model,
+            )
             if use_cache:
                 await self.cache.set(prompt, effective_model, response, system_prompt)
             return response
+
+    @staticmethod
+    async def _record_task_usage(
+        *,
+        tenant_id: str,
+        session_id: str | None,
+        task_id: str | None,
+        agent_type: str,
+        response: LLMResponse,
+        fallback_provider: str,
+        fallback_model: str,
+    ) -> None:
+        if task_id is None:
+            return
+        try:
+            from solvyn.agents.cost_tracker import cost_tracker
+
+            await cost_tracker.record(
+                tenant_id=tenant_id,
+                session_id=session_id,
+                task_id=task_id,
+                agent_type=agent_type,
+                provider=response.provider or fallback_provider,
+                model=response.model or fallback_model,
+                prompt_tokens=response.prompt_tokens,
+                completion_tokens=response.completion_tokens,
+                total_tokens=response.total_tokens,
+                cost=response.cost,
+            )
+        except Exception:  # noqa: BLE001 — usage persistence must not fail engineering work
+            logger.exception("Could not persist task-scoped LLM usage")
 
     @staticmethod
     def _resolve_tenant_id(override: str | None) -> str:

@@ -153,6 +153,8 @@ def test_secret_screen_returns_pattern_label_without_secret_contents() -> None:
 
 @pytest.mark.asyncio
 async def test_agent_applies_teammate_context_and_token_limit(monkeypatch) -> None:
+    import uuid
+
     from solvyn.agents.backend_engineer import BackendEngineerAgent
     from solvyn.llm.providers.base import LLMResponse
     from solvyn.llm.router import llm_router
@@ -164,7 +166,9 @@ async def test_agent_applies_teammate_context_and_token_limit(monkeypatch) -> No
         ]
     )
     monkeypatch.setattr(llm_router, "generate", generate)
-    agent = BackendEngineerAgent()
+    tenant_id, session_id, task_id = (str(uuid.uuid4()) for _ in range(3))
+    agent = BackendEngineerAgent(session_id=session_id, tenant_id=tenant_id)
+    agent._task_id = task_id
     agent._teammate_system_context = "Project: Billing"
     agent._max_tokens_per_run = 128
 
@@ -176,4 +180,8 @@ async def test_agent_applies_teammate_context_and_token_limit(monkeypatch) -> No
     assert "Role prompt" in kwargs["system_prompt"]
     assert "Project: Billing" in kwargs["system_prompt"]
     assert kwargs["max_tokens"] == 128
+    assert kwargs["tenant_id"] == tenant_id
+    assert kwargs["session_id"] == session_id
+    assert kwargs["task_id"] == task_id
+    assert kwargs["agent_type"] == "backend-engineer"
     assert second_kwargs["max_tokens"] == 32

@@ -152,6 +152,13 @@ export default function TaskDeliveryReviewPage() {
                   </div>
                   <strong className={styles.activitySummary}>{event.summary}</strong>
                   {event.type === "tool" && event.details.path && <p className={styles.muted}>Path <code>{event.details.path}</code></p>}
+                  {event.type === "llm_usage" && (
+                    <p className={styles.muted}>
+                      {event.details.agent_type ?? "Teammate"} · {event.details.prompt_tokens ?? 0} input / {event.details.completion_tokens ?? 0} output / {event.details.total_tokens ?? 0} total tokens
+                      {event.details.provider && event.details.model ? ` · ${event.details.provider} / ${event.details.model}` : ""}
+                      {event.details.cost !== undefined ? ` · $${event.details.cost.toFixed(6)}` : ""}
+                    </p>
+                  )}
                   {event.type === "verification" && event.details.exit_code !== undefined && (
                     <p className={styles.muted}>Exit code {event.details.exit_code}{event.details.timed_out ? " · timed out" : ""}</p>
                   )}

@@ -36,6 +36,7 @@ class BaseAgent(ABC):
         self._teammate_tool_runtime: TeammateWorkspaceToolRuntime | None = None
         self._max_tokens_per_run: int | None = None
         self._llm_completion_tokens_used = 0
+        self._task_id: str | None = None
 
     @property
     @abstractmethod
@@ -102,6 +103,10 @@ class BaseAgent(ABC):
                     system_prompt=direct_system_prompt,
                     provider=self._llm_provider,
                     model=self._llm_model,
+                    tenant_id=self.tenant_id,
+                    session_id=self.session_id,
+                    agent_type=self.metadata.agent_type,
+                    task_id=self._task_id,
                     **direct_kwargs,
                 )
 
@@ -119,6 +124,10 @@ class BaseAgent(ABC):
                     system_prompt=direct_system_prompt,
                     provider=self._llm_provider,
                     model=self._llm_model,
+                    tenant_id=self.tenant_id,
+                    session_id=self.session_id,
+                    agent_type=self.metadata.agent_type,
+                    task_id=self._task_id,
                     **direct_kwargs,
                 )
             except BaseException:

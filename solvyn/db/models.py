@@ -486,10 +486,16 @@ class ExecutionGraph(Base):
 
 class TokenUsage(Base):
     __tablename__ = "token_usage"
+    __table_args__ = (
+        Index("ix_token_usage_tenant_task_created_at", "tenant_id", "task_id", "created_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
     session_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("sessions.id"), nullable=True)
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=True
+    )
     agent_type: Mapped[str] = mapped_column(String(100), nullable=False)
     provider: Mapped[str] = mapped_column(String(50), nullable=False)
     model: Mapped[str] = mapped_column(String(100), nullable=False)

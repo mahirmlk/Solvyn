@@ -37,6 +37,7 @@ class CostTracker:
         completion_tokens: int,
         total_tokens: int,
         cost: float,
+        task_id: str | None = None,
     ) -> None:
         tenant_uuid = _required_tenant_uuid(tenant_id)
         async with async_session_factory() as db:
@@ -45,6 +46,7 @@ class CostTracker:
                 id=uuid.uuid4(),
                 tenant_id=tenant_uuid,
                 session_id=_to_uuid(session_id),
+                task_id=_to_uuid(task_id),
                 agent_type=agent_type,
                 provider=provider,
                 model=model,
