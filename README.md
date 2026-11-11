@@ -34,6 +34,8 @@ Solvyn gives engineering teams a self-hosted place to configure AI teammates, co
 
 Connect public GitHub repositories or private repositories authorized through an encrypted organization integration. Solvyn inspects bounded repository trees and manifests, then lets an authorized user seed a task workspace with selected files at one pinned commit. Tasks keep their dependencies, handoffs, status, and activity in PostgreSQL.
 
+Repository inspection extracts static direct dependency names from supported manifests at the root and one directory below. Discovery is bounded and deterministic; it does not resolve versions, scan for vulnerabilities, or report available updates.
+
 ### Permission-scoped teammate work
 
 Teammates receive file tools according to the grants on their task. Those tools can list, read, search, write, or delete workspace files. The runtime records tool activity without copying file contents into the audit record.

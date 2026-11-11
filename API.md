@@ -615,7 +615,7 @@ List repositories connected to a project visible to the caller.
 
 ### `GET /api/v1/repositories/{repository_id}/inspect`
 
-Inspect the default branch. Returns repository metadata, revision SHA, file count, top-level entries, language counts, up to six common manifests (each capped at 64 KB), parsed direct dependencies, and a compact project context. `content_trust` is `untrusted_repository_data`.
+Inspect the default branch at one resolved commit. The response includes `revision` (commit SHA), `tree_sha`, repository metadata, file count, top-level entries, language counts, parsed direct dependency names, and compact project context. It reads existing root context files plus supported dependency manifests at the root and one directory below, with root context prioritized and deterministic ordering. Discovery is bounded to 25 candidates, 64 KB per file, 512 KB aggregate, and a 45-second request deadline. `manifest_discovery` reports manifest/context candidate counts, attempted reads, omissions, limits, and whether coverage is partial. Supported formats include npm, Python, Go, Rust, Maven, Gradle, Ruby, and Composer. Names are static declarations only; versions are not resolved and this is not a vulnerability or update scan. `content_trust` is `untrusted_repository_data`.
 
 ### Explicit repository context for teammate runs
 

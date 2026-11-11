@@ -11,13 +11,21 @@ import asyncio
 import base64
 import json
 import re
-import tomllib
 from collections import Counter
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 
+from solvyn.repositories.dependencies import (
+    MAX_MANIFEST_BYTES,
+    MAX_MANIFESTS,
+    MAX_TOTAL_BYTES,
+    is_dependency_manifest_path,
+)
+from solvyn.repositories.dependencies import (
+    parse_dependencies as parse_dependency_names,
+)
 from solvyn.repositories.protocols import RepositoryProvider
 
 _OWNER_REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -64,7 +72,7 @@ _MAX_COMMIT_BYTES = 500_000
 _BRANCH_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,239}$")
 _MAX_REVIEW_PAGES = 10
 _REVIEWS_PER_PAGE = 100
-_MAX_MANIFESTS = 6
+_MAX_MANIFEST_DEPTH = 1
 _CONTENT_SEARCH_EXTENSIONS = frozenset({
     ".c", ".cc", ".cfg", ".conf", ".cpp", ".cs", ".css", ".csv", ".cxx", ".dart",
     ".dockerfile", ".go", ".graphql", ".h", ".hpp", ".html", ".ini", ".java", ".js",
@@ -79,6 +87,7 @@ _MAX_CONTENT_SEARCH_MATCHES = 20
 _MAX_CONTENT_SEARCH_SNIPPET_CHARS = 500
 _MAX_CONTENT_SEARCH_OUTPUT_BYTES = 16_000
 _MAX_CONTENT_SEARCH_SECONDS = 45
+_MAX_INSPECTION_SECONDS = 45
 
 
 class GitHubRepositoryError(Exception):
@@ -516,9 +525,23 @@ class GitHubClient(RepositoryProvider):
             return None
 
     async def inspect(self, full_name: str) -> dict[str, Any]:
+        try:
+            async with asyncio.timeout(_MAX_INSPECTION_SECONDS):
+                return await self._inspect_at_revision(full_name)
+        except TimeoutError as exc:
+            raise GitHubRepositoryError(504, "Repository inspection timed out") from exc
+
+    async def _inspect_at_revision(self, full_name: str) -> dict[str, Any]:
         metadata = await self.repository_metadata(full_name)
-        tree_sha, tree = await self.repository_tree(metadata["full_name"], metadata["default_branch"])
-        files = {entry["path"] for entry in tree if entry["type"] == "blob"}
+        revision = await self.branch_commit(metadata["full_name"], metadata["default_branch"])
+        source_tree_sha = await self.commit_tree_sha(metadata["full_name"], revision)
+        tree_sha, tree = await self.repository_tree(metadata["full_name"], source_tree_sha)
+        file_entries = {
+            entry["path"]: entry
+            for entry in tree
+            if entry.get("type") == "blob" and isinstance(entry.get("path"), str)
+        }
+        files = set(file_entries)
         extension_counts: Counter[str] = Counter()
         for path in files:
             ext = "." + path.rsplit(".", 1)[-1].lower() if "." in path.rsplit("/", 1)[-1] else ""
@@ -526,20 +549,101 @@ class GitHubClient(RepositoryProvider):
             if language:
                 extension_counts[language] += 1
 
-        manifest_paths = [path for path in _MANIFESTS if path in files][: _MAX_MANIFESTS]
+        # Preserve the original root context order, then scan nested
+        # dependency manifests in a stable lexical order.
+        root_context_paths = [
+            path
+            for path in _MANIFESTS
+            if path in files
+            and (file_entries[path].get("mode") is None or file_entries[path].get("mode") in {"100644", "100755"})
+        ]
+        root_dependency_paths = sorted(
+            path
+            for path, entry in file_entries.items()
+            if "/" not in path
+            and is_dependency_manifest_path(path)
+            and (entry.get("mode") is None or entry.get("mode") in {"100644", "100755"})
+        )
+        root_paths = list(dict.fromkeys(root_context_paths + root_dependency_paths))
+        nested_paths = sorted(
+            path
+            for path, entry in file_entries.items()
+            if path.count("/") == _MAX_MANIFEST_DEPTH
+            and is_dependency_manifest_path(path)
+            and (entry.get("mode") is None or entry.get("mode") in {"100644", "100755"})
+        )
+        manifest_candidates = root_paths + nested_paths
+        candidate_count = len(manifest_candidates)
+        manifest_candidate_count = len(root_dependency_paths) + len(nested_paths)
+        context_candidate_count = candidate_count - manifest_candidate_count
+        manifest_paths = manifest_candidates[:MAX_MANIFESTS]
+        discovery_truncated = candidate_count > MAX_MANIFESTS
         manifest_content: dict[str, str] = {}
+        scanned_count = 0
+        omitted_count = candidate_count - len(manifest_paths)
+        total_bytes = 0
         for path in manifest_paths:
-            content = await self.text_file(metadata["full_name"], path, metadata["default_branch"])
-            if content is not None:
-                manifest_content[path] = content
+            entry = file_entries[path]
+            size = entry.get("size")
+            if isinstance(size, int) and (size < 0 or size > MAX_MANIFEST_BYTES):
+                discovery_truncated = True
+                omitted_count += 1
+                continue
+            remaining_bytes = MAX_TOTAL_BYTES - total_bytes
+            reservation = size if isinstance(size, int) else min(MAX_MANIFEST_BYTES, remaining_bytes)
+            if remaining_bytes <= 0 or reservation > remaining_bytes:
+                discovery_truncated = True
+                omitted_count += 1
+                continue
+            # Reserve expected or worst-case per-file bytes before the request;
+            # undecodable data still consumes the aggregate fetch budget.
+            total_bytes += reservation
+            scanned_count += 1
+            content = await self.text_file(
+                metadata["full_name"],
+                path,
+                revision,
+                max_bytes=max(1, min(MAX_MANIFEST_BYTES, remaining_bytes, reservation)),
+            )
+            if content is None:
+                discovery_truncated = True
+                omitted_count += 1
+                continue
+            content_bytes = len(content.encode("utf-8"))
+            if (
+                content_bytes > MAX_MANIFEST_BYTES
+                or content_bytes > remaining_bytes
+                or isinstance(size, int) and content_bytes != size
+                or "\x00" in content
+            ):
+                total_bytes += max(0, content_bytes - reservation)
+                discovery_truncated = True
+                omitted_count += 1
+                continue
+            total_bytes += content_bytes - reservation
+            manifest_content[path] = content
 
         return {
             "repository": metadata,
-            "revision": tree_sha,
+            "revision": revision,
+            "tree_sha": tree_sha,
             "file_count": len(files),
             "top_level_entries": sorted({path.split("/", 1)[0] for path in files})[:100],
             "languages": dict(extension_counts.most_common(12)),
             "manifests": manifest_content,
+            "manifest_discovery": {
+                "candidate_count": candidate_count,
+                "manifest_candidate_count": manifest_candidate_count,
+                "context_candidate_count": context_candidate_count,
+                "scanned_count": scanned_count,
+                "omitted_count": omitted_count,
+                "truncated": discovery_truncated,
+                "coverage": "partial" if discovery_truncated else "complete",
+                "max_depth": _MAX_MANIFEST_DEPTH,
+                "max_candidates": MAX_MANIFESTS,
+                "max_file_bytes": MAX_MANIFEST_BYTES,
+                "max_total_bytes": MAX_TOTAL_BYTES,
+            },
             "content_trust": "untrusted_repository_data",
         }
 
@@ -860,29 +964,8 @@ class GitHubClient(RepositoryProvider):
 
     @staticmethod
     def parse_dependencies(manifests: dict[str, str]) -> dict[str, list[str]]:
-        """Extract direct dependency names from common manifest files."""
-        found: dict[str, list[str]] = {}
-        if raw := manifests.get("package.json"):
-            try:
-                package = json.loads(raw)
-                names = set(package.get("dependencies", {})) | set(package.get("devDependencies", {}))
-                found["package.json"] = sorted(str(name) for name in names)[:200]
-            except (ValueError, AttributeError, TypeError):
-                found["package.json"] = []
-        if raw := manifests.get("pyproject.toml"):
-            try:
-                data = tomllib.loads(raw)
-                dependencies = data.get("project", {}).get("dependencies", [])
-                found["pyproject.toml"] = [str(dep).split(";")[0].strip() for dep in dependencies[:200]]
-            except (tomllib.TOMLDecodeError, AttributeError, TypeError):
-                found["pyproject.toml"] = []
-        if raw := manifests.get("requirements.txt"):
-            found["requirements.txt"] = [
-                line.split("#", 1)[0].strip()
-                for line in raw.splitlines()
-                if line.strip() and not line.lstrip().startswith(("#", "-"))
-            ][:200]
-        return found
+        """Extract bounded direct dependency names from supported manifests."""
+        return parse_dependency_names(manifests)
 
     @staticmethod
     def detect_frameworks(dependencies: dict[str, list[str]]) -> list[str]:
