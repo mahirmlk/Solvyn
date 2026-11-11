@@ -579,6 +579,9 @@ class GitHubClient(RepositoryProvider):
             if remaining <= 0 or entry["size"] > remaining:
                 truncated = True
                 break
+            # Reserve the tree-reported blob size before fetching so binary or
+            # invalid UTF-8 files still consume the aggregate network budget.
+            fetched_bytes += entry["size"]
             content = await self.text_file(
                 full_name,
                 entry["path"],
@@ -594,7 +597,6 @@ class GitHubClient(RepositoryProvider):
                 # UTF-8 can still contain NUL bytes; treat those blobs as binary.
                 truncated = True
                 continue
-            fetched_bytes += len(content.encode("utf-8"))
             for line_number, line in enumerate(content.splitlines(), start=1):
                 if needle not in line.casefold():
                     continue

@@ -291,6 +291,35 @@ async def test_content_search_marks_scan_truncated_when_only_oversized_text_blob
 
 
 @pytest.mark.asyncio
+async def test_content_search_counts_skipped_nul_blobs_toward_aggregate_budget() -> None:
+    revision = "a" * 40
+    content_paths: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/branches/main"):
+            return httpx.Response(200, json={"commit": {"sha": revision}})
+        if request.url.path.endswith(f"/git/trees/{revision}"):
+            tree = [
+                {"path": f"src/file-{index:02}.py", "type": "blob", "mode": "100644", "size": 64_000}
+                for index in range(20)
+            ]
+            return httpx.Response(200, json={"sha": "b" * 40, "truncated": False, "tree": tree})
+        content_paths.append(request.url.path)
+        raw = b"\x00" * 64_000
+        return httpx.Response(200, json={"encoding": "base64", "content": base64.b64encode(raw).decode()})
+
+    http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    async with GitHubClient(http) as github:
+        result = await github.search_content("octo/example", "main", "needle")
+    await http.aclose()
+
+    assert len(content_paths) == 15
+    assert result["files_scanned"] == 15
+    assert result["fetched_bytes"] == 960_000
+    assert result["truncated"] is True
+
+
+@pytest.mark.asyncio
 async def test_content_search_caps_candidates_and_uses_one_pinned_revision() -> None:
     revision = "c" * 40
     tree_sha = "d" * 40
