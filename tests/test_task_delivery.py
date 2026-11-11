@@ -8,6 +8,7 @@ import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
@@ -405,6 +406,7 @@ async def test_delivery_rejects_stale_preview_before_creating_remote_branch(
 ) -> None:
     verification_api = _verification_api()
     context = _delivery_fixture(tmp_path)
+    monkeypatch.setattr(verification_api, "_refresh_task_delivery_completion", AsyncMock(return_value="completed"))
     github = FakeDeliveryGitHub()
 
     async def load_context(*_args: Any) -> tuple[Any, ...]:
@@ -432,11 +434,48 @@ async def test_delivery_rejects_stale_preview_before_creating_remote_branch(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("task_status", ["pending", "review_required", "failed"])
+async def test_delivery_requires_completion_gate_before_remote_writes(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    task_status: str,
+) -> None:
+    verification_api = _verification_api()
+    context = _delivery_fixture(tmp_path)
+    github = FakeDeliveryGitHub()
+
+    async def load_context(*_args: Any) -> tuple[Any, ...]:
+        return context
+
+    monkeypatch.setattr(verification_api, "_task_delivery_context", load_context)
+    monkeypatch.setattr(verification_api, "_refresh_task_delivery_completion", AsyncMock(return_value=task_status))
+    monkeypatch.setattr(verification_api, "GitHubClient", lambda **_kwargs: github)
+
+    with pytest.raises(HTTPException) as error:
+        await verification_api.deliver_task_workspace(
+            execution_id=uuid.uuid4(),
+            task_id=uuid.uuid4(),
+            payload=verification_api.TaskDeliveryRequest(
+                expected_diff_digest="a" * 64,
+                branch_name="solvyn/task-12",
+                commit_message="Update source",
+                pull_request_title="Update source",
+            ),
+            db=FakeDeliverySession(),  # type: ignore[arg-type]
+        )
+
+    assert error.value.status_code == 409
+    assert "accepted criteria" in error.value.detail
+    assert github.writes == []
+
+
+@pytest.mark.asyncio
 async def test_delivery_creates_pinned_branch_commit_and_draft_pr(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     verification_api = _verification_api()
     context = _delivery_fixture(tmp_path)
+    monkeypatch.setattr(verification_api, "_refresh_task_delivery_completion", AsyncMock(return_value="completed"))
     github = FakeDeliveryGitHub()
     db = FakeDeliverySession()
     preview = await verification_api._build_delivery_preview(
@@ -507,6 +546,7 @@ async def test_full_repository_delivery_records_reviewable_file_and_deletion_evi
     async def load_context(*_args: Any) -> tuple[Any, ...]:
         return context
 
+    monkeypatch.setattr(verification_api, "_refresh_task_delivery_completion", AsyncMock(return_value="completed"))
     monkeypatch.setattr(verification_api, "_task_delivery_context", load_context)
     monkeypatch.setattr(verification_api, "GitHubClient", lambda **_kwargs: github)
     result = await verification_api.deliver_task_workspace(
@@ -537,6 +577,7 @@ async def test_deletion_only_delivery_creates_a_reviewable_draft_pr(
 ) -> None:
     verification_api = _verification_api()
     context = _delivery_fixture(tmp_path)
+    monkeypatch.setattr(verification_api, "_refresh_task_delivery_completion", AsyncMock(return_value="completed"))
     context[5].delete_file(context[6], "src/main.py")
     github = DeletionOnlyDeliveryGitHub()
     db = FakeDeliverySession()
@@ -573,6 +614,7 @@ async def test_ambiguous_pull_request_failure_reports_unknown_outcome(
 ) -> None:
     verification_api = _verification_api()
     context = _delivery_fixture(tmp_path)
+    monkeypatch.setattr(verification_api, "_refresh_task_delivery_completion", AsyncMock(return_value="completed"))
     github = AmbiguousPullRequestGitHub()
     db = FakeDeliverySession()
     preview = await verification_api._build_delivery_preview(
@@ -613,6 +655,7 @@ async def test_delivery_replays_persisted_pull_request_without_github_writes(
 ) -> None:
     verification_api = _verification_api()
     context = _delivery_fixture(tmp_path)
+    monkeypatch.setattr(verification_api, "_refresh_task_delivery_completion", AsyncMock(return_value="completed"))
     github = FakeDeliveryGitHub()
     preview = await verification_api._build_delivery_preview(
         context[2], context[1], context[4], context[5], context[6], FakeGitHub()  # type: ignore[arg-type]
@@ -661,6 +704,7 @@ async def test_delivery_blocks_retry_for_unresolved_persisted_attempt(
 ) -> None:
     verification_api = _verification_api()
     context = _delivery_fixture(tmp_path)
+    monkeypatch.setattr(verification_api, "_refresh_task_delivery_completion", AsyncMock(return_value="completed"))
     github = FakeDeliveryGitHub()
     preview = await verification_api._build_delivery_preview(
         context[2], context[1], context[4], context[5], context[6], FakeGitHub()  # type: ignore[arg-type]

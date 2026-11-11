@@ -37,16 +37,18 @@ async def refresh_task_completion_state(db: AsyncSession, task: Task) -> str:
             )
         )
     ).scalar_one_or_none()
-    has_handoff = False
+    handoff_status: str | None = None
     if workspace is not None:
-        has_handoff = (
+        handoff_status = (
             await db.execute(
-                select(TaskHandoff.id).where(
+                select(TaskHandoff.status).where(
                     TaskHandoff.tenant_id == task.tenant_id,
                     TaskHandoff.child_task_id == task.id,
                 )
             )
-        ).scalar_one_or_none() is not None
+        ).scalar_one_or_none()
+    has_handoff = handoff_status is not None
+    handoff_complete = not has_handoff or handoff_status == "completed"
     current_digest: str | None = None
     if workspace is not None:
         try:
@@ -91,7 +93,7 @@ async def refresh_task_completion_state(db: AsyncSession, task: Task) -> str:
         verification_pass = not has_handoff and not latest_by_kind
         if latest_by_kind and current_digest is not None:
             verification_pass = all(
-                run.status == "passed" and run.source_digest == current_digest
+                handoff_complete and run.status == "passed" and run.source_digest == current_digest
                 for run in latest_by_kind.values()
             )
     elif latest_by_kind:
