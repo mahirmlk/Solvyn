@@ -10,6 +10,7 @@ from sqlalchemy import and_, func, or_, select, update
 
 from solvyn.agents.graph import AgentGraph
 from solvyn.agents.schema import ExecutionEdge, ExecutionGraph, ExecutionNode
+from solvyn.config import settings
 from solvyn.db.models import ExecutionGraph as ExecutionGraphModel
 from solvyn.db.models import Session, Task, TaskDependency, Tenant
 from solvyn.db.session import async_session_factory, bind_tenant_scope
@@ -529,7 +530,16 @@ class WorkflowExecutor:
         execution_task: asyncio.Task[ExecutionGraph] = asyncio.create_task(execution)
         heartbeat_task: asyncio.Task[bool] = asyncio.create_task(self._heartbeat(execution_id, lease_id, tenant_id))
         try:
-            done, _ = await asyncio.wait({execution_task, heartbeat_task}, return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait(
+                {execution_task, heartbeat_task},
+                timeout=settings.workflow_execution_timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                raise TimeoutError(
+                    "Workflow execution exceeded "
+                    f"{settings.workflow_execution_timeout_seconds} seconds"
+                )
             if execution_task in done:
                 return await execution_task
             if heartbeat_task in done:

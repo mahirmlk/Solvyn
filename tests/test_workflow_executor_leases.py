@@ -32,6 +32,39 @@ async def test_lost_lease_cancels_graph_execution(monkeypatch: pytest.MonkeyPatc
     assert graph_cancelled.is_set()
 
 
+@pytest.mark.asyncio
+async def test_workflow_deadline_cancels_graph_and_heartbeat(monkeypatch: pytest.MonkeyPatch) -> None:
+    from solvyn.config import settings
+    from solvyn.workflows.executor import WorkflowExecutor
+
+    executor = WorkflowExecutor()
+    graph_cancelled = asyncio.Event()
+    heartbeat_cancelled = asyncio.Event()
+    monkeypatch.setattr(settings, "workflow_execution_timeout_seconds", 0.01)
+
+    async def run_graph() -> ExecutionGraph:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            graph_cancelled.set()
+        raise AssertionError("The graph should be cancelled after the deadline")
+
+    async def heartbeat(_execution_id: str, _lease_id: uuid.UUID, _tenant_id: uuid.UUID) -> bool:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            heartbeat_cancelled.set()
+        raise AssertionError("The heartbeat should be cancelled after the deadline")
+
+    monkeypatch.setattr(executor, "_heartbeat", heartbeat)
+
+    with pytest.raises(TimeoutError, match="Workflow execution exceeded 0.01 seconds"):
+        await executor._execute_with_lease(str(uuid.uuid4()), uuid.uuid4(), uuid.uuid4(), run_graph())
+
+    assert graph_cancelled.is_set()
+    assert heartbeat_cancelled.is_set()
+
+
 def test_shared_secret_workflow_scope_uses_default_tenant() -> None:
     from solvyn.api.v1.workflows import _workflow_tenant_ref
     from solvyn.multi_tenant.middleware import tenant_context
