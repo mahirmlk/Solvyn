@@ -202,6 +202,13 @@ async def _task_delivery_context(
     return task, workspace_record, repository, project, normalized_paths if source_paths is not None else None, manager, workspace, token
 
 
+async def _refresh_task_delivery_completion(db: AsyncSession, task: Task) -> str:
+    """Re-evaluate acceptance, handoff, and verification gates before delivery."""
+    status = await refresh_task_completion_state(db, task)
+    await db.commit()
+    return status
+
+
 async def _build_delivery_preview(
     repository: Repository,
     workspace_record: TaskWorkspace,
@@ -2125,6 +2132,7 @@ async def preview_task_delivery(
         workspace,
         token,
     ) = await _task_delivery_context(execution_id, task_id, db)
+    completion_status = await _refresh_task_delivery_completion(db, _task)
     try:
         async with GitHubClient(token=token) as github:
             preview = await _build_delivery_preview(
@@ -2132,6 +2140,14 @@ async def preview_task_delivery(
             )
     except GitHubRepositoryError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    preview["task_status"] = completion_status
+    preview["completion_gate_passed"] = completion_status == "completed"
+    if completion_status != "completed":
+        preview["can_deliver"] = False
+        preview["delivery_block_reason"] = (
+            "Task delivery requires a completed handoff, accepted criteria, and passing verification "
+            "for the current workspace."
+        )
     deliveries = (
         await db.execute(
             select(TaskDelivery)
@@ -2198,7 +2214,7 @@ async def deliver_task_workspace(
     except GitHubRepositoryError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
     (
-        _task,
+        task,
         workspace_record,
         repository,
         _project,
@@ -2207,6 +2223,15 @@ async def deliver_task_workspace(
         workspace,
         token,
     ) = await _task_delivery_context(execution_id, task_id, db)
+    completion_status = await _refresh_task_delivery_completion(db, task)
+    if completion_status != "completed":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Task delivery requires a completed handoff, accepted criteria, and passing verification "
+                "for the current workspace."
+            ),
+        )
     pinned_source_sha = workspace_record.source_commit_sha
     if not isinstance(pinned_source_sha, str) or not pinned_source_sha:
         raise HTTPException(status_code=409, detail="Task workspace has no pinned source commit")
@@ -2227,8 +2252,8 @@ async def deliver_task_workspace(
                 await db.execute(
                     select(TaskDelivery)
                     .where(
-                        TaskDelivery.tenant_id == _task.tenant_id,
-                        TaskDelivery.task_id == _task.id,
+                        TaskDelivery.tenant_id == task.tenant_id,
+                        TaskDelivery.task_id == task.id,
                         TaskDelivery.diff_digest == preview["diff_digest"],
                     )
                     .with_for_update()
@@ -2261,8 +2286,8 @@ async def deliver_task_workspace(
                 )
 
             delivery = TaskDelivery(
-                tenant_id=_task.tenant_id,
-                task_id=_task.id,
+                tenant_id=task.tenant_id,
+                task_id=task.id,
                 workspace_id=workspace_record.id,
                 repository_id=repository.id,
                 source_commit_sha=pinned_source_sha,
@@ -2281,8 +2306,8 @@ async def deliver_task_workspace(
                 concurrent = (
                     await db.execute(
                         select(TaskDelivery).where(
-                            TaskDelivery.tenant_id == _task.tenant_id,
-                            TaskDelivery.task_id == _task.id,
+                            TaskDelivery.tenant_id == task.tenant_id,
+                            TaskDelivery.task_id == task.id,
                             TaskDelivery.diff_digest == preview["diff_digest"],
                         )
                     )

@@ -33,6 +33,7 @@ from solvyn.db.models import (
     TaskAcceptanceCriterion,
     TaskDependency,
     TaskHandoff,
+    TaskWorkspace,
     TeammateProfile,
     TeammateProjectAssignment,
     VerificationRun,
@@ -127,6 +128,27 @@ async def _execute_task_handoff(
     input_data: dict[str, Any],
     session_id: str | None,
 ) -> dict[str, Any]:
+    await bind_tenant_scope(db, tenant_id)
+    workspace_record = (
+        await db.execute(
+            select(TaskWorkspace).where(
+                TaskWorkspace.tenant_id == tenant_id,
+                TaskWorkspace.task_id == child.id,
+            )
+        )
+    ).scalar_one_or_none()
+    repository_id = workspace_record.repository_id if workspace_record is not None else None
+    repository_revision = workspace_record.source_commit_sha if workspace_record is not None else None
+    repository_paths: list[str] | None = None
+    if workspace_record is not None and workspace_record.source_paths is not None:
+        try:
+            decoded_paths = json.loads(workspace_record.source_paths)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=409, detail="Task workspace source provenance is invalid") from exc
+        if not isinstance(decoded_paths, list) or any(not isinstance(path, str) for path in decoded_paths):
+            raise HTTPException(status_code=409, detail="Task workspace source provenance is invalid")
+        repository_paths = decoded_paths
+
     lease_id = uuid.uuid4()
     can_claim = or_(
         TaskHandoff.status.in_(["pending", "failed"]),
@@ -172,6 +194,9 @@ async def _execute_task_handoff(
                 project_id=handoff.project_id,
                 input_data=input_data,
                 session_id=session_id,
+                repository_id=repository_id,
+                repository_paths=repository_paths,
+                repository_revision=repository_revision,
                 task_id=child.id,
                 handoff_lease_id=lease_id,
             ),

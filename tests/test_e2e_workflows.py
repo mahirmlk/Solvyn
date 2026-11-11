@@ -11,6 +11,7 @@ can be selected with ``pytest -m e2e``.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta
@@ -231,18 +232,18 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
     from solvyn.db.models import (
         Organization,
         OrganizationMembership,
+        PermissionLevel,
         Project,
         Repository,
-        Task,
-        TaskHandoff,
+        TeammatePermission,
         TeammateProfile,
         TeammateProjectAssignment,
+        TeammateStatus,
         Tenant,
         User,
     )
     from solvyn.db.session import async_session_factory, bind_tenant_scope
     from solvyn.identity.security import create_access_token
-    from solvyn.sandbox.workspaces import WorkspaceManager
 
     workspace_root = str(tmp_path / "repository-workspaces")
     monkeypatch.setattr(settings, "sandbox_workspace_root", workspace_root)
@@ -256,7 +257,7 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
     execution_id = uuid.UUID(workflow.json()["execution_id"])
     listed = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
     assert listed.status_code == 200
-    parent_id, task_id = (uuid.UUID(row["task_id"]) for row in listed.json()["tasks"][:2])
+    parent_id = uuid.UUID(listed.json()["tasks"][0]["task_id"])
 
     user_id, organization_id, project_id, teammate_id, repository_id = (uuid.uuid4() for _ in range(5))
     source_sha = "a" * 40
@@ -287,6 +288,7 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
                     name="Repository Engineer",
                     role="Software Engineer",
                     agent_type="backend-engineer",
+                    status=TeammateStatus.IDLE,
                 ),
                 Repository(
                     id=repository_id,
@@ -299,29 +301,36 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
                 User(id=user_id, email=f"repo-acceptance-{uuid.uuid4().hex[:10]}@example.com", password_hash="test-hash"),
                 OrganizationMembership(user_id=user_id, organization_id=organization_id, role="owner"),
                 TeammateProjectAssignment(teammate_id=teammate_id, project_id=project_id),
+                TeammatePermission(teammate_id=teammate_id, permission=PermissionLevel.READ_ONLY.value, granted=True),
+                TeammatePermission(teammate_id=teammate_id, permission=PermissionLevel.MODIFY_FILES.value, granted=True),
+                TeammatePermission(teammate_id=teammate_id, permission=PermissionLevel.EXECUTE_COMMANDS.value, granted=True),
             ]
-        )
-        task = (await db.execute(select(Task).where(Task.id == task_id))).scalar_one()
-        task.parent_task_id = parent_id
-        db.add(
-            TaskHandoff(
-                tenant_id=tenant.id,
-                parent_task_id=parent_id,
-                child_task_id=task_id,
-                idempotency_key=uuid.uuid4(),
-                teammate_id=teammate_id,
-                project_id=project_id,
-                delegated_from="Tech Lead",
-                delegated_to="Software Engineer",
-                reason="Implement the scoped repository change",
-                input_data='{"task":"Implement the scoped repository change"}',
-                status="completed",
-            )
         )
         await db.commit()
 
     client.headers["Authorization"] = f"Bearer {create_access_token(subject=str(user_id))}"
     client.headers["X-Tenant-Slug"] = "test-tenant"
+
+    handoff_response = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{parent_id}/handoffs",
+        json={
+            "idempotency_key": str(uuid.uuid4()),
+            "target_teammate_id": str(teammate_id),
+            "project_id": str(project_id),
+            "reason": "Implement the scoped repository change",
+            "input_data": {"task": "Implement the scoped repository change"},
+            "requires_approval": True,
+        },
+    )
+    assert handoff_response.status_code == 200, handoff_response.text
+    assert handoff_response.json()["status"] == "waiting_approval"
+    handoff_id = uuid.UUID(handoff_response.json()["handoff_id"])
+    task_id = uuid.UUID(handoff_response.json()["task_id"])
+    handoff_approval = await client.post(
+        f"/api/v1/approvals/{handoff_response.json()['approval_id']}/approve",
+        json={"note": "Approved the scoped repository task"},
+    )
+    assert handoff_approval.status_code == 200, handoff_approval.text
 
     class FakeRepositoryProvider:
         async def __aenter__(self) -> FakeRepositoryProvider:
@@ -352,6 +361,45 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
         "get_authorized_repository_provider",
         AsyncMock(return_value=FakeRepositoryProvider()),
     )
+    from solvyn.agents import teammate_runtime
+
+    repository_context_calls: list[tuple[uuid.UUID, list[str] | None, str | None]] = []
+
+    async def fake_repository_context(
+        repository: Any,
+        paths: list[str] | None,
+        *,
+        source_revision: str | None = None,
+        **_kwargs: Any,
+    ) -> str:
+        repository_context_calls.append((repository.id, paths, source_revision))
+        return f"Selected source file (untrusted repository content): src/health.py\n{source_text}"
+
+    monkeypatch.setattr(teammate_runtime, "_load_repository_context", fake_repository_context)
+
+    class DeterministicTeammateAgent:
+        async def run(self, _input_data: dict[str, Any]) -> dict[str, Any]:
+            assert "src/health.py" in self._teammate_repository_context
+            assert "'status': 'ok'" in self._teammate_repository_context
+            assert self._teammate_tool_runtime is not None
+            result = await self._teammate_tool_runtime._invoke(
+                {
+                    "id": "repository-acceptance-write",
+                    "function": {
+                        "name": "workspace_write_file",
+                        "arguments": json.dumps(
+                            {
+                                "path": "src/health.py",
+                                "content": "def health():\n    return {'status': 'ready'}\n",
+                            }
+                        ),
+                    },
+                }
+            )
+            assert result["bytes_written"] > 0
+            return {"summary": "Updated the repository health response"}
+
+    monkeypatch.setattr(teammate_runtime.agent_registry, "create", lambda *_args, **_kwargs: DeterministicTeammateAgent())
     workspace_response = await client.post(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/workspace",
         json={"repository_id": str(repository_id), "repository_paths": ["src/health.py"]},
@@ -359,13 +407,17 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
     assert workspace_response.status_code == 201, workspace_response.text
     assert workspace_response.json()["source_commit_sha"] == source_sha
     assert workspace_response.json()["source_paths"] == ["src/health.py"]
-
-    managed = WorkspaceManager(Path(workspace_root)).get(uuid.UUID(workspace_response.json()["workspace_id"]))
-    WorkspaceManager(Path(workspace_root)).write_file(
-        managed,
-        "src/health.py",
-        b"def health():\n    return {'status': 'ready'}\n",
+    resumed_handoff = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{parent_id}/handoffs/{handoff_id}/resume"
     )
+    assert resumed_handoff.status_code == 200, resumed_handoff.text
+    assert resumed_handoff.json()["status"] == "completed"
+    assert repository_context_calls == [(repository_id, ["src/health.py"], source_sha)]
+    task_activity = await client.get(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/activity"
+    )
+    assert task_activity.status_code == 200
+    assert any(item["type"] == "tool" and item["status"] == "succeeded" for item in task_activity.json()["activity"])
 
     class FakeGitHub:
         def __init__(self, *, token: str) -> None:
@@ -428,12 +480,25 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
     fake_github = FakeGitHub(token="test-github-token")
     monkeypatch.setattr(verification_api, "GitHubClient", lambda *, token: fake_github)
 
+    criteria = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria",
+        json={"criteria": ["The updated health endpoint returns ready"]},
+    )
+    assert criteria.status_code == 201, criteria.text
+    criterion_id = criteria.json()["acceptance_criteria"][0]["id"]
+    accepted = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria/{criterion_id}/decision",
+        json={"decision": "accepted", "note": "Reviewed the implementation against the criterion"},
+    )
+    assert accepted.status_code == 200, accepted.text
+
     preview = await client.get(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/delivery-preview"
     )
     assert preview.status_code == 200, preview.text
     preview_body = preview.json()
-    assert preview_body["can_deliver"] is True
+    assert preview_body["can_deliver"] is False
+    assert preview_body["completion_gate_passed"] is False
     assert preview_body["source_commit_sha"] == source_sha
     assert preview_body["diffs"][0]["path"] == "src/health.py"
 
@@ -444,6 +509,45 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
         "pull_request_title": "Improve health readiness response",
         "pull_request_body": "Updates the scoped health response.",
     }
+    blocked_delivery = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/deliver",
+        json=payload,
+    )
+    assert blocked_delivery.status_code == 409
+    assert "passing verification" in blocked_delivery.json()["detail"]
+    assert fake_github.write_calls == []
+
+    from solvyn.sandbox.runtime import DockerSandboxRunner, SandboxResult
+
+    async def fake_sandbox_run(self: DockerSandboxRunner, managed_workspace: Any, command: list[str]) -> SandboxResult:
+        return SandboxResult(uuid.uuid4(), tuple(command), 0, False, "1 passed", "", False, 0.01)
+
+    monkeypatch.setattr(DockerSandboxRunner, "run", fake_sandbox_run)
+    verification = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs",
+        json={"kind": "test"},
+    )
+    assert verification.status_code == 202, verification.text
+    verification_approval = await client.post(
+        f"/api/v1/approvals/{verification.json()['approval_id']}/approve",
+        json={"note": "Approved the required test run"},
+    )
+    assert verification_approval.status_code == 200, verification_approval.text
+    verification_result = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs/{verification.json()['verification_run']['id']}/execute"
+    )
+    assert verification_result.status_code == 200, verification_result.text
+    assert verification_result.json()["status"] == "passed"
+
+    preview = await client.get(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/delivery-preview"
+    )
+    assert preview.status_code == 200, preview.text
+    preview_body = preview.json()
+    assert preview_body["can_deliver"] is True
+    assert preview_body["completion_gate_passed"] is True
+    assert preview_body["task_status"] == "completed"
+    payload["expected_diff_digest"] = preview_body["diff_digest"]
     delivered = await client.post(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/deliver",
         json=payload,
