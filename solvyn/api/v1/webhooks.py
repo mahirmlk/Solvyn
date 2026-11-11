@@ -90,6 +90,10 @@ def _parse_github_work_item(event_type: str, payload: Any) -> dict[str, str] | N
 
     owner, repo = validate_full_name(full_name)
     owner_repo = f"{owner}/{repo}"
+    user_value = item.get("user")
+    user = user_value if isinstance(user_value, dict) else {}
+    is_dependabot_update = event_type == "pull_request" and isinstance(user.get("login"), str) and user["login"].lower() == "dependabot[bot]"
+    signal_type = "dependabot_update" if is_dependabot_update else event_type
     title = _bounded_text(item.get("title"), limit=255)
     label = "Pull request" if event_type == "pull_request" else "Issue"
     title = title or f"{label} #{number}"
@@ -108,12 +112,13 @@ def _parse_github_work_item(event_type: str, payload: Any) -> dict[str, str] | N
 
     return {
         "repository_name": owner_repo[:255],
-        "source_event_id": f"{event_type}:{owner_repo.lower()}:{number}:{action}"[:320],
+        "source_event_id": f"{signal_type}:{owner_repo.lower()}:{number}:{action}"[:320],
         "workflow_name": title,
         "conclusion": "open",
         "branch": branch,
         "details_url": details_url[:512],
         "action": action,
+        **({"event_type": signal_type} if is_dependabot_update else {}),
     }
 
 
@@ -333,7 +338,7 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
                     project_id=project_id,
                     delivery_id=normalized_delivery_id,
                     source_event_id=signal["source_event_id"],
-                    event_type=event_type,
+                    event_type=signal.get("event_type", event_type),
                     action=signal.get("action", "completed"),
                     repository_name=signal["repository_name"],
                     workflow_name=signal["workflow_name"],

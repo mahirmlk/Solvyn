@@ -687,7 +687,7 @@ GitHub 404 responses map to not found, rate limits to 429, and provider/network 
 
 ### `POST /api/v1/webhooks/github`
 
-Configure `GITHUB_WEBHOOK_SECRET` and subscribe GitHub to `workflow_run`, `dependabot_alert`, `code_scanning_alert`, and `secret_scanning_alert`. Solvyn verifies `X-Hub-Signature-256`, requires a UUID delivery ID, caps payloads at 256 KB, and records failed workflow runs and open security alert activity for repositories linked to active projects. Duplicate delivery UUIDs and repeated source events are deduplicated. Stored event metadata is bounded; raw webhook payloads and secret values are not stored. Verified events appear in the organization's proactive-event inbox; triggers queue human triage and do not start an agent workflow automatically.
+Configure `GITHUB_WEBHOOK_SECRET` and subscribe GitHub to `workflow_run`, `dependabot_alert`, `code_scanning_alert`, `secret_scanning_alert`, and `pull_request` (opened/reopened actions). Solvyn verifies `X-Hub-Signature-256`, requires a UUID delivery ID, caps payloads at 256 KB, and records failed workflow runs and open security alert activity for repositories linked to active projects. Dependabot-authored pull requests are recorded as a separate update signal with bounded title, number, branch, and verified URL; PR bodies are omitted. Duplicate delivery UUIDs and repeated source events are deduplicated. Stored event metadata is bounded; raw webhook payloads and secret values are not stored. Verified events appear in the organization's proactive-event inbox; triggers queue human triage and do not start an agent workflow automatically.
 
 ### `GET /api/v1/organizations/{organization_id}/proactive-events?limit=50`
 
