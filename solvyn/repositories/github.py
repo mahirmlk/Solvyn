@@ -524,16 +524,16 @@ class GitHubClient(RepositoryProvider):
         except (ValueError, UnicodeDecodeError):
             return None
 
-    async def inspect(self, full_name: str) -> dict[str, Any]:
+    async def inspect(self, full_name: str, revision: str | None = None) -> dict[str, Any]:
         try:
             async with asyncio.timeout(_MAX_INSPECTION_SECONDS):
-                return await self._inspect_at_revision(full_name)
+                return await self._inspect_at_revision(full_name, revision)
         except TimeoutError as exc:
             raise GitHubRepositoryError(504, "Repository inspection timed out") from exc
 
-    async def _inspect_at_revision(self, full_name: str) -> dict[str, Any]:
+    async def _inspect_at_revision(self, full_name: str, revision: str | None = None) -> dict[str, Any]:
         metadata = await self.repository_metadata(full_name)
-        revision = await self.branch_commit(metadata["full_name"], metadata["default_branch"])
+        revision = revision or await self.branch_commit(metadata["full_name"], metadata["default_branch"])
         source_tree_sha = await self.commit_tree_sha(metadata["full_name"], revision)
         tree_sha, tree = await self.repository_tree(metadata["full_name"], source_tree_sha)
         file_entries = {

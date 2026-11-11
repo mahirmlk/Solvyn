@@ -122,7 +122,7 @@ async def _load_repository_context(
         else:
             provider_context = get_repository_provider(repository.provider)
         async with provider_context as provider:
-            inspection = await provider.inspect(repository.full_name)
+            inspection = await provider.inspect(repository.full_name, source_revision)
             dependencies = provider.parse_dependencies(inspection.get("manifests", {}))
             frameworks = provider.detect_frameworks(dependencies)
             selected_sources = []
