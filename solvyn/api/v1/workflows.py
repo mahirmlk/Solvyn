@@ -139,6 +139,8 @@ async def _execute_task_handoff(
     ).scalar_one_or_none()
     repository_id = workspace_record.repository_id if workspace_record is not None else None
     repository_revision = workspace_record.source_commit_sha if workspace_record is not None else None
+    if repository_id is not None and not repository_revision:
+        raise HTTPException(status_code=409, detail="Task workspace has no pinned source commit")
     repository_paths: list[str] | None = None
     if workspace_record is not None and workspace_record.source_paths is not None:
         try:

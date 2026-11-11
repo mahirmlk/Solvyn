@@ -486,9 +486,10 @@ class GitHubClient(RepositoryProvider):
         except (ValueError, UnicodeDecodeError):
             return None
 
-    async def inspect(self, full_name: str) -> dict[str, Any]:
+    async def inspect(self, full_name: str, revision: str | None = None) -> dict[str, Any]:
         metadata = await self.repository_metadata(full_name)
-        tree_sha, tree = await self.repository_tree(metadata["full_name"], metadata["default_branch"])
+        tree_revision = revision or metadata["default_branch"]
+        tree_sha, tree = await self.repository_tree(metadata["full_name"], tree_revision)
         files = {entry["path"] for entry in tree if entry["type"] == "blob"}
         extension_counts: Counter[str] = Counter()
         for path in files:
@@ -500,7 +501,7 @@ class GitHubClient(RepositoryProvider):
         manifest_paths = [path for path in _MANIFESTS if path in files][: _MAX_MANIFESTS]
         manifest_content: dict[str, str] = {}
         for path in manifest_paths:
-            content = await self.text_file(metadata["full_name"], path, metadata["default_branch"])
+            content = await self.text_file(metadata["full_name"], path, tree_revision)
             if content is not None:
                 manifest_content[path] = content
 
