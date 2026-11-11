@@ -287,6 +287,20 @@ async def search_repository_paths(
     return {"query": query, "paths": paths, "count": len(paths), "search_scope": "file_paths"}
 
 
+@router.get("/repositories/{repository_id}/content/search", summary="Search bounded repository text content")
+async def search_repository_content(
+    repository_id: uuid.UUID,
+    query: str = Query(..., min_length=1, max_length=200),
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    repository, project = await _load_authorized_repository(repository_id, db)
+    try:
+        async with _authorized_provider(repository, project, db) as provider:
+            return await provider.search_content(repository.full_name, repository.default_branch, query)
+    except GitHubRepositoryError as exc:
+        raise _provider_error(exc) from exc
+
+
 @router.get("/repositories/{repository_id}/branches", summary="List repository branches")
 async def list_repository_branches(repository_id: uuid.UUID, db: AsyncSession = Depends(get_session)) -> dict[str, object]:
     repository, project = await _load_authorized_repository(repository_id, db)

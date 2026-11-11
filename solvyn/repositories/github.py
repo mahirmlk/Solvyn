@@ -7,6 +7,7 @@ passing it into any future agent context.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import re
@@ -64,6 +65,21 @@ _BRANCH_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,239}$")
 _MAX_REVIEW_PAGES = 10
 _REVIEWS_PER_PAGE = 100
 _MAX_MANIFESTS = 6
+_CONTENT_SEARCH_EXTENSIONS = frozenset({
+    ".c", ".cc", ".cfg", ".conf", ".cpp", ".cs", ".css", ".csv", ".cxx", ".dart",
+    ".dockerfile", ".go", ".graphql", ".h", ".hpp", ".html", ".ini", ".java", ".js",
+    ".json", ".jsx", ".kt", ".kts", ".lock", ".lua", ".md", ".mjs", ".php", ".py",
+    ".pyi", ".rb", ".rs", ".rst", ".scss", ".sh", ".sql", ".svelte", ".swift", ".toml",
+    ".ts", ".tsx", ".txt", ".vue", ".xml", ".yaml", ".yml", ".zsh",
+})
+_MAX_CONTENT_SEARCH_CANDIDATES = 25
+_MAX_CONTENT_SEARCH_FILE_BYTES = 64_000
+_MAX_CONTENT_SEARCH_TOTAL_BYTES = 1_000_000
+_MAX_CONTENT_SEARCH_MATCHES = 20
+_MAX_CONTENT_SEARCH_SNIPPET_CHARS = 500
+_MAX_CONTENT_SEARCH_PATH_CHARS = 512
+_MAX_CONTENT_SEARCH_OUTPUT_BYTES = 16_000
+_MAX_CONTENT_SEARCH_SECONDS = 45
 
 
 class GitHubRepositoryError(Exception):
@@ -520,6 +536,104 @@ class GitHubClient(RepositoryProvider):
         _, paths = await self.repository_tree(full_name, branch)
         needle = query.strip().casefold()
         return [entry["path"] for entry in paths if needle in entry["path"].casefold()][:100]
+
+    async def search_content(self, full_name: str, branch: str, query: str) -> dict[str, Any]:
+        """Search bounded text blobs at one commit, with a total request deadline."""
+        try:
+            async with asyncio.timeout(_MAX_CONTENT_SEARCH_SECONDS):
+                return await self._search_content_at_revision(full_name, branch, query)
+        except TimeoutError as exc:
+            raise GitHubRepositoryError(504, "Repository content search timed out") from exc
+
+    async def _search_content_at_revision(self, full_name: str, branch: str, query: str) -> dict[str, Any]:
+        needle_text = query.strip()
+        if not needle_text:
+            raise GitHubRepositoryError(422, "Search query must not be empty")
+        if len(needle_text) > 200:
+            raise GitHubRepositoryError(422, "Search query must be at most 200 characters")
+        needle = needle_text.casefold()
+        revision = await self.branch_commit(full_name, branch)
+        tree_sha, tree = await self.repository_tree(full_name, revision)
+        eligible_blobs = [
+            entry
+            for entry in tree
+            if entry.get("type") == "blob"
+            and entry.get("mode") in {"100644", "100755"}
+            and isinstance(entry.get("path"), str)
+            and "." + entry["path"].rsplit("/", 1)[-1].rsplit(".", 1)[-1].lower()
+            in _CONTENT_SEARCH_EXTENSIONS
+            and isinstance(entry.get("size"), int)
+            and entry["size"] >= 0
+        ]
+        oversized_count = sum(entry["size"] > _MAX_CONTENT_SEARCH_FILE_BYTES for entry in eligible_blobs)
+        candidates = sorted(
+            (entry for entry in eligible_blobs if entry["size"] <= _MAX_CONTENT_SEARCH_FILE_BYTES),
+            key=lambda entry: entry["path"],
+        )
+        truncated = oversized_count > 0 or len(candidates) > _MAX_CONTENT_SEARCH_CANDIDATES
+        results: list[dict[str, Any]] = []
+        fetched_bytes = 0
+        files_scanned = 0
+        for entry in candidates[:_MAX_CONTENT_SEARCH_CANDIDATES]:
+            remaining = _MAX_CONTENT_SEARCH_TOTAL_BYTES - fetched_bytes
+            if remaining <= 0 or entry["size"] > remaining:
+                truncated = True
+                break
+            content = await self.text_file(
+                full_name,
+                entry["path"],
+                revision,
+                max_bytes=min(_MAX_CONTENT_SEARCH_FILE_BYTES, remaining),
+            )
+            files_scanned += 1
+            if content is None:
+                # A selected candidate that cannot be decoded safely makes the scan incomplete.
+                truncated = True
+                continue
+            if "\x00" in content:
+                # UTF-8 can still contain NUL bytes; treat those blobs as binary.
+                truncated = True
+                continue
+            fetched_bytes += len(content.encode("utf-8"))
+            for line_number, line in enumerate(content.splitlines(), start=1):
+                if needle not in line.casefold():
+                    continue
+                if len(results) >= _MAX_CONTENT_SEARCH_MATCHES:
+                    truncated = True
+                    break
+                excerpt = line.strip()
+                if len(excerpt) > _MAX_CONTENT_SEARCH_SNIPPET_CHARS:
+                    excerpt = excerpt[: _MAX_CONTENT_SEARCH_SNIPPET_CHARS - 1] + "…"
+                results.append(
+                    {
+                        "path": entry["path"][:_MAX_CONTENT_SEARCH_PATH_CHARS],
+                        "line": line_number,
+                        "snippet": excerpt,
+                    }
+                )
+            if len(results) >= _MAX_CONTENT_SEARCH_MATCHES:
+                truncated = True
+                break
+
+        response = {
+            "query": needle_text,
+            "revision": revision,
+            "tree_sha": tree_sha,
+            "matches": results,
+            "match_count": len(results),
+            "candidate_count": len(candidates),
+            "files_scanned": files_scanned,
+            "fetched_bytes": fetched_bytes,
+            "truncated": truncated,
+            "content_trust": "untrusted_repository_data",
+        }
+        while len(json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > (
+            _MAX_CONTENT_SEARCH_OUTPUT_BYTES
+        ) and response["matches"]:
+            response["matches"].pop()
+            response["match_count"] = len(response["matches"])
+            response["truncated"] = True
+        return response
 
     async def branches(self, full_name: str) -> list[dict[str, Any]]:
         owner, repo = validate_full_name(full_name)
