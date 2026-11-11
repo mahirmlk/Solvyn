@@ -392,6 +392,95 @@ async def test_signed_security_alert_is_persisted_without_secret_material() -> N
 
 
 @pytest.mark.asyncio
+async def test_signed_dependabot_alert_persists_once_and_deduplicates_replay() -> None:
+    body = json.dumps(
+        {
+            "action": "created",
+            "repository": {"full_name": "octo/repo"},
+            "alert": {
+                "number": 73,
+                "state": "open",
+                "security_advisory": {
+                    "summary": "Prototype pollution in widget",
+                    "severity": "high",
+                    "vulnerabilities": [{"package": {"name": "widget"}}],
+                },
+                "dependency": {"package": {"name": "widget"}},
+                "security_severity_level": "high",
+                "ref": "refs/heads/main",
+                "html_url": "https://github.com/octo/repo/security/dependabot/73",
+            },
+        }
+    ).encode()
+
+    class StubDB:
+        def __init__(self) -> None:
+            self.execute_count = 0
+            self.tenant_id = uuid.uuid4()
+            self.project_id = uuid.uuid4()
+            self.organization_id = uuid.uuid4()
+            self.added: list[ProactiveEvent] = []
+
+        async def execute(self, _query: object) -> SimpleNamespace:
+            self.execute_count += 1
+            query_step = (self.execute_count - 1) % 3
+            if query_step == 0:
+                return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [self.tenant_id]))
+            if query_step == 1:
+                return SimpleNamespace(all=lambda: [(self.project_id, self.organization_id, self.tenant_id)])
+            existing = self.added[-1] if self.added else None
+            return SimpleNamespace(scalar_one_or_none=lambda: existing)
+
+        def add(self, event: ProactiveEvent) -> None:
+            if event.id is None:
+                event.id = uuid.uuid4()
+            self.added.append(event)
+
+        async def commit(self) -> None:
+            return None
+
+        async def flush(self) -> None:
+            return None
+
+        async def refresh(self, _event: ProactiveEvent) -> None:
+            return None
+
+    stub_db = StubDB()
+    db = cast(AsyncSession, stub_db)
+    first_delivery = str(uuid.uuid4())
+    replay_delivery = str(uuid.uuid4())
+    with (
+        patch("solvyn.api.v1.webhooks.settings.github_webhook_secret", "webhook-secret"),
+        patch("solvyn.api.v1.webhooks.bind_tenant_scope", new_callable=AsyncMock),
+    ):
+        first = await receive_github_webhook(
+            _request(body, event="dependabot_alert", delivery=first_delivery, signature=_signature("webhook-secret", body)),
+            db=db,
+        )
+        replay = await receive_github_webhook(
+            _request(body, event="dependabot_alert", delivery=replay_delivery, signature=_signature("webhook-secret", body)),
+            db=db,
+        )
+
+    assert first["created_count"] == 1
+    assert first["duplicate_count"] == 0
+    assert replay["created_count"] == 0
+    assert replay["duplicate_count"] == 1
+    assert replay["event_ids"] == first["event_ids"]
+    assert len(stub_db.added) == 1
+    event = stub_db.added[0]
+    assert event.event_type == "dependabot_alert"
+    assert event.action == "created"
+    assert event.source_event_id == "dependabot_alert:octo/repo:73:created"
+    assert event.workflow_name == "Prototype pollution in widget"
+    assert event.conclusion == "high"
+    assert event.branch == "main"
+    assert event.details_url == "https://github.com/octo/repo/security/dependabot/73"
+    assert event.status == "pending"
+    assert event.delivery_id == first_delivery
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("event_type", "item_key", "number"),
     [("issues", "issue", 38), ("pull_request", "pull_request", 39)],
