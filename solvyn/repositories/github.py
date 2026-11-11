@@ -617,7 +617,7 @@ class GitHubClient(RepositoryProvider):
                 truncated = True
                 break
 
-        response = {
+        response: dict[str, Any] = {
             "query": needle_text,
             "revision": revision,
             "tree_sha": tree_sha,
