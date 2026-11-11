@@ -311,6 +311,7 @@ annotations:
 | `LOG_LEVEL` | `INFO` | No | Logging level (DEBUG, INFO, WARNING, ERROR) |
 | `JSON_LOGGING` | `true` | No | Enable structured JSON log output |
 | `ENABLE_WORKFLOW_SCHEDULER` | `true` | No | Run the scheduler in the API process; production Compose disables it in the API and runs it in the worker service |
+| `WORKFLOW_EXECUTION_TIMEOUT_SECONDS` | `1800` | No | Maximum wall-clock duration for one workflow (1–86400 seconds) |
 | `API_KEY_SECRET` | `change-me-to-a-random-secret` | Yes | Master API key for auth |
 | `ALLOWED_ORIGINS` | `["http://localhost:3000"]` | No | CORS allowed origins (JSON list) |
 

@@ -569,6 +569,7 @@ All configuration uses environment variables, loaded via Pydantic-settings from 
 | `API_KEY_SECRET` | `change-me-to-a-random-secret` | Shared secret for API key HMAC validation |
 | `HOST` | `0.0.0.0` | Server bind address |
 | `PORT` | `8000` | Server port |
+| `WORKFLOW_EXECUTION_TIMEOUT_SECONDS` | `1800` | Maximum wall-clock duration for one workflow (1–86400 seconds) |
 | `LOG_LEVEL` | `INFO` | Python log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `JSON_LOGGING` | `true` | Enable structured JSON log output |
 | `ALLOWED_ORIGINS` | `["http://localhost:3000"]` | CORS allowed origins (JSON list) |
