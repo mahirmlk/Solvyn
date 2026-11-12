@@ -51,6 +51,7 @@
 | **Cost analytics** | Per-session and per-tenant token/cost tracking with provider-specific pricing tables |
 | **Multi-tenant isolation** | ContextVar-based tenant scoping through the full request lifecycle; API key authentication with constant-time HMAC comparison |
 | **Repository intelligence (early)** | Connect public or organization-token-authorized private GitHub repositories to projects, inspect bounded trees and manifests, search paths, and optionally pass a summary plus caller-selected files to a teammate as untrusted context. Teammates can search content after a task workspace is created. |
+| **Persistent teammate conversations** | Save and resume teammate conversations scoped to an assigned project. Recent messages are bounded and passed as context on later turns; direct conversations do not grant workspace tools. |
 | **Sandbox runtime (early)** | Delegated teammates can list/read/search with `READ_ONLY`, write/delete with `MODIFY_FILES`, and request fixed verification profiles with `EXECUTE_COMMANDS`. Repository-backed workspaces can produce a bounded diff and an owner/admin-approved draft PR; full clones and arbitrary teammate shell access are not supported |
 | **Self-hosting foundation** | Development Compose plus a production-oriented Compose stack with migrations, health checks, persistent data, and a separate scheduler worker. See the current [shipment readiness assessment](./docs/SHIPMENT_READINESS.md) for remaining product limitations. |
 
