@@ -85,6 +85,7 @@ async def test_timeout_failure_marks_unfinished_nodes_and_tasks_failed(monkeypat
     record = SimpleNamespace(
         graph_data=json.dumps(
             {
+                "status": "running",
                 "nodes": [
                     {"id": "active", "status": "running"},
                     {"id": "waiting", "status": "pending"},
@@ -136,7 +137,9 @@ async def test_timeout_failure_marks_unfinished_nodes_and_tasks_failed(monkeypat
         error_message="Workflow execution exceeded 1800 seconds",
     )
 
-    nodes = json.loads(record.graph_data)["nodes"]
+    graph_snapshot = json.loads(record.graph_data)
+    nodes = graph_snapshot["nodes"]
+    assert graph_snapshot["status"] == "failed"
     assert nodes[0]["status"] == "failed"
     assert nodes[0]["error"] == "Workflow execution exceeded 1800 seconds"
     assert nodes[1]["status"] == "failed"
