@@ -646,6 +646,7 @@ class WorkflowExecutor:
             record = await db.get(ExecutionGraphModel, uuid.UUID(execution_id))
             if record is not None:
                 graph_data = json.loads(record.graph_data)
+                graph_data["status"] = "failed"
                 for node in graph_data.get("nodes", []):
                     if node.get("status") in {"pending", "running"}:
                         node["status"] = "failed"
