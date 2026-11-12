@@ -127,6 +127,81 @@
   min-width: 0;
 }
 
+.searchBlock {
+  display: grid;
+  gap: 12px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line-light);
+}
+
+.searchForm {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+}
+
+.searchForm label {
+  flex: 1;
+  min-width: 0;
+}
+
+.searchResults {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.searchSummary,
+.matchLocation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.matchList {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.matchItem {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line-light);
+}
+
+.matchLocation {
+  justify-content: flex-start;
+  font-size: 10px;
+}
+
+.matchLocation code,
+.searchResults code {
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono, monospace);
+}
+
+.matchSnippet {
+  max-height: 140px;
+  margin: 0;
+  overflow: auto;
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.truncated {
+  color: var(--color-muted);
+  font-size: 11px;
+}
+
 .dependencyList li {
   align-items: flex-start;
   justify-content: flex-start;
@@ -184,14 +259,16 @@
 @media (max-width: 680px) {
   .scopeBar,
   .tokenForm,
-  .repositoryForm {
+  .repositoryForm,
+  .searchForm {
     align-items: stretch;
     flex-direction: column;
   }
 
   .scopeBar label,
   .tokenForm label,
-  .repositoryForm label {
+  .repositoryForm label,
+  .searchForm label {
     width: 100%;
   }
 
