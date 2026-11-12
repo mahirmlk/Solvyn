@@ -158,6 +158,46 @@ async def test_accepted_criteria_must_be_reapproved_after_workspace_changes(
 
 
 @pytest.mark.asyncio
+async def test_task_cannot_complete_for_a_workspace_other_than_the_preview_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from solvyn.workflows import task_completion
+
+    task = _task(criteria_defined=True, status="review_required")
+    workspace = SimpleNamespace(id=uuid.uuid4())
+    run = SimpleNamespace(kind="test", status="passed", source_digest="current-digest")
+    db = AsyncMock()
+    db.execute.side_effect = [
+        _scalar(task),
+        _scalar(workspace),
+        _scalar("completed"),
+        _rows([("accepted", "current-digest")]),
+        _scalar_rows([run]),
+    ]
+
+    class FakeWorkspaceManager:
+        def __init__(self, _root: Path) -> None:
+            pass
+
+        def get(self, _workspace_id: uuid.UUID) -> object:
+            return workspace
+
+        def fingerprint(self, _workspace: object) -> str:
+            return "current-digest"
+
+    monkeypatch.setattr(task_completion, "WorkspaceManager", FakeWorkspaceManager)
+
+    status = await refresh_task_completion_state(
+        db,
+        task,
+        expected_workspace_digest="different-preview-digest",
+    )
+
+    assert status == "review_required"
+    assert task.completed_at is None
+
+
+@pytest.mark.asyncio
 async def test_manual_workspace_without_handoff_can_complete_on_accepted_criteria(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
