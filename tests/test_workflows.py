@@ -1,3 +1,4 @@
+import uuid
 from unittest.mock import AsyncMock
 
 import pytest
@@ -59,6 +60,47 @@ async def test_workflow_executor_run() -> None:
 
     result = await executor.execute_template("feature", {"requirement": "test"}, "s1", "t1")
     assert result.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_workflow_run_timeout_returns_gateway_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi import HTTPException
+
+    from solvyn.api.v1 import workflows as workflow_api
+    from solvyn.workflows.executor import WorkflowExecutionTimeoutError
+
+    monkeypatch.setattr(workflow_api, "_workflow_tenant_ref", lambda: "test-tenant")
+    monkeypatch.setattr(
+        workflow_api.workflow_executor,
+        "run",
+        AsyncMock(side_effect=WorkflowExecutionTimeoutError("Workflow execution exceeded 1800 seconds")),
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        await workflow_api.run_workflow("feature", {"requirement": "test"})
+
+    assert raised.value.status_code == 504
+    assert "1800 seconds" in raised.value.detail
+
+
+@pytest.mark.asyncio
+async def test_workflow_resume_timeout_returns_gateway_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi import HTTPException
+
+    from solvyn.api.v1 import workflows as workflow_api
+    from solvyn.workflows.executor import WorkflowExecutionTimeoutError
+
+    monkeypatch.setattr(workflow_api, "_workflow_tenant_ref", lambda: "test-tenant")
+    monkeypatch.setattr(
+        workflow_api.workflow_executor,
+        "resume",
+        AsyncMock(side_effect=WorkflowExecutionTimeoutError("Workflow execution exceeded 1800 seconds")),
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        await workflow_api.resume_workflow_execution(uuid.uuid4())
+
+    assert raised.value.status_code == 504
 
 
 @pytest.mark.asyncio

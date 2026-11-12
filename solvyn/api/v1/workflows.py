@@ -45,7 +45,7 @@ from solvyn.db.session import async_session_factory, bind_tenant_scope, get_sess
 from solvyn.multi_tenant.middleware import tenant_context
 from solvyn.proactive import task_assignment_event
 from solvyn.task_results import result_metadata
-from solvyn.workflows.executor import workflow_executor
+from solvyn.workflows.executor import WorkflowExecutionTimeoutError, workflow_executor
 from solvyn.workflows.task_completion import refresh_task_completion_state
 from solvyn.workflows.task_generator import TaskGenerator
 from solvyn.workflows.templates import WORKFLOW_TEMPLATES
@@ -451,6 +451,7 @@ async def list_recent_workflow_tasks(
             "description": "No workflow with the given name exists.",
             "content": {"application/json": {"example": {"detail": "Workflow 'foo' not found"}}},
         },
+        504: {"description": "The workflow exceeded its configured wall-clock execution deadline."},
         **COMMON_RESPONSES,
     },
 )
@@ -515,6 +516,8 @@ async def run_workflow(name: str, inputs: dict[str, Any] = Body(...)) -> dict[st
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except WorkflowExecutionTimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
 
     return {
         "workflow": name,
@@ -589,6 +592,8 @@ async def resume_workflow_execution(execution_id: uuid.UUID) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except WorkflowExecutionTimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {

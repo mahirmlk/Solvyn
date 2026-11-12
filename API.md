@@ -346,6 +346,8 @@ curl -H "X-API-Key: your-api-key" \
 
 Execute a workflow template.
 
+Workflow execution is bounded by `WORKFLOW_EXECUTION_TIMEOUT_SECONDS` (default 1800 seconds; valid range 1–86400). When the deadline expires, the API returns `504`, cancels the active graph, and marks unfinished workflow steps failed under the current execution lease.
+
 **Auth required**: Yes
 
 **Parameters**:
