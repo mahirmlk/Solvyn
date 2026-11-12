@@ -367,6 +367,44 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
         b"def health():\n    return {'status': 'ready'}\n",
     )
 
+    criteria = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria",
+        json={"criteria": ["The updated health endpoint returns the ready status"]},
+    )
+    assert criteria.status_code == 201, criteria.text
+    criterion_id = criteria.json()["acceptance_criteria"][0]["id"]
+    accepted = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria/{criterion_id}/decision",
+        json={"decision": "accepted", "note": "Reviewed the updated repository workspace"},
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert len(accepted.json()["decision_workspace_digest"]) == 64
+
+    async def fake_verification_run(self: Any, managed_workspace: Any, command: list[str]) -> Any:
+        from solvyn.sandbox.runtime import SandboxResult
+
+        return SandboxResult(uuid.uuid4(), tuple(command), 0, False, "1 passed", "", False, 0.05)
+
+    monkeypatch.setattr(verification_api.DockerSandboxRunner, "run", fake_verification_run)
+    verification = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs",
+        json={"kind": "test"},
+    )
+    assert verification.status_code == 202, verification.text
+    approval = await client.post(
+        f"/api/v1/approvals/{verification.json()['approval_id']}/approve",
+        json={"note": "Approved the task verification"},
+    )
+    assert approval.status_code == 200, approval.text
+    verification_result = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs/"
+        f"{verification.json()['verification_run']['id']}/execute"
+    )
+    assert verification_result.status_code == 200, verification_result.text
+    assert verification_result.json()["status"] == "passed"
+    completed_tasks = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
+    assert next(item for item in completed_tasks.json()["tasks"] if item["task_id"] == str(task_id))["status"] == "completed"
+
     class FakeGitHub:
         def __init__(self, *, token: str) -> None:
             assert token == "test-github-token"
