@@ -757,7 +757,7 @@ class WorkflowExecutor:
                 graph_data = json.loads(record.graph_data)
                 graph_data["status"] = "failed"
                 for node in graph_data.get("nodes", []):
-                    if node.get("status") in {"pending", "running"}:
+                    if node.get("status") in {"pending", "running", "waiting_approval"}:
                         node["status"] = "failed"
                         node["error"] = error_message[:2_000]
                         node["completed_at"] = datetime.now(UTC).isoformat()
