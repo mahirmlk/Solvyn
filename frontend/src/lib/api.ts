@@ -224,8 +224,24 @@ export interface TeammateConversationInfo {
   teammate_id: string;
   project_id: string;
   title: string;
+  root_task_id: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface TeammateConversationTaskState {
+  execution_id: string;
+  root_task_id: string;
+  task_id?: string | null;
+  handoff_id?: string | null;
+  approval_id?: string | null;
+  approval_status?: string | null;
+  status: string;
+  handoff_status?: string;
+  idempotency_key?: string;
+  reason?: string;
+  input_data?: Record<string, unknown>;
+  confirmed_details?: { title: string; description: string; acceptance_criteria: string[] };
 }
 
 export interface TeammateConversationMessage {
@@ -614,9 +630,34 @@ export const api = {
     ),
 
   getTeammateConversationMessages: (teammateId: string, conversationId: string) =>
-    request<{ conversation: TeammateConversationInfo; messages: TeammateConversationMessage[]; count: number }>(
+    request<{ conversation: TeammateConversationInfo; messages: TeammateConversationMessage[]; count: number; task: TeammateConversationTaskState | null }>(
       `/teammates/${teammateId}/conversations/${conversationId}/messages`,
     ),
+
+  convertTeammateConversationToTask: (
+    teammateId: string,
+    conversationId: string,
+    input: { confirmed: true; title: string; description: string; acceptance_criteria: string[] },
+  ) => request<{ conversation: TeammateConversationInfo; task: TeammateConversationTaskState | null }>(
+    `/teammates/${teammateId}/conversations/${conversationId}/task`,
+    { method: "POST", body: JSON.stringify(input) },
+  ),
+
+  createTaskHandoff: (
+    executionId: string,
+    taskId: string,
+    input: {
+      idempotency_key: string;
+      target_teammate_id: string;
+      project_id: string;
+      reason: string;
+      input_data: Record<string, unknown>;
+      requires_approval: boolean;
+    },
+  ) => request<{ handoff_id: string; task_id: string; status: string; approval_id?: string | null; approval_status?: string | null; output?: unknown }>(
+    `/workflows/executions/${executionId}/tasks/${taskId}/handoffs`,
+    { method: "POST", body: JSON.stringify(input) },
+  ),
 
   sendTeammateConversationMessage: (teammateId: string, conversationId: string, content: string) =>
     request<{

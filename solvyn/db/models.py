@@ -948,6 +948,12 @@ class TeammateConversation(Base):
     __tablename__ = "teammate_conversations"
     __table_args__ = (
         UniqueConstraint("session_id"),
+        UniqueConstraint("tenant_id", "root_task_id", name="uq_teammate_conversations_root_task"),
+        ForeignKeyConstraint(
+            ("tenant_id", "root_task_id"),
+            ("tasks.tenant_id", "tasks.id"),
+            name="fk_teammate_conversations_root_task_same_tenant",
+        ),
         Index("ix_teammate_conversations_scope", "tenant_id", "teammate_id", "project_id", "updated_at"),
     )
 
@@ -957,6 +963,7 @@ class TeammateConversation(Base):
     teammate_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("teammate_profiles.id"), nullable=False, index=True)
     project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False, index=True)
     session_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("sessions.id"), nullable=False, index=True)
+    root_task_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False, default="New conversation")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)

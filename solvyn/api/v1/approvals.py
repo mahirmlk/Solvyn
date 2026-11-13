@@ -8,6 +8,7 @@ audited, and linked teammate handoffs become resumable after approval.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -29,6 +30,7 @@ from solvyn.db.models import (
 from solvyn.db.session import get_session
 from solvyn.multi_tenant.middleware import tenant_context
 from solvyn.proactive import task_assignment_event
+from solvyn.workflows.conversation_tasks import sync_conversation_task_state
 
 router = APIRouter(tags=["approvals"])
 
@@ -206,6 +208,9 @@ async def approve(approval_id: uuid.UUID, payload: DecisionIn, db: AsyncSession 
             await db.rollback()
             raise HTTPException(status_code=409, detail="Approved task assignment could not be resolved")
         handoff, assigned_task = resolved_handoff
+        assigned_task.status = "pending"
+        assigned_task.error = None
+        await sync_conversation_task_state(db, assigned_task)
         if approval.project_id is None:
             await db.rollback()
             raise HTTPException(status_code=409, detail="Approved task assignment has no project")
@@ -285,6 +290,12 @@ async def reject(approval_id: uuid.UUID, payload: DecisionIn, db: AsyncSession =
         if rejected_task.scalar_one_or_none() is None:
             await db.rollback()
             raise HTTPException(status_code=409, detail="Task handoff is no longer waiting for approval")
+        rejected_child = await db.get(Task, child_task_id)
+        if rejected_child is not None and rejected_child.tenant_id == tenant_id:
+            rejected_child.status = "failed"
+            rejected_child.error = payload.note or "Task handoff was rejected"
+            rejected_child.completed_at = datetime.now(UTC)
+            await sync_conversation_task_state(db, rejected_child)
     if approval.verification_run_id is not None:
         tenant_id = require_tenant()
         verification = await db.execute(
