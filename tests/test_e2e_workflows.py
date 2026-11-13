@@ -288,6 +288,14 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
                     role="Software Engineer",
                     agent_type="backend-engineer",
                 ),
+            ]
+        )
+        # The repository RLS policy checks for its project row while inserting.
+        # Persist the organization/project before adding the repository so the
+        # policy can authorize it inside this transaction.
+        await db.flush()
+        db.add_all(
+            [
                 Repository(
                     id=repository_id,
                     project_id=project_id,
