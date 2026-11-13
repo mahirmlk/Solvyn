@@ -426,7 +426,18 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
     assert run_evidence["status"] == "passed"
     assert run_evidence["source_digest"] == current_digest
     completed_tasks = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
-    assert next(item for item in completed_tasks.json()["tasks"] if item["task_id"] == str(task_id))["status"] == "completed"
+    completed_tasks_body = completed_tasks.json()
+    delivery_task = next(item for item in completed_tasks_body["tasks"] if item["task_id"] == str(task_id))
+    delivery_handoff = next(
+        item for item in completed_tasks_body["handoffs"] if item["child_task_id"] == str(task_id)
+    )
+    assert delivery_task["status"] == "completed", (
+        "Task completion gates did not pass: "
+        f"task_status={delivery_task['status']!r}, workspace_digest={current_digest!r}, "
+        f"criteria={delivery_task['acceptance_criteria']!r}, "
+        f"required_verifications={[run for run in delivery_task['verification_runs'] if run['required_for_completion']]!r}, "
+        f"handoff_status={delivery_handoff['status']!r}"
+    )
 
     class FakeGitHub:
         def __init__(self, *, token: str) -> None:
