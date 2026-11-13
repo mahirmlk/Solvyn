@@ -205,7 +205,9 @@ async def test_content_search_returns_literal_case_insensitive_matches_and_no_ma
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/branches/main"):
             return httpx.Response(200, json={"commit": {"sha": revision}})
-        if request.url.path.endswith(f"/git/trees/{revision}"):
+        if request.url.path.endswith(f"/git/commits/{revision}"):
+            return httpx.Response(200, json={"tree": {"sha": tree_sha}})
+        if request.url.path.endswith(f"/git/trees/{tree_sha}"):
             return httpx.Response(
                 200,
                 json={"sha": tree_sha, "truncated": False, "tree": [
@@ -240,7 +242,9 @@ async def test_content_search_excludes_binary_and_oversized_files() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/branches/main"):
             return httpx.Response(200, json={"commit": {"sha": revision}})
-        if request.url.path.endswith(f"/git/trees/{revision}"):
+        if request.url.path.endswith(f"/git/commits/{revision}"):
+            return httpx.Response(200, json={"tree": {"sha": "c" * 40}})
+        if request.url.path.endswith(f"/git/trees/{'c' * 40}"):
             return httpx.Response(200, json={"sha": "c" * 40, "truncated": False, "tree": [
                 {"path": "binary.py", "type": "blob", "mode": "100644", "size": 3},
                 {"path": "large.py", "type": "blob", "mode": "100644", "size": 64_001},
@@ -272,7 +276,9 @@ async def test_content_search_marks_scan_truncated_when_only_oversized_text_blob
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/branches/main"):
             return httpx.Response(200, json={"commit": {"sha": revision}})
-        if request.url.path.endswith(f"/git/trees/{revision}"):
+        if request.url.path.endswith(f"/git/commits/{revision}"):
+            return httpx.Response(200, json={"tree": {"sha": "f" * 40}})
+        if request.url.path.endswith(f"/git/trees/{'f' * 40}"):
             return httpx.Response(200, json={"sha": "f" * 40, "truncated": False, "tree": [
                 {"path": "docs/reference.md", "type": "blob", "mode": "100644", "size": 64_001},
             ]})
@@ -298,7 +304,9 @@ async def test_content_search_counts_skipped_nul_blobs_toward_aggregate_budget()
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/branches/main"):
             return httpx.Response(200, json={"commit": {"sha": revision}})
-        if request.url.path.endswith(f"/git/trees/{revision}"):
+        if request.url.path.endswith(f"/git/commits/{revision}"):
+            return httpx.Response(200, json={"tree": {"sha": "b" * 40}})
+        if request.url.path.endswith(f"/git/trees/{'b' * 40}"):
             tree = [
                 {"path": f"src/file-{index:02}.py", "type": "blob", "mode": "100644", "size": 64_000}
                 for index in range(20)
@@ -328,7 +336,9 @@ async def test_content_search_caps_candidates_and_uses_one_pinned_revision() -> 
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/branches/main"):
             return httpx.Response(200, json={"commit": {"sha": revision}})
-        if request.url.path.endswith(f"/git/trees/{revision}"):
+        if request.url.path.endswith(f"/git/commits/{revision}"):
+            return httpx.Response(200, json={"tree": {"sha": tree_sha}})
+        if request.url.path.endswith(f"/git/trees/{tree_sha}"):
             tree = [
                 {"path": f"src/file-{index:02}.py", "type": "blob", "mode": "100644", "size": 1}
                 for index in reversed(range(30))
@@ -358,7 +368,9 @@ async def test_content_search_propagates_github_rate_limits() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/branches/main"):
             return httpx.Response(200, json={"commit": {"sha": revision}})
-        if request.url.path.endswith(f"/git/trees/{revision}"):
+        if request.url.path.endswith(f"/git/commits/{revision}"):
+            return httpx.Response(200, json={"tree": {"sha": "e" * 40}})
+        if request.url.path.endswith(f"/git/trees/{'e' * 40}"):
             return httpx.Response(200, json={"sha": "e" * 40, "truncated": False, "tree": [
                 {"path": "src/app.py", "type": "blob", "mode": "100644", "size": 1},
             ]})

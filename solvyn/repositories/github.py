@@ -471,6 +471,20 @@ class GitHubClient(RepositoryProvider):
             raise GitHubRepositoryError(502, "GitHub returned an invalid branch revision")
         return sha.lower()
 
+    async def commit_tree_sha(self, full_name: str, revision: str) -> str:
+        """Resolve a commit object to its tree object SHA."""
+        owner, repo = validate_full_name(full_name)
+        if not re.fullmatch(r"[a-fA-F0-9]{40,64}", revision):
+            raise GitHubRepositoryError(422, "Repository revision is invalid")
+        data = await self._get_json(
+            f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/git/commits/{quote(revision, safe='')}"
+        )
+        tree = data.get("tree")
+        sha = tree.get("sha") if isinstance(tree, dict) else None
+        if not isinstance(sha, str) or not re.fullmatch(r"[a-fA-F0-9]{40,64}", sha):
+            raise GitHubRepositoryError(502, "GitHub returned an invalid commit tree")
+        return sha.lower()
+
     async def text_file(
         self,
         full_name: str,
@@ -553,7 +567,8 @@ class GitHubClient(RepositoryProvider):
             raise GitHubRepositoryError(422, "Search query must be at most 200 characters")
         needle = needle_text.casefold()
         revision = await self.branch_commit(full_name, branch)
-        tree_sha, tree = await self.repository_tree(full_name, revision)
+        resolved_tree_sha = await self.commit_tree_sha(full_name, revision)
+        tree_sha, tree = await self.repository_tree(full_name, resolved_tree_sha)
         eligible_blobs = [
             entry
             for entry in tree
