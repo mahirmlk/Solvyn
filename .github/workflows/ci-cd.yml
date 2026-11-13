@@ -1,10 +1,12 @@
 name: Solvyn CI/CD
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
   workflow_dispatch:
     inputs:
       deploy_production:
@@ -21,6 +23,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -53,6 +57,8 @@ jobs:
           - 6379:6379
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -95,6 +101,35 @@ jobs:
   build:
     runs-on: ubuntu-latest
     needs: [lint, test]
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Normalize image name
+        id: image-name
+        shell: bash
+        run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - name: Build API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: ${{ env.REGISTRY }}/${{ steps.image-name.outputs.name }}:latest,${{ env.REGISTRY }}/${{ steps.image-name.outputs.name }}:${{ github.sha }}
+      - name: Build Frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: false
+          tags: ${{ env.REGISTRY }}/${{ steps.image-name.outputs.name }}-frontend:latest,${{ env.REGISTRY }}/${{ steps.image-name.outputs.name }}-frontend:${{ github.sha }}
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    if: github.ref == 'refs/heads/main'
     permissions:
       contents: read
       packages: write
@@ -102,13 +137,14 @@ jobs:
       image_name: ${{ steps.image-name.outputs.name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Normalize image name
         id: image-name
         shell: bash
         run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
       - name: Log in to registry
-        if: github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -118,22 +154,24 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: ${{ github.ref == 'refs/heads/main' }}
+          push: true
           tags: ${{ env.REGISTRY }}/${{ steps.image-name.outputs.name }}:latest,${{ env.REGISTRY }}/${{ steps.image-name.outputs.name }}:${{ github.sha }}
       - name: Build and push Frontend image
         uses: docker/build-push-action@v6
         with:
           context: ./frontend
-          push: ${{ github.ref == 'refs/heads/main' }}
+          push: true
           tags: ${{ env.REGISTRY }}/${{ steps.image-name.outputs.name }}-frontend:latest,${{ env.REGISTRY }}/${{ steps.image-name.outputs.name }}-frontend:${{ github.sha }}
 
   deploy-staging:
     runs-on: ubuntu-latest
-    needs: [build]
+    needs: [publish]
     if: github.ref == 'refs/heads/main'
     environment: staging
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Configure Kubernetes access
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
@@ -163,23 +201,25 @@ jobs:
       - name: Run database migrations
         run: |
           kubectl delete job solvyn-migrate -n solvyn --ignore-not-found
-          sed "s|image: solvyn/api:latest|image: ${{ env.REGISTRY }}/${{ needs.build.outputs.image_name }}:${{ github.sha }}|" k8s/migration-job.yaml \
+          sed "s|image: solvyn/api:latest|image: ${{ env.REGISTRY }}/${{ needs.publish.outputs.image_name }}:${{ github.sha }}|" k8s/migration-job.yaml \
             | kubectl apply -f - -n solvyn
           kubectl wait --for=condition=complete job/solvyn-migrate -n solvyn --timeout=120s
       - name: Deploy to staging
         run: |
-          kubectl set image deployment/solvyn-api api=${{ env.REGISTRY }}/${{ needs.build.outputs.image_name }}:${{ github.sha }} -n solvyn
-          kubectl set image deployment/solvyn-frontend frontend=${{ env.REGISTRY }}/${{ needs.build.outputs.image_name }}-frontend:${{ github.sha }} -n solvyn
+          kubectl set image deployment/solvyn-api api=${{ env.REGISTRY }}/${{ needs.publish.outputs.image_name }}:${{ github.sha }} -n solvyn
+          kubectl set image deployment/solvyn-frontend frontend=${{ env.REGISTRY }}/${{ needs.publish.outputs.image_name }}-frontend:${{ github.sha }} -n solvyn
           kubectl rollout status deployment/solvyn-api -n solvyn --timeout=5m
           kubectl rollout status deployment/solvyn-frontend -n solvyn --timeout=5m
 
   deploy-prod:
     runs-on: ubuntu-latest
-    needs: [build, deploy-staging]
+    needs: [publish, deploy-staging]
     if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.deploy_production
     environment: production
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Configure Kubernetes access
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
@@ -209,13 +249,13 @@ jobs:
       - name: Run database migrations
         run: |
           kubectl delete job solvyn-migrate -n solvyn-prod --ignore-not-found
-          sed -e "s|image: solvyn/api:latest|image: ${{ env.REGISTRY }}/${{ needs.build.outputs.image_name }}:${{ github.sha }}|" \
+          sed -e "s|image: solvyn/api:latest|image: ${{ env.REGISTRY }}/${{ needs.publish.outputs.image_name }}:${{ github.sha }}|" \
               -e 's|namespace: solvyn|namespace: solvyn-prod|' k8s/migration-job.yaml \
             | kubectl apply -f - -n solvyn-prod
           kubectl wait --for=condition=complete job/solvyn-migrate -n solvyn-prod --timeout=120s
       - name: Deploy to production
         run: |
-          kubectl set image deployment/solvyn-api api=${{ env.REGISTRY }}/${{ needs.build.outputs.image_name }}:${{ github.sha }} -n solvyn-prod
-          kubectl set image deployment/solvyn-frontend frontend=${{ env.REGISTRY }}/${{ needs.build.outputs.image_name }}-frontend:${{ github.sha }} -n solvyn-prod
+          kubectl set image deployment/solvyn-api api=${{ env.REGISTRY }}/${{ needs.publish.outputs.image_name }}:${{ github.sha }} -n solvyn-prod
+          kubectl set image deployment/solvyn-frontend frontend=${{ env.REGISTRY }}/${{ needs.publish.outputs.image_name }}-frontend:${{ github.sha }} -n solvyn-prod
           kubectl rollout status deployment/solvyn-api -n solvyn-prod --timeout=5m
           kubectl rollout status deployment/solvyn-frontend -n solvyn-prod --timeout=5m

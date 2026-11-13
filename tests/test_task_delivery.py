@@ -237,6 +237,8 @@ async def test_delivery_preview_is_bounded_and_digest_binds_workspace_contents(t
 
     assert first["can_deliver"] is True
     assert first["diff_digest"] == second["diff_digest"]
+    assert len(first["workspace_digest"]) == 64
+    assert first["workspace_digest"] == second["workspace_digest"]
     assert [item["path"] for item in first["files"]] == ["README.md", "src/main.py"]
     assert "+print('after')" in first["diffs"][1]["diff"]
 
@@ -443,12 +445,14 @@ async def test_delivery_requires_completion_gate_before_remote_writes(
     verification_api = _verification_api()
     context = _delivery_fixture(tmp_path)
     github = FakeDeliveryGitHub()
+    db = FakeDeliverySession()
+    completion_refresh = AsyncMock(return_value=task_status)
 
     async def load_context(*_args: Any) -> tuple[Any, ...]:
         return context
 
     monkeypatch.setattr(verification_api, "_task_delivery_context", load_context)
-    monkeypatch.setattr(verification_api, "_refresh_task_delivery_completion", AsyncMock(return_value=task_status))
+    monkeypatch.setattr(verification_api, "_refresh_task_delivery_completion", completion_refresh)
     monkeypatch.setattr(verification_api, "GitHubClient", lambda **_kwargs: github)
 
     with pytest.raises(HTTPException) as error:
@@ -461,12 +465,37 @@ async def test_delivery_requires_completion_gate_before_remote_writes(
                 commit_message="Update source",
                 pull_request_title="Update source",
             ),
-            db=FakeDeliverySession(),  # type: ignore[arg-type]
+            db=db,  # type: ignore[arg-type]
         )
 
     assert error.value.status_code == 409
     assert "accepted criteria" in error.value.detail
     assert github.writes == []
+    completion_refresh.assert_awaited_once_with(
+        db,
+        context[0],
+        expected_workspace_digest=context[5].fingerprint(context[6]),
+        commit=False,
+    )
+    assert db.commits == 1
+
+
+@pytest.mark.asyncio
+async def test_gate_mutation_is_rejected_while_delivery_needs_recovery() -> None:
+    verification_api = _verification_api()
+    task = SimpleNamespace(id=uuid.uuid4(), tenant_id=uuid.uuid4())
+    active_delivery_id = uuid.uuid4()
+    db = AsyncMock()
+    db.execute.side_effect = [
+        SimpleNamespace(scalar_one_or_none=lambda: task),
+        SimpleNamespace(scalar_one_or_none=lambda: active_delivery_id),
+    ]
+
+    with pytest.raises(HTTPException) as error:
+        await verification_api._lock_task_for_gate_mutation(db, task)  # type: ignore[arg-type]
+
+    assert error.value.status_code == 409
+    assert "delivery is in progress" in error.value.detail
 
 
 @pytest.mark.asyncio
