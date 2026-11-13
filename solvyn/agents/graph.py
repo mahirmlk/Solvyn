@@ -95,15 +95,41 @@ class AgentGraph:
     def _resolve_value(self, value: Any, node_id: str) -> Any:
         """Recursively resolve output references in a single value."""
         suffix = ".output"
-        # String reference: "agent_type.output"
-        if isinstance(value, str) and value.endswith(suffix):
-            source_type = value[:-len(suffix)]
-            for prev_id in reversed(self.get_prev_nodes(node_id)):
-                prev_node = self.nodes[prev_id]
-                if prev_node.agent_type == source_type and prev_node.status == "completed" and prev_node.output is not None:
-                    return prev_node.output
-            logger.warning("Could not resolve output reference '%s' for node %s", value, node_id)
-            return None
+        # String references: "agent_type.output" or
+        # "agent_a.output,agent_b.output". Workflow input mapping can also
+        # join these references with blank lines before they reach the graph.
+        if isinstance(value, str):
+            references = [
+                reference.strip()
+                for reference in value.replace("\r", "\n").replace("\n", ",").split(",")
+                if reference.strip()
+            ]
+            if references and all(reference.endswith(suffix) for reference in references):
+                outputs = []
+                predecessor_ids = self.get_prev_nodes(node_id)
+                for reference in references:
+                    source_type = reference[:-len(suffix)]
+                    output = None
+                    for prev_id in reversed(predecessor_ids):
+                        prev_node = self.nodes[prev_id]
+                        if (
+                            prev_node.agent_type == source_type
+                            and prev_node.status == "completed"
+                            and prev_node.output is not None
+                        ):
+                            output = prev_node.output
+                            break
+                    if output is None:
+                        logger.warning("Could not resolve output reference '%s' for node %s", reference, node_id)
+                        return None
+                    outputs.append(output)
+
+                if len(outputs) == 1:
+                    return outputs[0]
+                return "\n\n".join(
+                    output if isinstance(output, str) else json.dumps(output, ensure_ascii=False, default=str)
+                    for output in outputs
+                )
 
         # Dict reference: {"$node_output": "<node_id>"} or nested dicts
         if isinstance(value, dict):

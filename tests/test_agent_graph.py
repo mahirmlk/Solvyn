@@ -69,6 +69,46 @@ def test_agent_graph_get_prev_nodes() -> None:
     assert prev == [n1]
 
 
+def test_agent_graph_resolves_single_predecessor_output_reference() -> None:
+    from solvyn.agents.graph import AgentGraph
+
+    graph = AgentGraph()
+    source = graph.add_node("backend-engineer")
+    target = graph.add_node("qa-engineer")
+    graph.add_edge(source, target)
+    graph.nodes[source].status = "completed"
+    graph.nodes[source].output = {"code": "backend code"}
+
+    assert graph._resolve_value("backend-engineer.output", target) == {"code": "backend code"}
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "backend-engineer.output,frontend-engineer.output",
+        "backend-engineer.output\n\nfrontend-engineer.output",
+    ],
+)
+def test_agent_graph_resolves_multiple_predecessor_outputs_as_text(reference: str) -> None:
+    from solvyn.agents.graph import AgentGraph
+
+    graph = AgentGraph()
+    backend = graph.add_node("backend-engineer")
+    frontend = graph.add_node("frontend-engineer")
+    target = graph.add_node("qa-engineer")
+    graph.add_edge(backend, target)
+    graph.add_edge(frontend, target)
+    graph.nodes[backend].status = "completed"
+    graph.nodes[backend].output = {"code": "backend code"}
+    graph.nodes[frontend].status = "completed"
+    graph.nodes[frontend].output = {"code": "frontend code"}
+
+    resolved = graph._resolve_value(reference, target)
+
+    assert isinstance(resolved, str)
+    assert resolved == '{"code": "backend code"}\n\n{"code": "frontend code"}'
+
+
 def test_agent_graph_to_dict() -> None:
     from solvyn.agents.graph import AgentGraph
     g = AgentGraph()
