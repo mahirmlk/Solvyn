@@ -440,13 +440,13 @@ class GitHubClient(RepositoryProvider):
             raise GitHubRepositoryError(502, "GitHub returned incomplete account information") from exc
         return {"login": login[:255], "account_id": account_id}
 
-    async def repository_tree(self, full_name: str, branch: str) -> tuple[str, list[dict[str, Any]]]:
+    async def repository_tree(self, full_name: str, tree_sha: str) -> tuple[str, list[dict[str, Any]]]:
         owner, repo = validate_full_name(full_name)
-        if not branch or len(branch) > 255:
-            raise GitHubRepositoryError(422, "Repository default branch is invalid")
-        encoded_branch = quote(branch, safe="")
+        if not tree_sha or len(tree_sha) > 255:
+            raise GitHubRepositoryError(422, "Repository tree revision is invalid")
+        encoded_tree_sha = quote(tree_sha, safe="")
         data = await self._get_json(
-            f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/git/trees/{encoded_branch}",
+            f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/git/trees/{encoded_tree_sha}",
             params={"recursive": "1"},
         )
         entries = data.get("tree")
@@ -650,7 +650,9 @@ class GitHubClient(RepositoryProvider):
     async def search_paths(self, full_name: str, branch: str, query: str) -> list[str]:
         if not query.strip():
             raise GitHubRepositoryError(422, "Search query must not be empty")
-        _, paths = await self.repository_tree(full_name, branch)
+        revision = await self.branch_commit(full_name, branch)
+        tree_sha = await self.commit_tree_sha(full_name, revision)
+        _, paths = await self.repository_tree(full_name, tree_sha)
         needle = query.strip().casefold()
         return [entry["path"] for entry in paths if needle in entry["path"].casefold()][:100]
 
@@ -723,7 +725,7 @@ class GitHubClient(RepositoryProvider):
                     break
                 excerpt = line.strip()
                 if len(excerpt) > _MAX_CONTENT_SEARCH_SNIPPET_CHARS:
-                    excerpt = excerpt[: _MAX_CONTENT_SEARCH_SNIPPET_CHARS - 1] + "…"
+                    excerpt = excerpt[: _MAX_CONTENT_SEARCH_SNIPPET_CHARS - 1] + "â€¦"
                 results.append(
                     {
                         "path": entry["path"],

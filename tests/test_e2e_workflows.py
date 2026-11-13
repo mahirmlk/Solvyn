@@ -1,6 +1,6 @@
 """End-to-end tests for Solvyn API workflows.
 
-These tests exercise the full HTTP→middleware→route→agent→LLM stack via
+These tests exercise the full HTTPâ†’middlewareâ†’routeâ†’agentâ†’LLM stack via
 ``httpx.AsyncClient`` (HTTP) and ``fastapi.testclient.TestClient`` (WebSocket).
 All LLM calls are mocked so the suite runs hermetically without any real
 API keys.
@@ -28,7 +28,7 @@ from httpx import ASGITransport, AsyncClient
 pytestmark = pytest.mark.e2e
 
 
-# ─── Module-level fixtures ──────────────────────────────────────────────
+# â”€â”€â”€ Module-level fixtures â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 @pytest.fixture(autouse=True)
@@ -111,14 +111,14 @@ def low_rate_limit() -> Any:
 
 @pytest_asyncio.fixture
 async def unauthed_client(app: Any) -> AsyncGenerator[AsyncClient, None]:
-    """Client with no API key — used to verify public vs. protected paths."""
+    """Client with no API key â€” used to verify public vs. protected paths."""
     transport = ASGITransport(app=app)
     async with LifespanManager(app):
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             yield ac
 
 
-# ─── Health check flow ──────────────────────────────────────────────────
+# â”€â”€â”€ Health check flow â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 @pytest.mark.asyncio
@@ -161,7 +161,7 @@ async def test_health_endpoints_share_no_auth_requirement(unauthed_client: Async
     assert deep.status_code in (200, 503)
 
 
-# ─── Full feature workflow ──────────────────────────────────────────────
+# â”€â”€â”€ Full feature workflow â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 @pytest.mark.asyncio
@@ -1928,7 +1928,7 @@ async def test_audit_endpoint_requires_tenant_context(unauthed_client: AsyncClie
     assert response.status_code == 401
 
 
-# ─── Tenant isolation ───────────────────────────────────────────────────
+# â”€â”€â”€ Tenant isolation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 @pytest.mark.asyncio
@@ -1973,7 +1973,7 @@ async def test_workflows_endpoint_distinguishes_tenants(client: AsyncClient) -> 
         response_a = await client.get("/api/v1/workflows/", headers={"X-Tenant-Slug": "tenant-a"})
         response_b = await client.get("/api/v1/workflows/", headers={"X-Tenant-Slug": "tenant-b"})
 
-    # Both requests succeed — the proof of isolation is that the tenant
+    # Both requests succeed â€” the proof of isolation is that the tenant
     # middleware dispatched each one with the correct slug header.
     assert response_a.status_code == 200
     assert response_b.status_code == 200
@@ -2022,7 +2022,7 @@ async def test_session_listing_returns_empty_without_tenant(client: AsyncClient)
     assert body["sessions"] == []
 
 
-# ─── API key auth ───────────────────────────────────────────────────────
+# â”€â”€â”€ API key auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 @pytest.mark.asyncio
@@ -2152,7 +2152,7 @@ async def test_agents_endpoint_requires_auth(unauthed_client: AsyncClient) -> No
     assert response.status_code == 401
 
 
-# ─── Rate limiting ──────────────────────────────────────────────────────
+# â”€â”€â”€ Rate limiting â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 @pytest.mark.asyncio
@@ -2185,7 +2185,7 @@ async def test_rate_limit_response_payload_shape(
     assert "scope" in body
 
 
-# ─── WebSocket connection ──────────────────────────────────────────────
+# â”€â”€â”€ WebSocket connection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 def test_websocket_connects_with_valid_api_key() -> None:
@@ -2255,3 +2255,180 @@ def test_websocket_rejects_invalid_api_key() -> None:
                 ):
                     pass
     assert exc_info.value.code == 4001
+
+
+@pytest.mark.asyncio
+async def test_saved_conversation_conversion_gates_repository_workspace_until_approval(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """A confirmed conversation task stays gated until its handoff is approved."""
+    from sqlalchemy import select
+
+    from solvyn.api.v1 import teammates as teammate_routes
+    from solvyn.api.v1 import verification as verification_api
+    from solvyn.config import settings
+    from solvyn.db.models import (
+        Organization,
+        OrganizationMembership,
+        PermissionLevel,
+        Project,
+        Repository,
+        TeammatePermission,
+        TeammateProfile,
+        TeammateProjectAssignment,
+        TeammateStatus,
+        Tenant,
+        User,
+    )
+    from solvyn.db.session import async_session_factory, bind_tenant_scope
+    from solvyn.identity.security import create_access_token
+
+    workspace_root = str(tmp_path / "conversation-workspaces")
+    monkeypatch.setattr(settings, "sandbox_workspace_root", workspace_root)
+    monkeypatch.setattr(verification_api.settings, "sandbox_workspace_root", workspace_root)
+
+    user_id, organization_id, project_id, teammate_id, repository_id = (uuid.uuid4() for _ in range(5))
+    source_sha = "a" * 40
+    source_tree_sha = "b" * 40
+    source_text = "def status():\n    return 'ok'\n"
+    async with async_session_factory() as db:
+        tenant = (await db.execute(select(Tenant).where(Tenant.slug == "test-tenant"))).scalar_one()
+        await bind_tenant_scope(db, tenant.id)
+        db.add_all(
+            [
+                Organization(
+                    id=organization_id,
+                    name="Conversation Acceptance",
+                    slug=f"conversation-acceptance-{uuid.uuid4().hex[:10]}",
+                    tenant_id=tenant.id,
+                ),
+                Project(
+                    id=project_id,
+                    organization_id=organization_id,
+                    tenant_id=tenant.id,
+                    name="Conversation Project",
+                    slug=f"conversation-project-{uuid.uuid4().hex[:10]}",
+                ),
+                TeammateProfile(
+                    id=teammate_id,
+                    organization_id=organization_id,
+                    tenant_id=tenant.id,
+                    name="Conversation Engineer",
+                    role="Software Engineer",
+                    agent_type="backend-engineer",
+                    status=TeammateStatus.IDLE,
+                ),
+                Repository(
+                    id=repository_id,
+                    project_id=project_id,
+                    full_name="solvyn/conversation-acceptance",
+                    provider="github",
+                    default_branch="main",
+                    url="https://github.com/solvyn/conversation-acceptance",
+                ),
+                User(id=user_id, email=f"conversation-{uuid.uuid4().hex[:10]}@example.com", password_hash="test-hash"),
+                OrganizationMembership(user_id=user_id, organization_id=organization_id, role="owner"),
+                TeammateProjectAssignment(teammate_id=teammate_id, project_id=project_id),
+                TeammatePermission(teammate_id=teammate_id, permission=PermissionLevel.READ_ONLY.value, granted=True),
+                TeammatePermission(teammate_id=teammate_id, permission=PermissionLevel.MODIFY_FILES.value, granted=True),
+                TeammatePermission(teammate_id=teammate_id, permission=PermissionLevel.EXECUTE_COMMANDS.value, granted=True),
+            ]
+        )
+        await db.commit()
+
+    client.headers["Authorization"] = f"Bearer {create_access_token(subject=str(user_id))}"
+    client.headers["X-Tenant-Slug"] = "test-tenant"
+    monkeypatch.setattr(
+        teammate_routes,
+        "run_teammate",
+        AsyncMock(return_value={"summary": "The connected project has a status endpoint."}),
+    )
+
+    conversation_response = await client.post(
+        f"/api/v1/teammates/{teammate_id}/conversations",
+        json={"project_id": str(project_id)},
+    )
+    assert conversation_response.status_code == 201, conversation_response.text
+    conversation_id = conversation_response.json()["id"]
+    message_response = await client.post(
+        f"/api/v1/teammates/{teammate_id}/conversations/{conversation_id}/messages",
+        json={"content": "Please inspect the status endpoint and make it return ready."},
+    )
+    assert message_response.status_code == 200, message_response.text
+    assert message_response.json()["messages"][0]["role"] == "user"
+    history_response = await client.get(f"/api/v1/teammates/{teammate_id}/conversations/{conversation_id}/messages")
+    assert history_response.status_code == 200, history_response.text
+    assert history_response.json()["messages"][0]["content"] == "Please inspect the status endpoint and make it return ready."
+
+    task_response = await client.post(
+        f"/api/v1/teammates/{teammate_id}/conversations/{conversation_id}/task",
+        json={
+            "confirmed": True,
+            "title": "Update status endpoint",
+            "description": "Change the connected project's status endpoint to return ready.",
+            "acceptance_criteria": ["The endpoint returns ready", "The change is verified"],
+        },
+    )
+    assert task_response.status_code == 201, task_response.text
+    task = task_response.json()["task"]
+    assert task["status"] == "waiting_approval"
+    assert task["handoff_status"] == "waiting_approval"
+    assert task["approval_status"] == "pending"
+    assert task["confirmed_details"]["acceptance_criteria"] == [
+        "The endpoint returns ready",
+        "The change is verified",
+    ]
+
+    class FakeRepositoryProvider:
+        async def __aenter__(self) -> FakeRepositoryProvider:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def repository_metadata(self, _full_name: str) -> dict[str, Any]:
+            return {"default_branch": "main", "private": False}
+
+        async def branch_commit(self, _full_name: str, _branch: str) -> str:
+            return source_sha
+
+        async def commit_tree_sha(self, _full_name: str, commit_sha: str) -> str:
+            assert commit_sha == source_sha
+            return source_tree_sha
+
+        async def repository_tree(self, _full_name: str, tree_sha: str) -> tuple[str, list[dict[str, Any]]]:
+            assert tree_sha == source_tree_sha
+            return source_tree_sha, [
+                {"path": "src/status.py", "type": "blob", "mode": "100644", "size": len(source_text)}
+            ]
+
+        async def text_file(self, _full_name: str, _path: str, sha: str, *, max_bytes: int) -> str:
+            assert sha == source_sha
+            assert max_bytes >= len(source_text)
+            return source_text
+
+    monkeypatch.setattr(
+        verification_api,
+        "get_authorized_repository_provider",
+        AsyncMock(return_value=FakeRepositoryProvider()),
+    )
+    workspace_url = f"/api/v1/workflows/executions/{task['execution_id']}/tasks/{task['task_id']}/workspace"
+    workspace_payload = {"repository_id": str(repository_id), "repository_paths": ["src/status.py"]}
+    blocked_workspace = await client.post(workspace_url, json=workspace_payload)
+    assert blocked_workspace.status_code == 409
+    assert blocked_workspace.json()["detail"] == "Task handoff is not approved for workspace access"
+
+    approval_response = await client.post(
+        f"/api/v1/approvals/{task['approval_id']}/approve",
+        json={"note": "Approved the confirmed repository task"},
+    )
+    assert approval_response.status_code == 200, approval_response.text
+    assert approval_response.json()["status"] == "approved"
+
+    workspace_response = await client.post(workspace_url, json=workspace_payload)
+    assert workspace_response.status_code == 201, workspace_response.text
+    assert workspace_response.json()["task_id"] == task["task_id"]
+    assert workspace_response.json()["source_commit_sha"] == source_sha
+    assert workspace_response.json()["source_paths"] == ["src/status.py"]

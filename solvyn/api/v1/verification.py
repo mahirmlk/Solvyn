@@ -258,7 +258,8 @@ async def _build_delivery_preview(
 
     missing_source_paths = sorted(set(source_paths or []) - set(current_paths))
     try:
-        _, source_tree = await github.repository_tree(repository.full_name, source_commit_sha)
+        source_tree_sha = await github.commit_tree_sha(repository.full_name, source_commit_sha)
+        _, source_tree = await github.repository_tree(repository.full_name, source_tree_sha)
     except GitHubRepositoryError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
     source_tree_entries: dict[str, dict[str, Any]] = {}
@@ -959,7 +960,8 @@ async def create_task_workspace(
                 metadata = await github.repository_metadata(repository.full_name)
                 repository_branch = str(metadata["default_branch"])
                 source_commit_sha = await github.branch_commit(repository.full_name, repository_branch)
-                repository_tree_sha, tree = await github.repository_tree(repository.full_name, source_commit_sha)
+                source_tree_sha = await github.commit_tree_sha(repository.full_name, source_commit_sha)
+                repository_tree_sha, tree = await github.repository_tree(repository.full_name, source_tree_sha)
                 tree_entries = {entry["path"]: entry for entry in tree}
                 if payload.full_repository:
                     try:
