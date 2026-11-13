@@ -1517,7 +1517,16 @@ async def test_feature_workflow_runs_to_completion(client: AsyncClient) -> None:
         f"/api/v1/workflows/executions/{data['execution_id']}/tasks/{pending_handoff['child_task_id']}/activity"
     )
     assert task_activity.status_code == 200
-    outcome_events = [event for event in task_activity.json()["activity"] if event["type"] == "task_outcome"]
+    activity_events = task_activity.json()["activity"]
+    approval_events = [event for event in activity_events if event["type"] == "approval"]
+    assert len(approval_events) == 1
+    assert approval_events[0]["status"] == "approved"
+    assert approval_events[0]["details"]["task_id"] == pending_handoff["child_task_id"]
+    handoff_events = [event for event in activity_events if event["type"] == "handoff"]
+    assert len(handoff_events) == 1
+    assert handoff_events[0]["status"] == "completed"
+    assert handoff_events[0]["details"]["child_task_id"] == pending_handoff["child_task_id"]
+    outcome_events = [event for event in activity_events if event["type"] == "task_outcome"]
     assert len(outcome_events) == 1
     assert outcome_events[0]["details"]["outcome"] == "success"
     assert len(outcome_events[0]["details"]["result_sha256"]) == 64
