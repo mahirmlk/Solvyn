@@ -762,8 +762,9 @@ async def test_search_paths_resolves_branch_to_pinned_commit_tree() -> None:
     requested_paths: list[str] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
-        requested_paths.append(request.url.path)
-        if request.url.path == "/repos/octo/example/branches/feature%2Ftopic":
+        request_path = request.url.raw_path.decode("ascii").split("?", 1)[0]
+        requested_paths.append(request_path)
+        if request_path == "/repos/octo/example/branches/feature%2Ftopic":
             return httpx.Response(200, json={"commit": {"sha": revision}})
         if request.url.path == f"/repos/octo/example/git/commits/{revision}":
             return httpx.Response(200, json={"tree": {"sha": tree_sha}})
