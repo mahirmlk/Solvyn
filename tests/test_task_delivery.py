@@ -446,6 +446,9 @@ async def test_delivery_requires_completion_gate_before_remote_writes(
     context = _delivery_fixture(tmp_path)
     github = FakeDeliveryGitHub()
     db = FakeDeliverySession()
+    preview = await verification_api._build_delivery_preview(
+        context[2], context[1], context[4], context[5], context[6], FakeGitHub()  # type: ignore[arg-type]
+    )
     completion_refresh = AsyncMock(return_value=task_status)
 
     async def load_context(*_args: Any) -> tuple[Any, ...]:
@@ -460,7 +463,7 @@ async def test_delivery_requires_completion_gate_before_remote_writes(
             execution_id=uuid.uuid4(),
             task_id=uuid.uuid4(),
             payload=verification_api.TaskDeliveryRequest(
-                expected_diff_digest="a" * 64,
+                expected_diff_digest=preview["diff_digest"],
                 branch_name="solvyn/task-12",
                 commit_message="Update source",
                 pull_request_title="Update source",

@@ -168,7 +168,7 @@ async def test_inspect_pins_tree_and_manifests_to_requested_revision() -> None:
     assert inspection["manifests"]["README.md"] == "pinned"
     assert requests == [
         ("/repos/octo/example", {}),
-        (f"/repos/octo/example/git/trees/{revision}", {}),
+        (f"/repos/octo/example/git/trees/{revision}", {"recursive": "1"}),
         ("/repos/octo/example/contents/README.md", {"ref": revision}),
     ]
 
