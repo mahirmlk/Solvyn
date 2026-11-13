@@ -201,6 +201,8 @@ async def test_content_search_returns_literal_case_insensitive_matches_and_no_ma
     revision = "a" * 40
     tree_sha = "b" * 40
     source = "# Hello\nNeedle is here\nneedle again\n"
+    long_path = "src/" + "nested/" * 72 + "app.py"
+    assert len(long_path) > 512
 
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/branches/main"):
@@ -211,7 +213,7 @@ async def test_content_search_returns_literal_case_insensitive_matches_and_no_ma
             return httpx.Response(
                 200,
                 json={"sha": tree_sha, "truncated": False, "tree": [
-                    {"path": "src/app.py", "type": "blob", "mode": "100644", "size": len(source)},
+                    {"path": long_path, "type": "blob", "mode": "100644", "size": len(source)},
                 ]},
             )
         assert request.url.params["ref"] == revision
@@ -228,8 +230,8 @@ async def test_content_search_returns_literal_case_insensitive_matches_and_no_ma
     assert matches["revision"] == revision
     assert matches["tree_sha"] == tree_sha
     assert matches["matches"] == [
-        {"path": "src/app.py", "line": 2, "snippet": "Needle is here"},
-        {"path": "src/app.py", "line": 3, "snippet": "needle again"},
+        {"path": long_path, "line": 2, "snippet": "Needle is here"},
+        {"path": long_path, "line": 3, "snippet": "needle again"},
     ]
     assert matches["content_trust"] == "untrusted_repository_data"
     assert none["matches"] == []

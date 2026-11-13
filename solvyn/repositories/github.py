@@ -77,7 +77,6 @@ _MAX_CONTENT_SEARCH_FILE_BYTES = 64_000
 _MAX_CONTENT_SEARCH_TOTAL_BYTES = 1_000_000
 _MAX_CONTENT_SEARCH_MATCHES = 20
 _MAX_CONTENT_SEARCH_SNIPPET_CHARS = 500
-_MAX_CONTENT_SEARCH_PATH_CHARS = 512
 _MAX_CONTENT_SEARCH_OUTPUT_BYTES = 16_000
 _MAX_CONTENT_SEARCH_SECONDS = 45
 
@@ -623,7 +622,7 @@ class GitHubClient(RepositoryProvider):
                     excerpt = excerpt[: _MAX_CONTENT_SEARCH_SNIPPET_CHARS - 1] + "…"
                 results.append(
                     {
-                        "path": entry["path"][:_MAX_CONTENT_SEARCH_PATH_CHARS],
+                        "path": entry["path"],
                         "line": line_number,
                         "snippet": excerpt,
                     }
