@@ -64,6 +64,8 @@ _BRANCH_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,239}$")
 _MAX_REVIEW_PAGES = 10
 _REVIEWS_PER_PAGE = 100
 _MAX_MANIFESTS = 6
+_MAX_DISCOVERY_PAGE = 20
+_DISCOVERY_PAGE_SIZE = 50
 
 
 class GitHubRepositoryError(Exception):
@@ -415,6 +417,47 @@ class GitHubClient(RepositoryProvider):
         except (KeyError, TypeError, ValueError) as exc:
             raise GitHubRepositoryError(502, "GitHub returned incomplete account information") from exc
         return {"login": login[:255], "account_id": account_id}
+
+    async def accessible_repositories(self, *, page: int = 1) -> list[dict[str, Any]]:
+        """List one bounded page of repositories visible to the configured token."""
+        if not self._token:
+            raise GitHubRepositoryError(409, "Connect an organization GitHub token before discovering repositories")
+        if page < 1 or page > _MAX_DISCOVERY_PAGE:
+            raise GitHubRepositoryError(422, "Repository discovery page is outside the supported range")
+        payload = await self._get_json_payload(
+            "/user/repos",
+            params={
+                "visibility": "all",
+                "affiliation": "owner,collaborator,organization_member",
+                "sort": "updated",
+                "direction": "desc",
+                "per_page": str(_DISCOVERY_PAGE_SIZE),
+                "page": str(page),
+            },
+        )
+        if not isinstance(payload, list):
+            raise GitHubRepositoryError(502, "GitHub returned an invalid repository list")
+        repositories: list[dict[str, Any]] = []
+        for item in payload[:_DISCOVERY_PAGE_SIZE]:
+            if not isinstance(item, dict):
+                continue
+            try:
+                repository_id = int(item["id"])
+                full_name = str(item["full_name"])
+                validate_full_name(full_name)
+            except (KeyError, TypeError, ValueError, GitHubRepositoryError):
+                continue
+            default_branch = item.get("default_branch")
+            repositories.append(
+                {
+                    "id": repository_id,
+                    "full_name": full_name[:255],
+                    "default_branch": default_branch[:255] if isinstance(default_branch, str) else "",
+                    "url": str(item.get("html_url") or f"https://github.com/{full_name}")[:512],
+                    "private": bool(item.get("private", False)),
+                }
+            )
+        return repositories
 
     async def repository_tree(self, full_name: str, branch: str) -> tuple[str, list[dict[str, Any]]]:
         owner, repo = validate_full_name(full_name)

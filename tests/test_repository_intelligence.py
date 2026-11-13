@@ -502,3 +502,78 @@ async def test_provider_maps_explicit_rate_limit_response() -> None:
 
     assert exc.value.status_code == 429
     assert "untrusted upstream details" not in exc.value.message
+
+
+@pytest.mark.asyncio
+async def test_accessible_repositories_returns_one_bounded_token_scoped_page() -> None:
+    token = "ghp-discovery-token"
+    observed: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        observed.append(request)
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": 42,
+                    "full_name": "acme/private-app",
+                    "default_branch": "main",
+                    "html_url": "https://github.com/acme/private-app",
+                    "private": True,
+                },
+                {
+                    "id": 43,
+                    "full_name": "acme/empty-app",
+                    "default_branch": None,
+                    "html_url": "https://github.com/acme/empty-app",
+                    "private": False,
+                },
+                {"id": 44, "full_name": "bad/../path"},
+            ],
+        )
+
+    http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    async with GitHubClient(http, token=token) as github:
+        repositories = await github.accessible_repositories(page=2)
+    await http.aclose()
+
+    assert len(observed) == 1
+    assert observed[0].url.path == "/user/repos"
+    assert observed[0].url.params["page"] == "2"
+    assert observed[0].url.params["per_page"] == "50"
+    assert observed[0].url.params["affiliation"] == "owner,collaborator,organization_member"
+    assert observed[0].headers["authorization"] == f"Bearer {token}"
+    assert repositories == [
+        {
+            "id": 42,
+            "full_name": "acme/private-app",
+            "default_branch": "main",
+            "url": "https://github.com/acme/private-app",
+            "private": True,
+        },
+        {
+            "id": 43,
+            "full_name": "acme/empty-app",
+            "default_branch": "",
+            "url": "https://github.com/acme/empty-app",
+            "private": False,
+        },
+    ]
+    assert token not in json.dumps(repositories)
+
+
+@pytest.mark.asyncio
+async def test_accessible_repositories_requires_token_and_bounds_pages() -> None:
+    public_http = httpx.AsyncClient(base_url="https://api.github.com")
+    async with GitHubClient(public_http) as public_client:
+        with pytest.raises(GitHubRepositoryError) as missing_token:
+            await public_client.accessible_repositories()
+    await public_http.aclose()
+    assert missing_token.value.status_code == 409
+
+    token_http = httpx.AsyncClient(base_url="https://api.github.com")
+    async with GitHubClient(token_http, token="ghp-token") as client:
+        with pytest.raises(GitHubRepositoryError) as invalid_page:
+            await client.accessible_repositories(page=21)
+    await token_http.aclose()
+    assert invalid_page.value.status_code == 422

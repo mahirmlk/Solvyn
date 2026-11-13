@@ -45,10 +45,14 @@ async def get_github_integration_status(
     organization_id: uuid.UUID,
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
-    await require_org_membership(db, organization_id, roles=ANY_ROLE)
+    membership = await require_org_membership(db, organization_id, roles=ANY_ROLE)
     integration = await _get_github_integration(db, organization_id)
     if integration is None or not integration.is_active:
-        return {"connected": False, "integration_id": str(integration.id) if integration else None}
+        return {
+            "connected": False,
+            "integration_id": str(integration.id) if integration else None,
+            "can_manage": membership.role in OWNER_ADMIN,
+        }
 
     credential = (
         await db.execute(select(IntegrationCredential).where(IntegrationCredential.integration_id == integration.id))
@@ -58,6 +62,7 @@ async def get_github_integration_status(
         "integration_id": str(integration.id),
         "account_login": credential.account_login if credential else None,
         "updated_at": credential.updated_at.isoformat() if credential and credential.updated_at else None,
+        "can_manage": membership.role in OWNER_ADMIN,
     }
 
 
@@ -127,6 +132,7 @@ async def connect_github_integration(
         "integration_id": str(integration.id),
         "account_login": credential.account_login,
         "updated_at": credential.updated_at.isoformat() if credential.updated_at else None,
+        "can_manage": True,
     }
 
 

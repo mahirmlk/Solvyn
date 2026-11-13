@@ -27,6 +27,8 @@ from solvyn.repositories.protocols import RepositoryProvider
 from solvyn.repositories.providers import get_authorized_repository_provider, get_repository_provider
 
 router = APIRouter(tags=["repositories", "repository intelligence"])
+_MAX_REPOSITORY_DISCOVERY_PAGE = 20
+_REPOSITORIES_PER_DISCOVERY_PAGE = 50
 
 
 class RepositoryConnect(BaseModel):
@@ -249,6 +251,53 @@ async def list_repositories(project_id: uuid.UUID, db: AsyncSession = Depends(ge
     )
     items = [_repository_dict(repository) for repository in result.scalars().all()]
     return {"repositories": items, "count": len(items)}
+
+
+@router.get("/projects/{project_id}/repository-candidates", summary="Discover repositories available to the organization token")
+async def list_repository_candidates(
+    project_id: uuid.UUID,
+    page: int = Query(default=1, ge=1, le=_MAX_REPOSITORY_DISCOVERY_PAGE),
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    """Discover repositories for project admins without exposing the credential."""
+    tenant_id = require_tenant()
+    project = await db.get(Project, project_id)
+    if project is None or project.tenant_id != tenant_id or not project.is_active:
+        raise HTTPException(status_code=404, detail="Project not found")
+    await require_org_membership(db, project.organization_id, roles=OWNER_ADMIN)
+    try:
+        _integration, token = await load_organization_github_connection(db, project.organization_id)
+        async with GitHubClient(token=token) as github:
+            candidates = await github.accessible_repositories(page=page)
+    except GitHubCredentialNotFoundError as exc:
+        raise HTTPException(status_code=409, detail="Connect an organization GitHub token before discovering repositories") from exc
+    except CredentialEncryptionUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="GitHub credential cannot be decrypted with current configuration") from exc
+    except GitHubRepositoryError as exc:
+        raise _provider_error(exc) from exc
+
+    connected_result = await db.execute(
+        select(Repository.full_name).where(
+            Repository.project_id == project_id,
+            Repository.is_active.is_(True),
+        )
+    )
+    connected = {full_name.casefold() for full_name in connected_result.scalars().all()}
+    repositories = [
+        {
+            **candidate,
+            "is_connected": candidate["full_name"].casefold() in connected,
+            "connectable": bool(candidate["default_branch"]),
+        }
+        for candidate in candidates
+    ]
+    return {
+        "repositories": repositories,
+        "count": len(repositories),
+        "page": page,
+        "per_page": _REPOSITORIES_PER_DISCOVERY_PAGE,
+        "has_more": len(repositories) == _REPOSITORIES_PER_DISCOVERY_PAGE and page < _MAX_REPOSITORY_DISCOVERY_PAGE,
+    }
 
 
 @router.get("/repositories/{repository_id}/inspect", summary="Inspect repository structure and manifests")
