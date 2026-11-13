@@ -728,7 +728,7 @@ backup_database_url="${BACKUP_DATABASE_URL//@db:5432/@127.0.0.1:${POSTGRES_PORT:
 DATABASE_URL="$backup_database_url" bash scripts/backup-db.sh ./backups
 ```
 
-The backup is a compressed plain-SQL dump. Files are created with owner-only permissions and atomically renamed after `pg_dump` succeeds. The production stack creates a dedicated `solvyn_backup` role with `BYPASSRLS` and read-only table/sequence grants so `pg_dump` can export all tenant rows; this credential can read all customer data and must be restricted to the backup operator. S3 upload is disabled unless `S3_BUCKET` is explicitly set; configure AWS CLI credentials or a host role and an object-lifecycle retention policy before enabling it.
+The backup script requires `DATABASE_URL` explicitly and exits before creating its output directory when the variable is unset or blank. It never falls back to a default or development database. The backup is a compressed plain-SQL dump. Files are created with owner-only permissions and atomically renamed after `pg_dump` succeeds. The production stack creates a dedicated `solvyn_backup` role with `BYPASSRLS` and read-only table/sequence grants so `pg_dump` can export all tenant rows; this credential can read all customer data and must be restricted to the backup operator. S3 upload is disabled unless `S3_BUCKET` is explicitly set; configure AWS CLI credentials or a host role and an object-lifecycle retention policy before enabling it.
 
 ### Restore
 

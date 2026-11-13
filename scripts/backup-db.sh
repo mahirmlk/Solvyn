@@ -10,7 +10,11 @@ BACKUP_DIR="${1:-./backups}"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP_FILE="${BACKUP_DIR}/solvyn_${TIMESTAMP}.sql.gz"
 TEMP_FILE="${BACKUP_FILE}.partial"
-DB_URL="${DATABASE_URL:-postgresql://solvyn:solvyn@localhost:5432/solvyn}"
+if [ -z "${DATABASE_URL:-}" ]; then
+  echo "Set DATABASE_URL explicitly to the database that should be backed up." >&2
+  exit 1
+fi
+DB_URL="${DATABASE_URL}"
 export DB_URL
 
 mkdir -p "${BACKUP_DIR}"
