@@ -243,10 +243,12 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
     from solvyn.db.session import async_session_factory, bind_tenant_scope
     from solvyn.identity.security import create_access_token
     from solvyn.sandbox.workspaces import WorkspaceManager
+    from solvyn.workflows import task_completion
 
     workspace_root = str(tmp_path / "repository-workspaces")
     monkeypatch.setattr(settings, "sandbox_workspace_root", workspace_root)
     monkeypatch.setattr(verification_api.settings, "sandbox_workspace_root", workspace_root)
+    monkeypatch.setattr(task_completion.settings, "sandbox_workspace_root", workspace_root)
 
     workflow = await client.post(
         "/api/v1/workflows/feature/run",
