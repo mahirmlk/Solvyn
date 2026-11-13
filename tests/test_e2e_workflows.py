@@ -567,7 +567,13 @@ async def test_task_verification_is_sandboxed_and_durable(
     assert workflow.status_code == 200
     execution_id = workflow.json()["execution_id"]
     task_list = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
-    task_id = task_list.json()["tasks"][0]["task_id"]
+    task_list_body = task_list.json()
+    selected_task = task_list_body["tasks"][0]
+    assert selected_task["acceptance_criteria_defined"] is False, (
+        "Fresh workflow task unexpectedly has acceptance criteria defined: "
+        f"task={selected_task!r}, handoffs={task_list_body['handoffs']!r}"
+    )
+    task_id = selected_task["task_id"]
 
     workspace = await client.post(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/workspace",
