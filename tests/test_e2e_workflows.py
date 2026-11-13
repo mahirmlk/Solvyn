@@ -348,9 +348,12 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
         async def branch_commit(self, _full_name: str, _branch: str) -> str:
             return source_sha
 
-        async def repository_tree(self, _full_name: str, sha: str) -> tuple[str, list[dict[str, Any]]]:
-            assert sha == source_sha
-            return source_tree_sha, [
+        async def commit_tree_sha(self, _full_name: str, revision: str) -> str:
+            assert revision == source_sha
+            return source_tree_sha
+
+        async def repository_tree(self, _full_name: str, tree_sha: str) -> tuple[str, list[dict[str, Any]]]:
+            assert tree_sha == source_tree_sha            return source_tree_sha, [
                 {"path": "src/health.py", "type": "blob", "mode": "100644", "size": len(source_text)}
             ]
 
@@ -633,6 +636,37 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
     assert evidence.json()["evidence"]["files"][0]["path"] == "src/health.py"
     assert evidence.json()["evidence"]["files"][0]["content"] == "def health():\n    return {'status': 'ready'}\n"
     assert "ready" in evidence.json()["evidence"]["diffs"][0]["diff"]
+
+    from solvyn.agents import teammate_runtime
+
+    async def complete_confirmed_teammate_task(*_args: Any, **kwargs: Any) -> dict[str, str]:
+        assert kwargs["task_id"] == uuid.UUID(task["task_id"])
+        assert kwargs["project_id"] == project_id
+        return {"summary": "Reviewed the assigned status endpoint change."}
+
+    monkeypatch.setattr(teammate_runtime, "run_teammate", complete_confirmed_teammate_task)
+    resumed_handoff = await client.post(
+        f"/api/v1/workflows/executions/{task['execution_id']}/tasks/{task['root_task_id']}"
+        f"/handoffs/{task['handoff_id']}/resume"
+    )
+    assert resumed_handoff.status_code == 200, resumed_handoff.text
+    assert resumed_handoff.json()["handoff_id"] == task["handoff_id"]
+    task_snapshot = await client.get(f"/api/v1/workflows/executions/{task['execution_id']}/tasks")
+    assert task_snapshot.status_code == 200, task_snapshot.text
+    completed_handoff = next(
+        row for row in task_snapshot.json()["handoffs"] if row["handoff_id"] == task["handoff_id"]
+    )
+    assert completed_handoff["status"] == "completed"
+    assert completed_handoff["output"] is not None
+
+    criteria_response = await client.get(
+        f"/api/v1/workflows/executions/{task['execution_id']}/tasks/{task['task_id']}/acceptance-criteria"
+    )
+    assert criteria_response.status_code == 200, criteria_response.text
+    persisted_criteria = criteria_response.json()["acceptance_criteria"]
+    assert [item["text"] for item in persisted_criteria] == task["confirmed_details"]["acceptance_criteria"]
+    assert all(item["status"] == "pending" for item in persisted_criteria)
+
 
 
 @pytest.mark.asyncio

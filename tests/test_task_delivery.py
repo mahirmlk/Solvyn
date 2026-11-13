@@ -27,7 +27,7 @@ class FakeGitHub:
     async def repository_metadata(self, _full_name: str) -> dict[str, Any]:
         return {"default_branch": "main"}
 
-    async def commit_tree_sha(self, _full_name: str, _commit_sha: str) -> str:
+    async def commit_tree_sha(self, _full_name: str, _revision: str) -> str:
         return "tree-sha"
 
     async def repository_tree(self, _full_name: str, _revision: str) -> tuple[str, list[dict[str, Any]]]:
