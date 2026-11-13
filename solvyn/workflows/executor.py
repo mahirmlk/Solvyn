@@ -7,12 +7,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.agents.graph import AgentGraph
 from solvyn.agents.schema import ExecutionEdge, ExecutionGraph, ExecutionNode
 from solvyn.config import settings
+from solvyn.db.models import Approval, Session, Task, TaskDependency, TaskHandoff, Tenant
 from solvyn.db.models import ExecutionGraph as ExecutionGraphModel
-from solvyn.db.models import Session, Task, TaskDependency, Tenant
 from solvyn.db.session import async_session_factory, bind_tenant_scope
 from solvyn.multi_tenant.middleware import tenant_context
 from solvyn.workflows.task_completion import refresh_task_completion_state
@@ -306,9 +307,52 @@ class WorkflowExecutor:
             if record is None:
                 raise LookupError("Workflow execution not found")
             if record.status == "cancelled":
+                await self._terminate_execution_handoffs(
+                    db,
+                    execution_id,
+                    tenant_uuid,
+                    status="cancelled",
+                    error="Workflow execution was cancelled",
+                )
+                await self._finalize_cancelled_execution(db, execution_id, tenant_uuid, record.graph_data)
+                await db.commit()
                 return {"execution_id": str(execution_id), "status": "cancelled"}
             if record.status == "cancelling":
-                return {"execution_id": str(execution_id), "status": "cancelling"}
+                finalized = await db.execute(
+                    update(ExecutionGraphModel)
+                    .where(
+                        ExecutionGraphModel.id == execution_id,
+                        ExecutionGraphModel.session_id.in_(select(Session.id).where(Session.tenant_id == tenant_uuid)),
+                        ExecutionGraphModel.status == "cancelling",
+                        ExecutionGraphModel.lease_owner == record.lease_owner,
+                        or_(
+                            ExecutionGraphModel.lease_owner.is_(None),
+                            ExecutionGraphModel.lease_expires_at.is_(None),
+                            ExecutionGraphModel.lease_expires_at <= func.now(),
+                        ),
+                    )
+                    .values(status="cancelled", lease_owner=None, lease_expires_at=None)
+                    .returning(ExecutionGraphModel.id)
+                )
+                if finalized.scalar_one_or_none() is None:
+                    current_status = await db.scalar(
+                        select(ExecutionGraphModel.status)
+                        .join(Session, Session.id == ExecutionGraphModel.session_id)
+                        .where(ExecutionGraphModel.id == execution_id, Session.tenant_id == tenant_uuid)
+                    )
+                    if current_status in {"cancelling", "cancelled"}:
+                        return {"execution_id": str(execution_id), "status": current_status}
+                    raise RuntimeError("Workflow execution changed while stale cancellation was being finalized")
+                await self._terminate_execution_handoffs(
+                    db,
+                    execution_id,
+                    tenant_uuid,
+                    status="cancelled",
+                    error="Workflow execution was cancelled",
+                )
+                await self._finalize_cancelled_execution(db, execution_id, tenant_uuid, record.graph_data)
+                await db.commit()
+                return {"execution_id": str(execution_id), "status": "cancelled"}
             if record.status not in {"scheduled", "running", "resuming", "failed"}:
                 raise RuntimeError(f"Workflow execution cannot be cancelled from status '{record.status}'")
 
@@ -338,29 +382,86 @@ class WorkflowExecutor:
                 await db.rollback()
                 raise RuntimeError("Workflow execution changed while cancellation was requested")
 
+            await self._terminate_execution_handoffs(
+                db,
+                execution_id,
+                tenant_uuid,
+                status="cancelled",
+                error="Workflow execution was cancelled",
+            )
             if not worker_active:
-                graph_data = json.loads(record.graph_data)
-                for node in graph_data.get("nodes", []):
-                    if node.get("status") in {"pending", "running"}:
-                        node["status"] = "cancelled"
-                        node["error"] = "Workflow execution was cancelled"
-                        node["completed_at"] = datetime.now(UTC).isoformat()
-                await db.execute(
-                    update(ExecutionGraphModel)
-                    .where(ExecutionGraphModel.id == execution_id)
-                    .values(graph_data=json.dumps(graph_data))
-                )
-                await db.execute(
-                    update(Task)
-                    .where(
-                        Task.execution_id == execution_id,
-                        Task.tenant_id == tenant_uuid,
-                        Task.status.in_(["pending", "running", "resuming"]),
-                    )
-                    .values(status="cancelled", error="Workflow execution was cancelled", completed_at=func.now())
-                )
+                await self._finalize_cancelled_execution(db, execution_id, tenant_uuid, record.graph_data)
             await db.commit()
             return {"execution_id": str(execution_id), "status": next_status}
+
+    async def _terminate_execution_handoffs(
+        self,
+        db: AsyncSession,
+        execution_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        *,
+        status: str,
+        error: str,
+    ) -> None:
+        """Fence handoff workers and expire approvals when their workflow ends."""
+        task_ids = select(Task.id).where(Task.execution_id == execution_id, Task.tenant_id == tenant_id)
+        updated = await db.execute(
+            update(TaskHandoff)
+            .where(
+                TaskHandoff.tenant_id == tenant_id,
+                TaskHandoff.child_task_id.in_(task_ids),
+                TaskHandoff.status.in_(["pending", "waiting_approval", "running", "failed"]),
+            )
+            .values(
+                status=status,
+                error=error[:2_000],
+                lease_owner=None,
+                lease_expires_at=None,
+                completed_at=func.now(),
+            )
+            .returning(TaskHandoff.id)
+        )
+        handoff_ids = updated.scalars().all()
+        if handoff_ids:
+            await db.execute(
+                update(Approval)
+                .where(Approval.task_handoff_id.in_(handoff_ids), Approval.status == "pending")
+                .values(
+                    status="expired",
+                    decision_note=error[:2_000],
+                    decided_at=func.now(),
+                    updated_at=func.now(),
+                )
+            )
+
+    async def _finalize_cancelled_execution(
+        self,
+        db: AsyncSession,
+        execution_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        serialized_graph: str,
+    ) -> None:
+        graph_data = json.loads(serialized_graph)
+        graph_data["status"] = "cancelled"
+        for node in graph_data.get("nodes", []):
+            if node.get("status") in {"pending", "running", "resuming", "waiting_approval"}:
+                node["status"] = "cancelled"
+                node["error"] = "Workflow execution was cancelled"
+                node["completed_at"] = datetime.now(UTC).isoformat()
+        await db.execute(
+            update(ExecutionGraphModel)
+            .where(ExecutionGraphModel.id == execution_id, ExecutionGraphModel.session_id.in_(select(Session.id).where(Session.tenant_id == tenant_id)))
+            .values(graph_data=json.dumps(graph_data))
+        )
+        await db.execute(
+            update(Task)
+            .where(
+                Task.execution_id == execution_id,
+                Task.tenant_id == tenant_id,
+                Task.status.in_(["pending", "running", "resuming", "waiting_approval"]),
+            )
+            .values(status="cancelled", error="Workflow execution was cancelled", completed_at=func.now())
+        )
 
     def _resolve_inputs(
         self,
@@ -613,18 +714,26 @@ class WorkflowExecutor:
                 record = await db.get(ExecutionGraphModel, uuid.UUID(execution_id))
                 if record is not None:
                     graph_data = json.loads(record.graph_data)
+                    graph_data["status"] = "cancelled"
                     for node in graph_data.get("nodes", []):
-                        if node.get("status") in {"pending", "running"}:
+                        if node.get("status") in {"pending", "running", "resuming", "waiting_approval"}:
                             node["status"] = "cancelled"
                             node["error"] = "Workflow execution was cancelled"
                             node["completed_at"] = datetime.now(UTC).isoformat()
                     record.graph_data = json.dumps(graph_data)
+                await self._terminate_execution_handoffs(
+                    db,
+                    uuid.UUID(execution_id),
+                    tenant_id,
+                    status="cancelled",
+                    error="Workflow execution was cancelled",
+                )
                 await db.execute(
                     update(Task)
                     .where(
                         Task.execution_id == uuid.UUID(execution_id),
                         Task.tenant_id == tenant_id,
-                        Task.status.in_(["pending", "running", "resuming"]),
+                        Task.status.in_(["pending", "running", "resuming", "waiting_approval"]),
                     )
                     .values(status="cancelled", error="Workflow execution was cancelled", completed_at=func.now())
                 )
@@ -653,12 +762,19 @@ class WorkflowExecutor:
                         node["error"] = error_message[:2_000]
                         node["completed_at"] = datetime.now(UTC).isoformat()
                 record.graph_data = json.dumps(graph_data)
+            await self._terminate_execution_handoffs(
+                db,
+                uuid.UUID(execution_id),
+                tenant_id,
+                status="failed",
+                error=error_message,
+            )
             await db.execute(
                 update(Task)
                 .where(
                     Task.execution_id == uuid.UUID(execution_id),
                     Task.tenant_id == tenant_id,
-                    Task.status.in_(["pending", "running", "resuming"]),
+                    Task.status.in_(["pending", "running", "resuming", "waiting_approval"]),
                 )
                 .values(
                     status="failed",
