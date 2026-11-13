@@ -392,6 +392,7 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
     )
     assert accepted.status_code == 200, accepted.text
     assert len(accepted.json()["decision_workspace_digest"]) == 64
+    accepted_workspace_digest = accepted.json()["decision_workspace_digest"]
 
     async def fake_verification_run(self: Any, managed_workspace: Any, command: list[str]) -> Any:
         from solvyn.sandbox.runtime import SandboxResult
@@ -447,6 +448,9 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
         def __init__(self, *, token: str) -> None:
             assert token == "test-github-token"
             self.write_calls: list[str] = []
+            self.branch_creation_started = asyncio.Event()
+            self.allow_branch_creation = asyncio.Event()
+            self.block_branch_creation = False
 
         async def __aenter__(self) -> FakeGitHub:
             return self
@@ -474,6 +478,9 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
         async def create_branch_at_commit(self, _full_name: str, name: str, sha: str) -> dict[str, str]:
             self.write_calls.append("branch")
             assert sha == source_sha
+            if self.block_branch_creation:
+                self.branch_creation_started.set()
+                await self.allow_branch_creation.wait()
             return {"name": name, "sha": "c" * 40}
 
         async def commit_files(
@@ -520,10 +527,78 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
         "pull_request_title": "Improve health readiness response",
         "pull_request_body": "Updates the scoped health response.",
     }
-    delivered = await client.post(
-        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/deliver",
-        json=payload,
+    from solvyn.db.models import TaskDelivery
+
+    manager = workspace_manager
+    managed_workspace = managed
+    fake_github.block_branch_creation = True
+    delivery_request = asyncio.create_task(
+        client.post(
+            f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/deliver",
+            json=payload,
+        )
     )
+    try:
+        await asyncio.wait_for(fake_github.branch_creation_started.wait(), timeout=5)
+        async with async_session_factory() as db:
+            await bind_tenant_scope(db, tenant.id)
+            starting_delivery = (
+                await db.execute(
+                    select(TaskDelivery).where(
+                        TaskDelivery.tenant_id == tenant.id,
+                        TaskDelivery.task_id == task_id,
+                    )
+                )
+            ).scalar_one()
+            assert starting_delivery.status == "starting"
+
+        manager.write_file(
+            managed_workspace,
+            "src/health.py",
+            b"def health():\n    return {'status': 'changed during delivery'}\n",
+        )
+        acceptance_during_delivery = await client.post(
+            f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria/{criterion_id}/decision",
+            json={"decision": "rejected", "note": "Must wait for delivery recovery"},
+        )
+        assert acceptance_during_delivery.status_code == 409, acceptance_during_delivery.text
+        assert "paused while delivery is in progress" in acceptance_during_delivery.json()["detail"]
+        verification_runs_before = await client.get(
+            f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs"
+        )
+        assert verification_runs_before.status_code == 200, verification_runs_before.text
+        verification_during_delivery = await client.post(
+            f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs",
+            json={"kind": "test"},
+        )
+        assert verification_during_delivery.status_code == 409, verification_during_delivery.text
+        assert "paused while delivery is in progress" in verification_during_delivery.json()["detail"]
+        criteria_during_delivery = await client.get(
+            f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria"
+        )
+        assert criteria_during_delivery.status_code == 200, criteria_during_delivery.text
+        criterion_during_delivery = criteria_during_delivery.json()["acceptance_criteria"][0]
+        assert criterion_during_delivery["status"] == "accepted"
+        assert criterion_during_delivery["decision_workspace_digest"] == accepted_workspace_digest
+        verification_runs_after = await client.get(
+            f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs"
+        )
+        assert verification_runs_after.status_code == 200, verification_runs_after.text
+        assert len(verification_runs_after.json()["verification_runs"]) == len(
+            verification_runs_before.json()["verification_runs"]
+        )
+    finally:
+        fake_github.allow_branch_creation.set()
+        try:
+            manager.write_file(
+                managed_workspace,
+                "src/health.py",
+                b"def health():\n    return {'status': 'ready'}\n",
+            )
+        finally:
+            await asyncio.gather(delivery_request, return_exceptions=True)
+
+    delivered = await delivery_request
     assert delivered.status_code == 201, delivered.text
     assert delivered.json()["merged"] is False
     assert delivered.json()["pull_request"]["draft"] is True
@@ -544,6 +619,7 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
     )
     assert evidence.status_code == 200, evidence.text
     assert evidence.json()["evidence"]["files"][0]["path"] == "src/health.py"
+    assert evidence.json()["evidence"]["files"][0]["content"] == "def health():\n    return {'status': 'ready'}\n"
     assert "ready" in evidence.json()["evidence"]["diffs"][0]["diff"]
 
 
