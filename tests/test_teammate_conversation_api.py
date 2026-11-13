@@ -46,19 +46,34 @@ async def test_list_teammates_includes_only_assigned_project_ids() -> None:
 
 
 @pytest.mark.asyncio
-async def test_assigned_project_lookup_excludes_inactive_projects() -> None:
+async def test_assigned_project_lookup_keeps_inactive_projects_available_for_memory() -> None:
     teammate = SimpleNamespace(id=uuid.uuid4(), organization_id=uuid.uuid4())
     db = AsyncMock()
     result = MagicMock()
-    result.scalar_one_or_none.return_value = None
+    project = SimpleNamespace(is_active=False)
+    result.scalar_one_or_none.return_value = project
     db.execute.return_value = result
 
-    with pytest.raises(HTTPException) as error:
-        await teammate_routes._assigned_project(db, teammate, uuid.uuid4(), uuid.uuid4())
+    assigned = await teammate_routes._assigned_project(db, teammate, uuid.uuid4(), uuid.uuid4())
+
+    assert assigned is project
+    statement = str(db.execute.await_args.args[0])
+    assert "projects.is_active IS true" not in statement
+
+
+@pytest.mark.asyncio
+async def test_active_assigned_project_lookup_rejects_inactive_projects() -> None:
+    teammate = SimpleNamespace(id=uuid.uuid4(), organization_id=uuid.uuid4())
+    db = AsyncMock()
+    inactive_project = SimpleNamespace(is_active=False)
+
+    with (
+        patch.object(teammate_routes, "_assigned_project", new_callable=AsyncMock, return_value=inactive_project),
+        pytest.raises(HTTPException) as error,
+    ):
+        await teammate_routes._active_assigned_project(db, teammate, uuid.uuid4(), uuid.uuid4())
 
     assert error.value.status_code == 404
-    statement = str(db.execute.await_args.args[0])
-    assert "projects.is_active IS true" in statement
 
 
 @pytest.mark.asyncio

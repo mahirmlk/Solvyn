@@ -193,7 +193,7 @@ export default function TeammatesPage() {
                       const assignedProjectIds = new Set(teammate.project_ids);
                       const assignedProjects = groups.find((group) => group.organization.id === teammate.organization_id)
                         ?.projects.filter((project) => project.is_active && assignedProjectIds.has(project.id)) ?? [];
-                      const selectedProjectId = assignedProjectIds.has(runProjectIds[teammate.id] || "")
+                      const selectedProjectId = assignedProjects.some((project) => project.id === runProjectIds[teammate.id])
                         ? runProjectIds[teammate.id]
                         : "";
                       return (

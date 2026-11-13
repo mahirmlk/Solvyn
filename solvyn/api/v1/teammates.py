@@ -174,11 +174,22 @@ async def _assigned_project(
             Project.id == project_id,
             Project.tenant_id == tenant_id,
             Project.organization_id == teammate.organization_id,
-            Project.is_active.is_(True),
         )
     )
     project = result.scalar_one_or_none()
     if project is None:
+        raise HTTPException(status_code=404, detail="Assigned project not found")
+    return project
+
+
+async def _active_assigned_project(
+    db: AsyncSession,
+    teammate: TeammateProfile,
+    project_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> Project:
+    project = await _assigned_project(db, teammate, project_id, tenant_id)
+    if not project.is_active:
         raise HTTPException(status_code=404, detail="Assigned project not found")
     return project
 
@@ -409,7 +420,7 @@ async def _load_conversation(
     conversation = result.scalar_one_or_none()
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    await _assigned_project(db, teammate, conversation.project_id, tenant_id)
+    await _active_assigned_project(db, teammate, conversation.project_id, tenant_id)
     return conversation
 
 
@@ -422,7 +433,7 @@ async def create_teammate_conversation(
     tenant_id = require_tenant()
     teammate = await _load_teammate(db, teammate_id, tenant_id)
     await require_org_membership(db, teammate.organization_id, roles=MEMBER_OR_ABOVE)
-    project = await _assigned_project(db, teammate, payload.project_id, tenant_id)
+    project = await _active_assigned_project(db, teammate, payload.project_id, tenant_id)
     session = Session(tenant_id=tenant_id, title=f"{teammate.name}: {project.name}"[:255], status="active")
     db.add(session)
     await db.flush()
@@ -449,7 +460,7 @@ async def list_teammate_conversations(
     tenant_id = require_tenant()
     teammate = await _load_teammate(db, teammate_id, tenant_id)
     await require_org_membership(db, teammate.organization_id, roles=MEMBER_OR_ABOVE)
-    await _assigned_project(db, teammate, project_id, tenant_id)
+    await _active_assigned_project(db, teammate, project_id, tenant_id)
     result = await db.execute(
         select(TeammateConversation)
         .where(
