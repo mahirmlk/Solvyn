@@ -93,6 +93,138 @@ async def test_every_tenant_owned_orm_table_has_forced_postgres_rls() -> None:
         await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_teammate_conversation_rls_scopes_tenant_and_assignment() -> None:
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url.startswith("postgresql+"):
+        pytest.skip("Conversation RLS behavior requires PostgreSQL and migrations at head")
+
+    engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
+    tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+    organization_a, project_a, unassigned_project = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    teammate_a, session_a, session_unassigned, conversation_a = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    try:
+        async with engine.connect() as connection:
+            transaction = await connection.begin()
+            try:
+                role = (
+                    await connection.execute(
+                        text("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user")
+                    )
+                ).one()
+                assert role == (False, False)
+                await connection.execute(
+                    text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'Conversation A', :slug, '')"),
+                    {"id": tenant_a, "slug": f"conversation-{tenant_a}"},
+                )
+                await connection.execute(
+                    text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'Conversation B', :slug, '')"),
+                    {"id": tenant_b, "slug": f"conversation-{tenant_b}"},
+                )
+                await connection.execute(text("SELECT set_config('app.tenant_id', :tenant, true)"), {"tenant": str(tenant_a)})
+                await connection.execute(
+                    text("INSERT INTO organizations (id, name, slug, tenant_id) VALUES (:id, 'Conversation org', :slug, :tenant)"),
+                    {"id": organization_a, "slug": f"conversation-{organization_a}", "tenant": tenant_a},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO projects (id, organization_id, tenant_id, name, slug) "
+                        "VALUES (:id, :org, :tenant, 'Assigned project', :slug)"
+                    ),
+                    {"id": project_a, "org": organization_a, "tenant": tenant_a, "slug": f"assigned-{project_a}"},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO projects (id, organization_id, tenant_id, name, slug) "
+                        "VALUES (:id, :org, :tenant, 'Unassigned project', :slug)"
+                    ),
+                    {"id": unassigned_project, "org": organization_a, "tenant": tenant_a, "slug": f"unassigned-{unassigned_project}"},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO teammate_profiles "
+                        "(id, organization_id, tenant_id, name, role, agent_type, is_enabled, status) "
+                        "VALUES (:id, :org, :tenant, 'Engineer', 'Software Engineer', 'backend-engineer', true, 'idle')"
+                    ),
+                    {"id": teammate_a, "org": organization_a, "tenant": tenant_a},
+                )
+                await connection.execute(
+                    text("INSERT INTO teammate_project_assignments (id, teammate_id, project_id) VALUES (:id, :teammate, :project)"),
+                    {"id": uuid.uuid4(), "teammate": teammate_a, "project": project_a},
+                )
+                await connection.execute(
+                    text("INSERT INTO sessions (id, tenant_id, title, status) VALUES (:id, :tenant, 'Conversation', 'active')"),
+                    {"id": session_a, "tenant": tenant_a},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO teammate_conversations "
+                        "(id, tenant_id, organization_id, teammate_id, project_id, session_id, title) "
+                        "VALUES (:id, :tenant, :org, :teammate, :project, :session, 'Conversation')"
+                    ),
+                    {
+                        "id": conversation_a,
+                        "tenant": tenant_a,
+                        "org": organization_a,
+                        "teammate": teammate_a,
+                        "project": project_a,
+                        "session": session_a,
+                    },
+                )
+
+                await connection.execute(text("SELECT set_config('app.tenant_id', :tenant, true)"), {"tenant": str(tenant_b)})
+                visible = await connection.scalar(
+                    text("SELECT count(*) FROM teammate_conversations WHERE id = :id"), {"id": conversation_a}
+                )
+                assert visible == 0
+                savepoint = await connection.begin_nested()
+                with pytest.raises(DBAPIError):
+                    await connection.execute(
+                        text(
+                            "INSERT INTO teammate_conversations "
+                            "(id, tenant_id, organization_id, teammate_id, project_id, session_id, title) "
+                            "VALUES (:id, :tenant, :org, :teammate, :project, :session, 'Cross tenant')"
+                        ),
+                        {
+                            "id": uuid.uuid4(),
+                            "tenant": tenant_b,
+                            "org": organization_a,
+                            "teammate": teammate_a,
+                            "project": project_a,
+                            "session": session_a,
+                        },
+                    )
+                await savepoint.rollback()
+
+                await connection.execute(text("SELECT set_config('app.tenant_id', :tenant, true)"), {"tenant": str(tenant_a)})
+                await connection.execute(
+                    text("INSERT INTO sessions (id, tenant_id, title, status) VALUES (:id, :tenant, 'Unassigned', 'active')"),
+                    {"id": session_unassigned, "tenant": tenant_a},
+                )
+                savepoint = await connection.begin_nested()
+                with pytest.raises(DBAPIError):
+                    await connection.execute(
+                        text(
+                            "INSERT INTO teammate_conversations "
+                            "(id, tenant_id, organization_id, teammate_id, project_id, session_id, title) "
+                            "VALUES (:id, :tenant, :org, :teammate, :project, :session, 'Unassigned')"
+                        ),
+                        {
+                            "id": uuid.uuid4(),
+                            "tenant": tenant_a,
+                            "org": organization_a,
+                            "teammate": teammate_a,
+                            "project": unassigned_project,
+                            "session": session_unassigned,
+                        },
+                    )
+                await savepoint.rollback()
+            finally:
+                await transaction.rollback()
+    finally:
+        await engine.dispose()
+
+
 async def _seed_organizations(
     connection: AsyncConnection,
     rows: list[tuple[uuid.UUID, uuid.UUID, str, str]],
@@ -153,7 +285,7 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                         "'task_handoffs', 'teammate_memory', 'sessions', 'execution_graphs', 'memory', 'token_usage', "
                         "'approvals', 'proactive_events', 'maintenance_schedules', 'verification_queue_controls', 'integrations', "
                         "'integration_credentials', 'projects', 'repositories', 'project_knowledge', "
-                        "'teammate_profiles', 'teammate_permissions', 'teammate_project_assignments', "
+                        "'teammate_profiles', 'teammate_permissions', 'teammate_project_assignments', 'teammate_conversations', "
                         "'organizations', 'workspaces')"
                     )
                 )
@@ -185,6 +317,7 @@ async def test_acceptance_criteria_rls_is_tenant_scoped_and_transaction_local() 
                 "teammate_profiles",
                 "teammate_permissions",
                 "teammate_project_assignments",
+                "teammate_conversations",
                 "organizations",
                 "workspaces",
             }

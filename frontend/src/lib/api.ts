@@ -203,6 +203,7 @@ export interface MaintenanceTaskTarget {
 export interface TeammateInfo {
   id: string;
   organization_id: string;
+  project_ids: string[];
   name: string;
   role: string;
   description: string;
@@ -216,6 +217,22 @@ export interface TeammateInfo {
   max_run_seconds: number | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface TeammateConversationInfo {
+  id: string;
+  teammate_id: string;
+  project_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TeammateConversationMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
 }
 
 export interface ApprovalInfo {
@@ -583,6 +600,32 @@ export const api = {
     request<{ teammate_id: string; project_id: string; output: unknown }>(`/teammates/${teammateId}/run`, {
       method: "POST",
       body: JSON.stringify({ project_id: projectId, input_data: { task } }),
+    }),
+
+  listTeammateConversations: (teammateId: string, projectId: string) =>
+    request<{ conversations: TeammateConversationInfo[]; count: number }>(
+      `/teammates/${teammateId}/conversations?project_id=${encodeURIComponent(projectId)}`,
+    ),
+
+  createTeammateConversation: (teammateId: string, projectId: string) =>
+    request<TeammateConversationInfo & { messages: TeammateConversationMessage[] }>(
+      `/teammates/${teammateId}/conversations`,
+      { method: "POST", body: JSON.stringify({ project_id: projectId }) },
+    ),
+
+  getTeammateConversationMessages: (teammateId: string, conversationId: string) =>
+    request<{ conversation: TeammateConversationInfo; messages: TeammateConversationMessage[]; count: number }>(
+      `/teammates/${teammateId}/conversations/${conversationId}/messages`,
+    ),
+
+  sendTeammateConversationMessage: (teammateId: string, conversationId: string, content: string) =>
+    request<{
+      conversation: TeammateConversationInfo;
+      messages: TeammateConversationMessage[];
+      output: unknown;
+    }>(`/teammates/${teammateId}/conversations/${conversationId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ content }),
     }),
 
   listApprovals: (status: "pending" | "approved" | "rejected" | "consumed" | "stale" = "pending") =>

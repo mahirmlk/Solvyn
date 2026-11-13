@@ -132,6 +132,38 @@
   line-height: 1.55;
 }
 
+.teammateMessages {
+  display: grid;
+  max-height: 420px;
+  gap: 12px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.teammateMessages li {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line-light);
+  background: rgba(25, 27, 38, 0.035);
+}
+
+.teammateMessages strong {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 11px;
+}
+
+.teammateMessages pre {
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 11px/1.6 var(--font-mono);
+}
+
 .approvalFilter {
   display: grid;
   min-width: 150px;

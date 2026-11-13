@@ -11,9 +11,10 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from solvyn.agents.conversation_context import build_conversation_prompt, serialize_assistant_message
 from solvyn.agents.teammate_runtime import (
     ROLE_AGENT_TYPES,
     RepositoryContextUnavailableError,
@@ -24,9 +25,12 @@ from solvyn.agents.teammate_runtime import (
 )
 from solvyn.api.v1._rbac import ANY_ROLE, MEMBER_OR_ABOVE, OWNER_ADMIN, require_org_membership, require_tenant
 from solvyn.db.models import (
+    Message,
     PermissionLevel,
     Project,
     ProjectKnowledge,
+    Session,
+    TeammateConversation,
     TeammateMemory,
     TeammatePermission,
     TeammateProfile,
@@ -67,10 +71,11 @@ async def _load_teammate(db: AsyncSession, teammate_id: uuid.UUID, tenant_id: uu
     return teammate
 
 
-def _teammate_dict(t: TeammateProfile) -> dict[str, object]:
+def _teammate_dict(t: TeammateProfile, project_ids: list[uuid.UUID] | None = None) -> dict[str, object]:
     return {
         "id": str(t.id),
         "organization_id": str(t.organization_id),
+        "project_ids": [str(project_id) for project_id in project_ids or []],
         "name": t.name,
         "role": t.role,
         "description": t.description or "",
@@ -141,6 +146,14 @@ class TeammateRun(BaseModel):
         return self
 
 
+class TeammateConversationCreate(BaseModel):
+    project_id: uuid.UUID
+
+
+class TeammateConversationMessageIn(BaseModel):
+    content: str = Field(..., min_length=1, max_length=10_000)
+
+
 class TeammateMemoryIn(BaseModel):
     project_id: uuid.UUID
     key: str = Field(..., min_length=1, max_length=255)
@@ -169,11 +182,41 @@ async def _assigned_project(
     return project
 
 
+async def _active_assigned_project(
+    db: AsyncSession,
+    teammate: TeammateProfile,
+    project_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> Project:
+    project = await _assigned_project(db, teammate, project_id, tenant_id)
+    if not project.is_active:
+        raise HTTPException(status_code=404, detail="Assigned project not found")
+    return project
+
+
+async def _teammate_project_ids(db: AsyncSession, teammate_id: uuid.UUID) -> list[uuid.UUID]:
+    result = await db.execute(
+        select(TeammateProjectAssignment.project_id)
+        .where(TeammateProjectAssignment.teammate_id == teammate_id)
+        .order_by(TeammateProjectAssignment.project_id)
+    )
+    return list(result.scalars().all())
+
+
 @router.get("/organizations/{org_id}/teammates", summary="List teammates in an organization")
 async def list_teammates(org_id: uuid.UUID, db: AsyncSession = Depends(get_session)) -> dict[str, object]:
     await require_org_membership(db, org_id, roles=ANY_ROLE)
     result = await db.execute(select(TeammateProfile).where(TeammateProfile.organization_id == org_id).order_by(TeammateProfile.name))
-    items = [_teammate_dict(t) for t in result.scalars().all()]
+    teammates = result.scalars().all()
+    assignment_result = await db.execute(
+        select(TeammateProjectAssignment.teammate_id, TeammateProjectAssignment.project_id)
+        .join(TeammateProfile, TeammateProfile.id == TeammateProjectAssignment.teammate_id)
+        .where(TeammateProfile.organization_id == org_id)
+    )
+    projects_by_teammate: dict[uuid.UUID, list[uuid.UUID]] = {}
+    for teammate_id, project_id in assignment_result.all():
+        projects_by_teammate.setdefault(teammate_id, []).append(project_id)
+    items = [_teammate_dict(t, projects_by_teammate.get(t.id, [])) for t in teammates]
     return {"teammates": items, "count": len(items)}
 
 
@@ -236,7 +279,7 @@ async def create_teammate(payload: TeammateCreate, db: AsyncSession = Depends(ge
 
     await db.commit()
     await db.refresh(teammate)
-    return _teammate_dict(teammate)
+    return _teammate_dict(teammate, [project.id for project in project_rows])
 
 
 @router.get("/teammates/{teammate_id}", summary="Get a teammate with permissions")
@@ -245,7 +288,8 @@ async def get_teammate(teammate_id: uuid.UUID, db: AsyncSession = Depends(get_se
     teammate = await _load_teammate(db, teammate_id, tenant_id)
     await require_org_membership(db, teammate.organization_id, roles=ANY_ROLE)
     perms = (await db.execute(select(TeammatePermission).where(TeammatePermission.teammate_id == teammate_id))).scalars().all()
-    out = _teammate_dict(teammate)
+    project_ids = await _teammate_project_ids(db, teammate_id)
+    out = _teammate_dict(teammate, project_ids)
     out["permissions"] = [p.permission for p in perms if p.granted]
     return out
 
@@ -290,7 +334,7 @@ async def update_teammate(teammate_id: uuid.UUID, payload: TeammateUpdate, db: A
     db.add(teammate)
     await db.commit()
     await db.refresh(teammate)
-    return _teammate_dict(teammate)
+    return _teammate_dict(teammate, await _teammate_project_ids(db, teammate_id))
 
 
 @router.delete("/teammates/{teammate_id}", summary="Disable a teammate (soft delete)")
@@ -338,6 +382,199 @@ async def execute_teammate(
     except TimeoutError as exc:
         raise HTTPException(status_code=504, detail="Teammate run exceeded its time limit") from exc
     return {"teammate_id": str(teammate_id), "project_id": str(payload.project_id), "output": output}
+
+
+def _conversation_dict(conversation: TeammateConversation) -> dict[str, object]:
+    return {
+        "id": str(conversation.id),
+        "teammate_id": str(conversation.teammate_id),
+        "project_id": str(conversation.project_id),
+        "title": conversation.title,
+        "created_at": conversation.created_at.isoformat() if conversation.created_at else "",
+        "updated_at": conversation.updated_at.isoformat() if conversation.updated_at else "",
+    }
+
+
+def _message_dict(message: Message) -> dict[str, object]:
+    return {
+        "id": str(message.id),
+        "role": message.role,
+        "content": message.content,
+        "created_at": message.created_at.isoformat() if message.created_at else "",
+    }
+
+
+async def _load_conversation(
+    db: AsyncSession,
+    teammate: TeammateProfile,
+    conversation_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> TeammateConversation:
+    result = await db.execute(
+        select(TeammateConversation).where(
+            TeammateConversation.id == conversation_id,
+            TeammateConversation.tenant_id == tenant_id,
+            TeammateConversation.teammate_id == teammate.id,
+        )
+    )
+    conversation = result.scalar_one_or_none()
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    await _active_assigned_project(db, teammate, conversation.project_id, tenant_id)
+    return conversation
+
+
+@router.post("/teammates/{teammate_id}/conversations", status_code=201, summary="Start a persistent teammate conversation")
+async def create_teammate_conversation(
+    teammate_id: uuid.UUID,
+    payload: TeammateConversationCreate,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    tenant_id = require_tenant()
+    teammate = await _load_teammate(db, teammate_id, tenant_id)
+    await require_org_membership(db, teammate.organization_id, roles=MEMBER_OR_ABOVE)
+    project = await _active_assigned_project(db, teammate, payload.project_id, tenant_id)
+    session = Session(tenant_id=tenant_id, title=f"{teammate.name}: {project.name}"[:255], status="active")
+    db.add(session)
+    await db.flush()
+    conversation = TeammateConversation(
+        tenant_id=tenant_id,
+        organization_id=teammate.organization_id,
+        teammate_id=teammate.id,
+        project_id=project.id,
+        session_id=session.id,
+        title="New conversation",
+    )
+    db.add(conversation)
+    await db.commit()
+    await db.refresh(conversation)
+    return {**_conversation_dict(conversation), "messages": []}
+
+
+@router.get("/teammates/{teammate_id}/conversations", summary="List a teammate's project conversations")
+async def list_teammate_conversations(
+    teammate_id: uuid.UUID,
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    tenant_id = require_tenant()
+    teammate = await _load_teammate(db, teammate_id, tenant_id)
+    await require_org_membership(db, teammate.organization_id, roles=MEMBER_OR_ABOVE)
+    await _active_assigned_project(db, teammate, project_id, tenant_id)
+    result = await db.execute(
+        select(TeammateConversation)
+        .where(
+            TeammateConversation.tenant_id == tenant_id,
+            TeammateConversation.teammate_id == teammate_id,
+            TeammateConversation.project_id == project_id,
+        )
+        .order_by(TeammateConversation.updated_at.desc(), TeammateConversation.id)
+        .limit(50)
+    )
+    conversations = [_conversation_dict(row) for row in result.scalars().all()]
+    return {"conversations": conversations, "count": len(conversations)}
+
+
+@router.get("/teammates/{teammate_id}/conversations/{conversation_id}/messages", summary="Read persistent conversation history")
+async def list_teammate_conversation_messages(
+    teammate_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    tenant_id = require_tenant()
+    teammate = await _load_teammate(db, teammate_id, tenant_id)
+    await require_org_membership(db, teammate.organization_id, roles=MEMBER_OR_ABOVE)
+    conversation = await _load_conversation(db, teammate, conversation_id, tenant_id)
+    result = await db.execute(
+        select(Message)
+        .where(Message.session_id == conversation.session_id, Message.role.in_(["user", "assistant"]))
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(200)
+    )
+    messages = [_message_dict(row) for row in reversed(result.scalars().all())]
+    return {"conversation": _conversation_dict(conversation), "messages": messages, "count": len(messages)}
+
+
+@router.post("/teammates/{teammate_id}/conversations/{conversation_id}/messages", summary="Send a message to a teammate")
+async def send_teammate_conversation_message(
+    teammate_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    payload: TeammateConversationMessageIn,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    tenant_id = require_tenant()
+    teammate = await _load_teammate(db, teammate_id, tenant_id)
+    await require_org_membership(db, teammate.organization_id, roles=MEMBER_OR_ABOVE)
+    conversation = await _load_conversation(db, teammate, conversation_id, tenant_id)
+
+    prior_result = await db.execute(
+        select(Message)
+        .where(Message.session_id == conversation.session_id, Message.role.in_(["user", "assistant"]))
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(12)
+    )
+    prior_messages = list(reversed(prior_result.scalars().all()))
+    message_content = payload.content.strip()
+    if not message_content:
+        raise HTTPException(status_code=422, detail="Message cannot be blank")
+    prompt = build_conversation_prompt(
+        [(row.role, row.content) for row in prior_messages],
+        teammate.name,
+        message_content,
+    )
+
+    try:
+        output = await run_teammate(
+            db,
+            teammate,
+            tenant_id=tenant_id,
+            project_id=conversation.project_id,
+            input_data={"text": prompt},
+            session_id=str(conversation.session_id),
+        )
+    except LookupError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except TeammateRunDeniedError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TeammateRunConflictError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RepositoryContextUnavailableError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except TimeoutError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=504, detail="Teammate run exceeded its time limit") from exc
+    except Exception:
+        await db.rollback()
+        raise
+
+    user_message = Message(session_id=conversation.session_id, role="user", content=message_content)
+    assistant_message = Message(
+        session_id=conversation.session_id,
+        role="assistant",
+        content=serialize_assistant_message(output),
+    )
+    if not prior_messages:
+        conversation.title = message_content[:120]
+    conversation.updated_at = func.now()
+    db.add(user_message)
+    db.add(assistant_message)
+    db.add(conversation)
+    await db.commit()
+    await db.refresh(user_message)
+    await db.refresh(assistant_message)
+    await db.refresh(conversation)
+    return {
+        "conversation": _conversation_dict(conversation),
+        "messages": [_message_dict(user_message), _message_dict(assistant_message)],
+        "output": output,
+    }
 
 
 @router.get("/teammates/{teammate_id}/memory", summary="List persistent teammate memory")

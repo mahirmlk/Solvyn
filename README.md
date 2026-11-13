@@ -42,6 +42,10 @@ Teammates receive file tools according to the grants on their task. Those tools 
 
 Teammates can request fixed test, build, lint, type-check, or security profiles. An owner or admin approves verification before the networkless, resource-limited container runs it. Solvyn saves bounded output and the workspace digest with each result. An owner or admin can inspect the diff and create a draft pull request from the pinned source revision.
 
+### Persistent teammate conversations
+
+Users can save and resume teammate conversations scoped to an assigned project. Recent messages are bounded before they are passed as context; direct conversations do not grant workspace tools.
+
 ### Operations and hosting
 
 Task history includes approvals, verification attempts, delivery records, and recorded usage. Configured GitHub events and recurring maintenance checks appear for human review. Use the development Compose stack locally or follow the production Compose guide. The Kubernetes workflow needs operator configuration; it has not been validated in a controlled deployment.
