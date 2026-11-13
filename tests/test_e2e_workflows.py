@@ -368,8 +368,9 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
     assert workspace_response.json()["source_commit_sha"] == source_sha
     assert workspace_response.json()["source_paths"] == ["src/health.py"]
 
-    managed = WorkspaceManager(Path(workspace_root)).get(uuid.UUID(workspace_response.json()["workspace_id"]))
-    WorkspaceManager(Path(workspace_root)).write_file(
+    workspace_manager = WorkspaceManager(Path(workspace_root))
+    managed = workspace_manager.get(uuid.UUID(workspace_response.json()["workspace_id"]))
+    workspace_manager.write_file(
         managed,
         "src/health.py",
         b"def health():\n    return {'status': 'ready'}\n",
@@ -410,6 +411,20 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
     )
     assert verification_result.status_code == 200, verification_result.text
     assert verification_result.json()["status"] == "passed"
+    current_digest = workspace_manager.fingerprint(managed)
+    acceptance_after = await client.get(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria"
+    )
+    verification_after = await client.get(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs"
+    )
+    criterion_evidence = acceptance_after.json()["acceptance_criteria"][0]
+    run_evidence = verification_after.json()["verification_runs"][0]
+    assert criterion_evidence["status"] == "accepted"
+    assert criterion_evidence["decision_workspace_digest"] == current_digest
+    assert run_evidence["required_for_completion"] is True
+    assert run_evidence["status"] == "passed"
+    assert run_evidence["source_digest"] == current_digest
     completed_tasks = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
     assert next(item for item in completed_tasks.json()["tasks"] if item["task_id"] == str(task_id))["status"] == "completed"
 
