@@ -24,7 +24,7 @@
 
 </div>
 
-Solvyn gives engineering teams a self-hosted place to configure AI teammates, connect GitHub projects, assign scoped work, and review task history. Each task workspace uses selected repository files pinned to a commit. Teammate tools follow project permissions, and verification runs use fixed command profiles in an isolated container. A reviewer can inspect the diff before creating a draft pull request. A person decides whether to merge it; production deployment follows a separate operator-controlled workflow.
+Solvyn gives engineering teams a self-hosted place to configure AI teammates, connect GitHub projects, assign scoped work, and review task history. GitHub-seeded task workspaces use selected repository files pinned to a commit; other workspaces can start from supplied UTF-8 files. Teammate tools follow project permissions, and verification runs use fixed command profiles in an isolated container. An owner or admin can inspect a task diff and request a draft pull request. A person decides whether to merge it; production deployment follows a separate operator-controlled workflow.
 
 > Solvyn is under active development. The repository, task, workspace, approval, and delivery components are present. The full product workflow and production deployment still need release validation. See the [shipment readiness assessment](./docs/SHIPMENT_READINESS.md).
 
@@ -40,7 +40,7 @@ Teammates receive file tools according to the grants on their task. Those tools 
 
 ### Verification and delivery
 
-Teammates can request fixed test, build, lint, type-check, or security profiles. An owner or admin approves verification before the networkless, resource-limited container runs it. Solvyn saves bounded output and the workspace digest with each result. Reviewers can inspect the diff and create a draft pull request from the pinned source revision.
+Teammates can request fixed test, build, lint, type-check, or security profiles. An owner or admin approves verification before the networkless, resource-limited container runs it. Solvyn saves bounded output and the workspace digest with each result. An owner or admin can inspect the diff and create a draft pull request from the pinned source revision.
 
 ### Operations and hosting
 
@@ -125,12 +125,12 @@ Install the Python package, then run `solvyn --help`. The CLI includes status an
 ## How a task workspace works
 
 1. An organization owner or admin connects a repository to a project.
-2. A task handoff assigns work to a teammate with explicit permissions.
+2. An authorized user assigns work to a teammate with explicit permissions.
 3. An authorized user creates a workspace from selected repository files or supplied UTF-8 files. Repository files are read at one pinned commit.
 4. The teammate uses only the file tools allowed by its grants. Teammate verification requests use fixed profiles and require owner or admin approval.
-5. A reviewer inspects the diff and digest. Delivery can create a draft pull request on GitHub.
+5. An owner or admin inspects the diff and digest, then can create a draft pull request on GitHub.
 
-Solvyn treats repository content as untrusted input. Private GitHub credentials stay in the API and are encrypted at rest. Tenant-owned records use PostgreSQL row-level security.
+Solvyn treats repository content as untrusted input. The organization GitHub token is encrypted at rest and used by the API to access linked repositories; it is not sent to the model or sandbox. Tenant-owned records use PostgreSQL row-level security.
 
 ## Current limits
 
