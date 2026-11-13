@@ -32,14 +32,18 @@ class MaintenanceScheduleCreate(BaseModel):
     project_id: uuid.UUID
     task_id: uuid.UUID | None = None
     maintenance_type: Literal["code_quality", "dependency_review", "documentation_review"]
-    verification_kind: Literal["test", "build", "lint", "typecheck", "security"] = "lint"
+    verification_kind: Literal["test", "build", "lint", "typecheck", "security", "documentation"] = "lint"
     title: str = Field(min_length=1, max_length=255)
     interval_days: int = Field(ge=1, le=30)
 
     @model_validator(mode="after")
-    def profile_only_for_code_quality(self) -> MaintenanceScheduleCreate:
-        if self.maintenance_type != "code_quality" and self.verification_kind != "lint":
-            raise ValueError("Verification profiles are only available for code quality schedules")
+    def profile_matches_maintenance_type(self) -> MaintenanceScheduleCreate:
+        if self.maintenance_type == "documentation_review" and self.verification_kind != "documentation":
+            raise ValueError("Documentation review schedules require the documentation profile")
+        if self.maintenance_type != "documentation_review" and self.verification_kind == "documentation":
+            raise ValueError("The documentation profile is only available for documentation review schedules")
+        if self.maintenance_type == "dependency_review" and self.verification_kind != "lint":
+            raise ValueError("Dependency review schedules do not support verification profiles")
         return self
 
 
@@ -134,8 +138,8 @@ async def create_maintenance_schedule(
     if project is None:
         raise HTTPException(status_code=404, detail="Active project not found in this organization")
 
-    if payload.maintenance_type == "code_quality" and payload.task_id is None:
-        raise HTTPException(status_code=422, detail="Code quality checks require a task with a ready workspace")
+    if payload.maintenance_type in ("code_quality", "documentation_review") and payload.task_id is None:
+        raise HTTPException(status_code=422, detail="Verification checks require a task with a ready workspace")
     if payload.task_id is not None:
         await _validate_check_target(db, task_id=payload.task_id, project=project)
     active_count = await db.scalar(
@@ -281,7 +285,7 @@ async def update_maintenance_schedule(
         ).scalar_one_or_none()
         if project is None:
             raise HTTPException(status_code=404, detail="Active project not found in this organization")
-        if schedule.maintenance_type == "code_quality" and schedule.task_id is None:
+        if schedule.maintenance_type in ("code_quality", "documentation_review") and schedule.task_id is None:
             raise HTTPException(status_code=409, detail="Set a task with a ready workspace before re-enabling this check")
         if schedule.task_id is not None:
             await _validate_check_target(db, task_id=schedule.task_id, project=project)

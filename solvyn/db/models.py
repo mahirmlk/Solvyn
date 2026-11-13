@@ -808,7 +808,7 @@ class MaintenanceSchedule(Base):
             name="ck_maintenance_schedules_type",
         ),
         CheckConstraint(
-            "verification_kind IN ('test', 'build', 'lint', 'typecheck', 'security')",
+            "verification_kind IN ('test', 'build', 'lint', 'typecheck', 'security', 'documentation')",
             name="ck_maintenance_schedules_verification_kind",
         ),
         CheckConstraint("interval_days BETWEEN 1 AND 30", name="ck_maintenance_schedules_interval"),

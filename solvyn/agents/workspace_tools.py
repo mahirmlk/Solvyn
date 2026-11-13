@@ -29,6 +29,7 @@ _DEFAULT_VERIFICATION_COMMANDS = {
     "lint": ["ruff", "check", "."],
     "typecheck": ["mypy", "."],
     "security": ["ruff", "check", "--select", "S", "."],
+    "documentation": ["python", "/opt/solvyn/verify_markdown.py", "/workspace"],
 }
 
 GenerateOnce = Callable[..., Awaitable[Any]]

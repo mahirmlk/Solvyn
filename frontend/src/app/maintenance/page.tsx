@@ -29,6 +29,7 @@ export default function MaintenancePage() {
   const [organizationId, setOrganizationId] = useState("");
   const [projectId, setProjectId] = useState("");
   const [taskId, setTaskId] = useState("");
+  const [maintenanceType, setMaintenanceType] = useState<"code_quality" | "documentation_review">("code_quality");
   const [tasks, setTasks] = useState<MaintenanceTaskTarget[]>([]);
   const [title, setTitle] = useState("");
   const [intervalDays, setIntervalDays] = useState(7);
@@ -107,7 +108,7 @@ export default function MaintenancePage() {
 
   const visibleSchedules = useMemo(
     () => groups.flatMap(({ organization, projects, schedules, canManage }) => schedules
-      .filter((schedule) => schedule.maintenance_type === "code_quality")
+      .filter((schedule) => schedule.maintenance_type === "code_quality" || schedule.maintenance_type === "documentation_review")
       .map((schedule) => ({
         organization,
         project: projects.find((project) => project.id === schedule.project_id),
@@ -126,8 +127,8 @@ export default function MaintenancePage() {
       await api.createMaintenanceSchedule(selectedGroup.organization.id, {
         project_id: projectId,
         task_id: taskId,
-        maintenance_type: "code_quality",
-        verification_kind: verificationKind,
+        maintenance_type: maintenanceType,
+        verification_kind: maintenanceType === "documentation_review" ? "documentation" : verificationKind,
         title: title.trim(),
         interval_days: intervalDays,
       });
@@ -183,11 +184,18 @@ export default function MaintenancePage() {
           <div className="section-head">
             <div>
               <span className="eyebrow">Recurring check</span>
-              <h2 className={styles.sectionTitle} id="create-maintenance-title">Schedule a verification check</h2>
+              <h2 className={styles.sectionTitle} id="create-maintenance-title">Schedule a project check</h2>
             </div>
           </div>
           <form className={styles.form} onSubmit={createSchedule}>
             <div className={styles.formGrid}>
+              <label className="field">
+                <span className="field-label">Check type</span>
+                <select className="editorial-input" onChange={(event) => setMaintenanceType(event.target.value as "code_quality" | "documentation_review")} value={maintenanceType}>
+                  <option value="code_quality">Code quality</option>
+                  <option value="documentation_review">Documentation integrity</option>
+                </select>
+              </label>
               <label className="field">
                 <span className="field-label">Organization</span>
                 <select className="editorial-input" onChange={(event) => {
@@ -226,12 +234,15 @@ export default function MaintenancePage() {
             </div>
             <label className="field">
               <span className="field-label">Verification profile</span>
-              <select className="editorial-input" onChange={(event) => setVerificationKind(event.target.value as MaintenanceScheduleInfo["verification_kind"])} value={verificationKind}>
-                <option value="lint">Lint · ruff check</option>
-                <option value="test">Tests · pytest</option>
-                <option value="build">Build · Python compile check</option>
-                <option value="typecheck">Type check · mypy</option>
-                <option value="security">Static security · Ruff S rules</option>
+              <select className="editorial-input" disabled={maintenanceType === "documentation_review"} onChange={(event) => setVerificationKind(event.target.value as MaintenanceScheduleInfo["verification_kind"])} value={maintenanceType === "documentation_review" ? "documentation" : verificationKind}>
+                {maintenanceType === "documentation_review" ? <option value="documentation">Markdown links and anchors</option> : null}
+                {maintenanceType === "code_quality" ? <>
+                  <option value="lint">Lint · ruff check</option>
+                  <option value="test">Tests · pytest</option>
+                  <option value="build">Build · Python compile check</option>
+                  <option value="typecheck">Type check · mypy</option>
+                  <option value="security">Static security · Ruff S rules</option>
+                </> : null}
               </select>
             </label>
             <label className="field">
