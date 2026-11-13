@@ -174,6 +174,7 @@ async def _assigned_project(
             Project.id == project_id,
             Project.tenant_id == tenant_id,
             Project.organization_id == teammate.organization_id,
+            Project.is_active.is_(True),
         )
     )
     project = result.scalar_one_or_none()

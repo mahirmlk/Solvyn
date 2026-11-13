@@ -46,6 +46,22 @@ async def test_list_teammates_includes_only_assigned_project_ids() -> None:
 
 
 @pytest.mark.asyncio
+async def test_assigned_project_lookup_excludes_inactive_projects() -> None:
+    teammate = SimpleNamespace(id=uuid.uuid4(), organization_id=uuid.uuid4())
+    db = AsyncMock()
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = None
+    db.execute.return_value = result
+
+    with pytest.raises(HTTPException) as error:
+        await teammate_routes._assigned_project(db, teammate, uuid.uuid4(), uuid.uuid4())
+
+    assert error.value.status_code == 404
+    statement = str(db.execute.await_args.args[0])
+    assert "projects.is_active IS true" in statement
+
+
+@pytest.mark.asyncio
 async def test_send_conversation_message_persists_turn_and_reuses_bound_session() -> None:
     tenant_id, teammate_id, project_id, conversation_id, session_id = (uuid.uuid4() for _ in range(5))
     teammate = SimpleNamespace(id=teammate_id, organization_id=uuid.uuid4(), name="Engineer")
