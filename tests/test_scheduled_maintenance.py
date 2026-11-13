@@ -42,6 +42,23 @@ def test_schedule_interval_and_verification_profile_are_bounded() -> None:
     )
     assert valid.interval_days == 30
     assert valid.verification_kind == "security"
+    docs = MaintenanceScheduleCreate(
+        project_id=uuid.uuid4(),
+        task_id=uuid.uuid4(),
+        maintenance_type="documentation_review",
+        title="Docs links",
+        interval_days=7,
+        verification_kind="documentation",
+    )
+    assert docs.verification_kind == "documentation"
+    with pytest.raises(ValidationError):
+        MaintenanceScheduleCreate(
+            project_id=uuid.uuid4(),
+            task_id=uuid.uuid4(),
+            maintenance_type="documentation_review",
+            title="Docs links",
+            interval_days=7,
+        )
     with pytest.raises(ValidationError):
         MaintenanceScheduleCreate(
             project_id=uuid.uuid4(),
@@ -94,7 +111,7 @@ async def test_maintenance_schedule_create_requires_admin_and_project_scope() ->
                 organization_id,
                 MaintenanceScheduleCreate(
                     project_id=project_id,
-                    maintenance_type="documentation_review",
+                    maintenance_type="dependency_review",
                     title=" Docs review ",
                     interval_days=7,
                 ),
@@ -281,17 +298,19 @@ async def test_due_maintenance_schedule_adds_one_human_triage_event_and_advances
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("verification_kind", "command"),
+    ("maintenance_type", "verification_kind", "command"),
     [
-        ("test", ["pytest", "-q"]),
-        ("build", ["python", "-m", "compileall", "-q", "."]),
-        ("lint", ["ruff", "check", "."]),
-        ("typecheck", ["mypy", "."]),
-        ("security", ["ruff", "check", "--select", "S", "."]),
+        ("code_quality", "test", ["pytest", "-q"]),
+        ("code_quality", "build", ["python", "-m", "compileall", "-q", "."]),
+        ("code_quality", "lint", ["ruff", "check", "."]),
+        ("code_quality", "typecheck", ["mypy", "."]),
+        ("code_quality", "security", ["ruff", "check", "--select", "S", "."]),
+        ("documentation_review", "documentation", ["python", "/opt/solvyn/verify_markdown.py", "/workspace"]),
     ],
 )
-async def test_due_code_quality_schedule_requests_profile_with_real_approval(
+async def test_due_verification_schedule_requests_profile_with_real_approval(
     monkeypatch: pytest.MonkeyPatch,
+    maintenance_type: str,
     verification_kind: str,
     command: list[str],
 ) -> None:
@@ -307,7 +326,7 @@ async def test_due_code_quality_schedule_requests_profile_with_real_approval(
         organization_id=organization_id,
         project_id=project_id,
         task_id=task_id,
-        maintenance_type="code_quality",
+        maintenance_type=maintenance_type,
         verification_kind=verification_kind,
         title="Weekly lint",
         interval_days=7,

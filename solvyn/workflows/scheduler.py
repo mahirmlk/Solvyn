@@ -126,7 +126,7 @@ async def _queue_due_maintenance_events(db: AsyncSession) -> int:
             outcome = "scheduled"
             status = "pending"
             action = "due"
-            if schedule.maintenance_type == "code_quality" and schedule.task_id is not None:
+            if schedule.maintenance_type in ("code_quality", "documentation_review") and schedule.task_id is not None:
                 target = (
                     await db.execute(
                         select(Task, TaskWorkspace, TaskHandoff, TeammateProfile)

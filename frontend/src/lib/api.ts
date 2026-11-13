@@ -185,7 +185,7 @@ export interface MaintenanceScheduleInfo {
   task_id: string | null;
   task_title: string | null;
   maintenance_type: "code_quality" | "dependency_review" | "documentation_review";
-  verification_kind: "test" | "build" | "lint" | "typecheck" | "security";
+  verification_kind: "test" | "build" | "lint" | "typecheck" | "security" | "documentation";
   title: string;
   interval_days: number;
   next_run_at: string;
@@ -568,7 +568,7 @@ export const api = {
     input: {
       project_id: string;
       task_id: string;
-      maintenance_type: "code_quality";
+      maintenance_type: "code_quality" | "documentation_review";
       verification_kind: MaintenanceScheduleInfo["verification_kind"];
       title: string;
       interval_days: number;

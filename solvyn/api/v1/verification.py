@@ -74,7 +74,7 @@ _ACTIVITY_TASK_TREE_DEPTH_LIMIT = 32
 _MAX_LIVE_PULL_REQUESTS = 5
 _VERIFICATION_LEASE_DURATION = timedelta(minutes=10)
 _VERIFICATION_MAX_ATTEMPTS = 3
-VerificationKind = Literal["test", "build", "lint", "typecheck", "security"]
+VerificationKind = Literal["test", "build", "lint", "typecheck", "security", "documentation"]
 
 
 class TaskWorkspaceCreate(BaseModel):
@@ -113,6 +113,7 @@ _DEFAULT_VERIFICATION_COMMANDS: dict[VerificationKind, list[str]] = {
     "lint": ["ruff", "check", "."],
     "typecheck": ["mypy", "."],
     "security": ["ruff", "check", "--select", "S", "."],
+    "documentation": ["python", "/opt/solvyn/verify_markdown.py", "/workspace"],
 }
 
 
