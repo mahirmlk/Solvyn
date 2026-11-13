@@ -1,5 +1,6 @@
 import json
 import uuid
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -29,6 +30,12 @@ async def test_send_conversation_message_persists_turn_and_reuses_bound_session(
     query_result.scalars.return_value.all.return_value = [prior]
     db = AsyncMock()
     db.execute.return_value = query_result
+
+    async def refresh_record(record: object) -> None:
+        if record is conversation:
+            conversation.updated_at = datetime.now(UTC)
+
+    db.refresh.side_effect = refresh_record
     output = {"code": "answer", "provider": "test", "model": "test-model", "cost": 0}
 
     with (
@@ -55,6 +62,53 @@ async def test_send_conversation_message_persists_turn_and_reuses_bound_session(
     assert json.loads(saved_messages[1].content) == output
     assert response["output"] == output
     assert len(response["messages"]) == 2
+    assert conversation.updated_at is not None
+    assert conversation.title == "Earlier question"
+
+
+@pytest.mark.asyncio
+async def test_failed_conversation_turn_does_not_persist_an_unanswered_user_message() -> None:
+    tenant_id, teammate_id, project_id, conversation_id, session_id = (uuid.uuid4() for _ in range(5))
+    teammate = SimpleNamespace(id=teammate_id, organization_id=uuid.uuid4(), name="Engineer")
+    conversation = SimpleNamespace(
+        id=conversation_id,
+        tenant_id=tenant_id,
+        teammate_id=teammate_id,
+        project_id=project_id,
+        session_id=session_id,
+        title="New conversation",
+        created_at=None,
+        updated_at=None,
+    )
+    query_result = MagicMock()
+    query_result.scalars.return_value.all.return_value = []
+    db = AsyncMock()
+    db.execute.return_value = query_result
+
+    with (
+        patch.object(teammate_routes, "require_tenant", return_value=tenant_id),
+        patch.object(teammate_routes, "require_org_membership", new_callable=AsyncMock),
+        patch.object(teammate_routes, "_load_teammate", new_callable=AsyncMock, return_value=teammate),
+        patch.object(teammate_routes, "_load_conversation", new_callable=AsyncMock, return_value=conversation),
+        patch.object(
+            teammate_routes,
+            "run_teammate",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("model unavailable"),
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="model unavailable"):
+            await teammate_routes.send_teammate_conversation_message(
+                teammate_id,
+                conversation_id,
+                teammate_routes.TeammateConversationMessageIn(content="Try this request"),
+                db,
+            )
+
+    db.add.assert_not_called()
+    db.rollback.assert_awaited_once()
+    assert conversation.title == "New conversation"
+    assert conversation.updated_at is None
 
 
 @pytest.mark.asyncio

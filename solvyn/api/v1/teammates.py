@@ -11,7 +11,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.agents.conversation_context import build_conversation_prompt, serialize_assistant_message
@@ -485,15 +485,11 @@ async def send_teammate_conversation_message(
     message_content = payload.content.strip()
     if not message_content:
         raise HTTPException(status_code=422, detail="Message cannot be blank")
-    user_message = Message(session_id=conversation.session_id, role="user", content=message_content)
-    db.add(user_message)
-    await db.flush()
     prompt = build_conversation_prompt(
         [(row.role, row.content) for row in prior_messages],
         teammate.name,
         message_content,
     )
-    conversation.title = conversation.title if prior_messages else payload.content.strip()[:120]
 
     try:
         output = await run_teammate(
@@ -526,11 +522,16 @@ async def send_teammate_conversation_message(
         await db.rollback()
         raise
 
+    user_message = Message(session_id=conversation.session_id, role="user", content=message_content)
     assistant_message = Message(
         session_id=conversation.session_id,
         role="assistant",
         content=serialize_assistant_message(output),
     )
+    if not prior_messages:
+        conversation.title = message_content[:120]
+    conversation.updated_at = func.now()
+    db.add(user_message)
     db.add(assistant_message)
     db.add(conversation)
     await db.commit()
