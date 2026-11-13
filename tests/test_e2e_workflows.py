@@ -1749,6 +1749,236 @@ async def test_cancel_abandoned_workflow_execution(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_workflow_cancellation_fences_handoffs_and_recovers_stale_request(client: AsyncClient) -> None:
+    """Cancellation must stop delegated workers, expire approval, and recover stale requests."""
+    import json
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import select, update
+
+    from solvyn.db.models import (
+        Approval,
+        ExecutionGraph,
+        Organization,
+        Project,
+        Session,
+        Task,
+        TaskHandoff,
+        TeammateProfile,
+        TeammateProjectAssignment,
+        TeammateStatus,
+        Tenant,
+    )
+    from solvyn.db.session import async_session_factory, bind_tenant_scope
+    from solvyn.workflows.executor import workflow_executor
+
+    execution_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    parent_task_id = uuid.uuid4()
+    running_task_id = uuid.uuid4()
+    waiting_task_id = uuid.uuid4()
+    running_handoff_id = uuid.uuid4()
+    waiting_handoff_id = uuid.uuid4()
+    running_handoff_lease = uuid.uuid4()
+    stale_execution_id = uuid.uuid4()
+    stale_session_id = uuid.uuid4()
+    stale_task_id = uuid.uuid4()
+    organization_id = uuid.uuid4()
+    project_id = uuid.uuid4()
+    teammate_id = uuid.uuid4()
+    execution_lease_id = uuid.uuid4()
+    async with async_session_factory() as db:
+        tenant = (await db.execute(select(Tenant).where(Tenant.slug == "test-tenant"))).scalar_one()
+        await bind_tenant_scope(db, tenant.id)
+        db.add_all(
+            [
+                Organization(
+                    id=organization_id,
+                    name="Cancellation Test Org",
+                    slug=f"cancel-{uuid.uuid4().hex[:12]}",
+                    tenant_id=tenant.id,
+                ),
+                Project(
+                    id=project_id,
+                    organization_id=organization_id,
+                    tenant_id=tenant.id,
+                    name="Cancellation Test Project",
+                    slug=f"cancel-{uuid.uuid4().hex[:12]}",
+                ),
+                TeammateProfile(
+                    id=teammate_id,
+                    organization_id=organization_id,
+                    tenant_id=tenant.id,
+                    name="Cancellation Test Teammate",
+                    role="Software Engineer",
+                    agent_type="backend-engineer",
+                    status=TeammateStatus.BUSY,
+                ),
+                Session(id=session_id, tenant_id=tenant.id, title="Handoff cancellation"),
+                ExecutionGraph(
+                    id=execution_id,
+                    session_id=session_id,
+                    status="running",
+                    graph_data=json.dumps(
+                        {
+                            "template": "feature",
+                            "inputs": {},
+                            "nodes": [{"id": str(parent_task_id), "status": "running"}],
+                            "edges": [],
+                        }
+                    ),
+                    lease_owner=execution_lease_id,
+                    lease_expires_at=datetime.now(UTC) + timedelta(seconds=60),
+                ),
+                Session(id=stale_session_id, tenant_id=tenant.id, title="Stale cancellation"),
+                ExecutionGraph(
+                    id=stale_execution_id,
+                    session_id=stale_session_id,
+                    status="cancelling",
+                    graph_data=json.dumps(
+                        {
+                            "template": "feature",
+                            "inputs": {},
+                            "nodes": [{"id": str(stale_task_id), "status": "waiting_approval"}],
+                            "edges": [],
+                        }
+                    ),
+                    lease_owner=uuid.uuid4(),
+                    lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+                ),
+            ]
+        )
+        await db.commit()
+        await bind_tenant_scope(db, tenant.id)
+        db.add_all(
+            [
+                Task(
+                    id=parent_task_id,
+                    tenant_id=tenant.id,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    node_id=str(parent_task_id),
+                    title="Parent task",
+                    status="running",
+                ),
+                Task(
+                    id=running_task_id,
+                    tenant_id=tenant.id,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    node_id=str(running_task_id),
+                    parent_task_id=parent_task_id,
+                    title="Running delegated task",
+                    status="running",
+                ),
+                Task(
+                    id=waiting_task_id,
+                    tenant_id=tenant.id,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    node_id=str(waiting_task_id),
+                    parent_task_id=parent_task_id,
+                    title="Approval-gated task",
+                    status="waiting_approval",
+                ),
+                Task(
+                    id=stale_task_id,
+                    tenant_id=tenant.id,
+                    session_id=stale_session_id,
+                    execution_id=stale_execution_id,
+                    node_id=str(stale_task_id),
+                    title="Stale cancellation task",
+                    status="waiting_approval",
+                ),
+            ]
+        )
+        await db.commit()
+        db.add_all(
+            [
+                TeammateProjectAssignment(teammate_id=teammate_id, project_id=project_id),
+                TaskHandoff(
+                    id=running_handoff_id,
+                    tenant_id=tenant.id,
+                    parent_task_id=parent_task_id,
+                    child_task_id=running_task_id,
+                    idempotency_key=uuid.uuid4(),
+                    teammate_id=teammate_id,
+                    project_id=project_id,
+                    delegated_from="Tech Lead",
+                    delegated_to="Software Engineer",
+                    reason="Implement a feature",
+                    input_data="{}",
+                    status="running",
+                    lease_owner=running_handoff_lease,
+                    lease_expires_at=datetime.now(UTC) + timedelta(seconds=60),
+                ),
+                TaskHandoff(
+                    id=waiting_handoff_id,
+                    tenant_id=tenant.id,
+                    parent_task_id=parent_task_id,
+                    child_task_id=waiting_task_id,
+                    idempotency_key=uuid.uuid4(),
+                    requires_approval=True,
+                    teammate_id=teammate_id,
+                    project_id=project_id,
+                    delegated_from="Tech Lead",
+                    delegated_to="Software Engineer",
+                    reason="Implement an approved feature",
+                    input_data="{}",
+                    status="waiting_approval",
+                ),
+                Approval(
+                    organization_id=organization_id,
+                    project_id=project_id,
+                    teammate_id=teammate_id,
+                    task_handoff_id=waiting_handoff_id,
+                    kind="plan",
+                    summary="Approve the delegated task",
+                    status="pending",
+                ),
+            ]
+        )
+        await db.commit()
+
+    response = await client.post(f"/api/v1/workflows/executions/{execution_id}/cancel")
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelling"
+
+    async with async_session_factory() as db:
+        tenant = (await db.execute(select(Tenant).where(Tenant.slug == "test-tenant"))).scalar_one()
+        await bind_tenant_scope(db, tenant.id)
+        handoffs = (
+            await db.execute(select(TaskHandoff).where(TaskHandoff.id.in_([running_handoff_id, waiting_handoff_id])))
+        ).scalars().all()
+        assert {handoff.status for handoff in handoffs} == {"cancelled"}
+        assert all(handoff.lease_owner is None and handoff.lease_expires_at is None for handoff in handoffs)
+        approval = (await db.execute(select(Approval).where(Approval.task_handoff_id == waiting_handoff_id))).scalar_one()
+        assert approval.status == "expired"
+        assert approval.decided_at is not None
+        late_finalize = await db.execute(
+            update(TaskHandoff)
+            .where(TaskHandoff.id == running_handoff_id, TaskHandoff.lease_owner == running_handoff_lease)
+            .values(status="completed")
+            .returning(TaskHandoff.id)
+        )
+        assert late_finalize.scalar_one_or_none() is None
+        tenant_id = tenant.id
+        await db.rollback()
+
+    await workflow_executor._mark_failed(str(execution_id), execution_lease_id, tenant_id)
+    running_task = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
+    assert running_task.status_code == 200
+    assert {row["status"] for row in running_task.json()["tasks"]} == {"cancelled"}
+
+    stale_response = await client.post(f"/api/v1/workflows/executions/{stale_execution_id}/cancel")
+    assert stale_response.status_code == 200
+    assert stale_response.json()["status"] == "cancelled"
+    stale_tasks = await client.get(f"/api/v1/workflows/executions/{stale_execution_id}/tasks")
+    assert stale_tasks.status_code == 200
+    assert stale_tasks.json()["tasks"][0]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
 async def test_feature_workflow_returns_resolvable_session_id(client: AsyncClient) -> None:
     """The session_id returned by the workflow must be queryable via observability."""
     response = await client.post(
