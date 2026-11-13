@@ -203,6 +203,7 @@ export interface MaintenanceTaskTarget {
 export interface TeammateInfo {
   id: string;
   organization_id: string;
+  project_ids: string[];
   name: string;
   role: string;
   description: string;

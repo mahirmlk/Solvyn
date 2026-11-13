@@ -12,6 +12,40 @@ from solvyn.db.models import Message
 
 
 @pytest.mark.asyncio
+async def test_list_teammates_includes_only_assigned_project_ids() -> None:
+    organization_id, teammate_id, project_id, other_project_id = (uuid.uuid4() for _ in range(4))
+    teammate = SimpleNamespace(
+        id=teammate_id,
+        organization_id=organization_id,
+        name="Engineer",
+        role="Software Engineer",
+        description="",
+        responsibilities="",
+        agent_type="backend-engineer",
+        is_enabled=True,
+        status="idle",
+        model_provider=None,
+        model_name=None,
+        max_tokens_per_run=None,
+        max_run_seconds=None,
+        created_at=None,
+        updated_at=None,
+    )
+    teammates_result = MagicMock()
+    teammates_result.scalars.return_value.all.return_value = [teammate]
+    assignments_result = MagicMock()
+    assignments_result.all.return_value = [(teammate_id, project_id)]
+    db = AsyncMock()
+    db.execute.side_effect = [teammates_result, assignments_result]
+
+    with patch.object(teammate_routes, "require_org_membership", new_callable=AsyncMock):
+        response = await teammate_routes.list_teammates(organization_id, db)
+
+    assert response["teammates"][0]["project_ids"] == [str(project_id)]
+    assert str(other_project_id) not in response["teammates"][0]["project_ids"]
+
+
+@pytest.mark.asyncio
 async def test_send_conversation_message_persists_turn_and_reuses_bound_session() -> None:
     tenant_id, teammate_id, project_id, conversation_id, session_id = (uuid.uuid4() for _ in range(5))
     teammate = SimpleNamespace(id=teammate_id, organization_id=uuid.uuid4(), name="Engineer")

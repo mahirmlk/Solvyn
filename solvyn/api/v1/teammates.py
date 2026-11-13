@@ -71,10 +71,11 @@ async def _load_teammate(db: AsyncSession, teammate_id: uuid.UUID, tenant_id: uu
     return teammate
 
 
-def _teammate_dict(t: TeammateProfile) -> dict[str, object]:
+def _teammate_dict(t: TeammateProfile, project_ids: list[uuid.UUID] | None = None) -> dict[str, object]:
     return {
         "id": str(t.id),
         "organization_id": str(t.organization_id),
+        "project_ids": [str(project_id) for project_id in project_ids or []],
         "name": t.name,
         "role": t.role,
         "description": t.description or "",
@@ -181,11 +182,29 @@ async def _assigned_project(
     return project
 
 
+async def _teammate_project_ids(db: AsyncSession, teammate_id: uuid.UUID) -> list[uuid.UUID]:
+    result = await db.execute(
+        select(TeammateProjectAssignment.project_id)
+        .where(TeammateProjectAssignment.teammate_id == teammate_id)
+        .order_by(TeammateProjectAssignment.project_id)
+    )
+    return list(result.scalars().all())
+
+
 @router.get("/organizations/{org_id}/teammates", summary="List teammates in an organization")
 async def list_teammates(org_id: uuid.UUID, db: AsyncSession = Depends(get_session)) -> dict[str, object]:
     await require_org_membership(db, org_id, roles=ANY_ROLE)
     result = await db.execute(select(TeammateProfile).where(TeammateProfile.organization_id == org_id).order_by(TeammateProfile.name))
-    items = [_teammate_dict(t) for t in result.scalars().all()]
+    teammates = result.scalars().all()
+    assignment_result = await db.execute(
+        select(TeammateProjectAssignment.teammate_id, TeammateProjectAssignment.project_id)
+        .join(TeammateProfile, TeammateProfile.id == TeammateProjectAssignment.teammate_id)
+        .where(TeammateProfile.organization_id == org_id)
+    )
+    projects_by_teammate: dict[uuid.UUID, list[uuid.UUID]] = {}
+    for teammate_id, project_id in assignment_result.all():
+        projects_by_teammate.setdefault(teammate_id, []).append(project_id)
+    items = [_teammate_dict(t, projects_by_teammate.get(t.id, [])) for t in teammates]
     return {"teammates": items, "count": len(items)}
 
 
@@ -248,7 +267,7 @@ async def create_teammate(payload: TeammateCreate, db: AsyncSession = Depends(ge
 
     await db.commit()
     await db.refresh(teammate)
-    return _teammate_dict(teammate)
+    return _teammate_dict(teammate, [project.id for project in project_rows])
 
 
 @router.get("/teammates/{teammate_id}", summary="Get a teammate with permissions")
@@ -257,7 +276,8 @@ async def get_teammate(teammate_id: uuid.UUID, db: AsyncSession = Depends(get_se
     teammate = await _load_teammate(db, teammate_id, tenant_id)
     await require_org_membership(db, teammate.organization_id, roles=ANY_ROLE)
     perms = (await db.execute(select(TeammatePermission).where(TeammatePermission.teammate_id == teammate_id))).scalars().all()
-    out = _teammate_dict(teammate)
+    project_ids = await _teammate_project_ids(db, teammate_id)
+    out = _teammate_dict(teammate, project_ids)
     out["permissions"] = [p.permission for p in perms if p.granted]
     return out
 
@@ -302,7 +322,7 @@ async def update_teammate(teammate_id: uuid.UUID, payload: TeammateUpdate, db: A
     db.add(teammate)
     await db.commit()
     await db.refresh(teammate)
-    return _teammate_dict(teammate)
+    return _teammate_dict(teammate, await _teammate_project_ids(db, teammate_id))
 
 
 @router.delete("/teammates/{teammate_id}", summary="Disable a teammate (soft delete)")

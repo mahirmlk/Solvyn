@@ -189,7 +189,14 @@ export default function TeammatesPage() {
                   <div className={`empty-state ${styles.empty}`}>No teammates in this organization yet.</div>
                 ) : (
                   <div className={styles.projectGrid}>
-                    {teammates.map((teammate) => (
+                    {teammates.map((teammate) => {
+                      const assignedProjectIds = new Set(teammate.project_ids);
+                      const assignedProjects = groups.find((group) => group.organization.id === teammate.organization_id)
+                        ?.projects.filter((project) => assignedProjectIds.has(project.id)) ?? [];
+                      const selectedProjectId = assignedProjectIds.has(runProjectIds[teammate.id] || "")
+                        ? runProjectIds[teammate.id]
+                        : "";
+                      return (
                       <article className={`${styles.projectCard} pearl-pane`} key={teammate.id}>
                         <div className={styles.cardTop}>
                           <span className={`status-pill ${teammate.is_enabled ? "success" : ""}`}>{teammate.is_enabled ? teammate.status : "Disabled"}</span>
@@ -211,23 +218,25 @@ export default function TeammatesPage() {
                                 <span className="field-label">Project assigned to this teammate</span>
                                 <select
                                   className="editorial-input"
+                                  disabled={assignedProjects.length === 0}
                                   onChange={(event) => setRunProjectIds((current) => ({ ...current, [teammate.id]: event.target.value }))}
-                                  value={runProjectIds[teammate.id] || ""}
+                                  value={selectedProjectId}
                                 >
-                                  <option value="">Choose a project</option>
-                                  {groups.find((group) => group.organization.id === teammate.organization_id)?.projects.map((project) => (
+                                  <option value="">{assignedProjects.length ? "Choose a project" : "No assigned projects"}</option>
+                                  {assignedProjects.map((project) => (
                                     <option key={project.id} value={project.id}>{project.name}</option>
                                   ))}
                                 </select>
                               </label>
-                              {runProjectIds[teammate.id]
-                                ? <TeammateConversation key={`${teammate.id}:${runProjectIds[teammate.id]}`} teammate={teammate} projectId={runProjectIds[teammate.id]} />
-                                : <p className="copy-muted">Choose an assigned project to open or start a saved conversation.</p>}
+                              {selectedProjectId
+                                ? <TeammateConversation key={`${teammate.id}:${selectedProjectId}`} teammate={teammate} projectId={selectedProjectId} />
+                                : <p className="copy-muted">{assignedProjects.length ? "Choose an assigned project to open or start a saved conversation." : "Assign a project to this teammate to start a conversation."}</p>}
                             </div>
                           </details>
                         )}
                       </article>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </section>
