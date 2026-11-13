@@ -112,6 +112,52 @@ async def test_failed_conversation_turn_does_not_persist_an_unanswered_user_mess
 
 
 @pytest.mark.asyncio
+async def test_successful_first_turn_sets_conversation_title_after_model_reply() -> None:
+    tenant_id, teammate_id, project_id, conversation_id, session_id = (uuid.uuid4() for _ in range(5))
+    teammate = SimpleNamespace(id=teammate_id, organization_id=uuid.uuid4(), name="Engineer")
+    conversation = SimpleNamespace(
+        id=conversation_id,
+        tenant_id=tenant_id,
+        teammate_id=teammate_id,
+        project_id=project_id,
+        session_id=session_id,
+        title="New conversation",
+        created_at=None,
+        updated_at=None,
+    )
+    query_result = MagicMock()
+    query_result.scalars.return_value.all.return_value = []
+    db = AsyncMock()
+    db.execute.return_value = query_result
+
+    async def refresh_record(record: object) -> None:
+        if record is conversation:
+            conversation.updated_at = datetime.now(UTC)
+
+    db.refresh.side_effect = refresh_record
+    output = {"response": "First answer"}
+    content = "Investigate deployment failures in production"
+
+    with (
+        patch.object(teammate_routes, "require_tenant", return_value=tenant_id),
+        patch.object(teammate_routes, "require_org_membership", new_callable=AsyncMock),
+        patch.object(teammate_routes, "_load_teammate", new_callable=AsyncMock, return_value=teammate),
+        patch.object(teammate_routes, "_load_conversation", new_callable=AsyncMock, return_value=conversation),
+        patch.object(teammate_routes, "run_teammate", new_callable=AsyncMock, return_value=output),
+    ):
+        response = await teammate_routes.send_teammate_conversation_message(
+            teammate_id,
+            conversation_id,
+            teammate_routes.TeammateConversationMessageIn(content=content),
+            db,
+        )
+
+    assert conversation.title == content
+    assert conversation.updated_at is not None
+    assert response["conversation"]["title"] == content
+
+
+@pytest.mark.asyncio
 async def test_send_conversation_message_rejects_unowned_conversation_before_model_call() -> None:
     tenant_id, teammate_id, conversation_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     teammate = SimpleNamespace(id=teammate_id, organization_id=uuid.uuid4(), name="Engineer")
