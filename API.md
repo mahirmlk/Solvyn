@@ -640,6 +640,10 @@ Inspect the default branch. Returns repository metadata, revision SHA, file coun
 
 Search file paths case-insensitively. This endpoint searches paths only; it does not search file contents.
 
+### `GET /api/v1/repositories/{repository_id}/content/search?query=...`
+
+Search file contents using a case-insensitive literal query (not a regular expression). The default branch is resolved to a commit SHA before the tree and file reads; the response includes that revision and the Git tree SHA. The scan considers a deterministic, path-sorted set of up to 25 regular text/code blobs with supported extensions, reads at most 64 KB per blob and 1 MB total, returns at most 20 matches with 500-character snippets, caps serialized output at 16 KB, and has a 45-second deadline. Unsupported extensions are outside the search scope. Oversized, binary, and invalid UTF-8 candidate blobs are skipped; `truncated` indicates incomplete coverage from skipped candidate blobs or candidate, match, output, or byte limits. `candidate_count`, `files_scanned`, and `fetched_bytes` describe the bounded scan. A request exceeding its deadline returns HTTP 504. `content_trust` is `untrusted_repository_data`. Requires access to the project and, for a private repository, the active organization GitHub token linked to that repository. GitHub rate limits map to HTTP 429.
+
 ### `GET /api/v1/repositories/{repository_id}/branches`
 
 List up to the first 100 branches and their commit SHAs. When `possibly_truncated` is true, the repository has at least 100 branches and the response may omit later branches.

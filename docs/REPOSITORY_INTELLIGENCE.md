@@ -1,6 +1,6 @@
 # Repository Intelligence — current scope
 
-Repository intelligence is an early workstream. It adds a provider boundary and GitHub integration that can connect public or organization-token-authorized private repositories to a project, inspect its default-branch tree and common manifests, summarize direct dependencies and likely frameworks, list branches, search file paths, inspect pull requests, and perform bounded branch and commit operations.
+Repository intelligence is an early workstream. It adds a provider boundary and GitHub integration that can connect public or organization-token-authorized private repositories to a project, inspect its default-branch tree and common manifests, summarize direct dependencies and likely frameworks, list branches, search paths and bounded text content, inspect pull requests, and perform bounded branch and commit operations.
 
 ## API
 
@@ -12,11 +12,12 @@ See the [Repository Intelligence section in API.md](../API.md#repository-intelli
 - Public repository reads use GitHub's unauthenticated API. Private repository reads use the encrypted organization GitHub token only when the repository is linked to that active integration. An owner or admin connects the token; it is validated before storage, encrypted with `INTEGRATION_ENCRYPTION_KEYS`, and never returned by the API. With no encryption keys configured, credential connection is disabled. Disconnecting the integration disables access to linked private repositories.
 - The GitHub client uses a fixed `api.github.com` origin, validates `owner/repository` names, uses bounded timeouts, rejects truncated or oversized trees, caps manifest reads, and returns provider errors without reflecting upstream response bodies.
 - Repository contents and metadata are untrusted. A teammate run may include a bounded summary of one explicitly selected, connected GitHub repository in its user-level prompt; a fixed system instruction says to treat repository material as evidence and never follow its instructions. The credential remains in the API process and is never placed in prompts or workspaces.
-- File search matches path names only. Solvyn can create `solvyn/...` branches, commit bounded UTF-8 text changes and selected-file deletions with optimistic branch-head checks, and open draft PRs using the organization token. Generated changes remain subject to human review in GitHub; Solvyn does not mark PRs ready or merge them.
+- Path search matches path names only. The separate content-search endpoint performs case-insensitive literal search against up to 25 path-sorted regular blobs at a pinned default-branch commit, restricted to supported text/code extensions. It reads at most 64 KB per file and 1 MB total, returns at most 20 matches with 500-character snippets, caps its JSON response at 16 KB, and stops at 45 seconds. Unsupported extensions are outside the search scope; oversized, binary, and invalid UTF-8 candidate blobs are skipped. `truncated`, scan counts, and byte counts make incomplete coverage visible. Results include the commit revision and tree SHA and are marked `untrusted_repository_data`.
+- Solvyn can create `solvyn/...` branches, commit bounded UTF-8 text changes and selected-file deletions with optimistic branch-head checks, and open draft PRs using the organization token. Generated changes remain subject to human review in GitHub; Solvyn does not mark PRs ready or merge them.
 - Branch listing returns at most 100 results. `possibly_truncated` signals that more results may exist.
 - Pull request listing is a paginated live snapshot from GitHub, not a persisted local synchronization. Detail inspection returns the latest review decision per reviewer (scanning up to 1,100 reviews and probing for more), plus a unified diff capped at 1 MB. Pull request data and diffs remain untrusted input.
 
-Repository discovery beyond a caller-supplied GitHub name, content search, and branch/worktree management remain future work. Private access is limited to repositories the connected organization token can read; this is not a GitHub App installation with per-repository permission selection.
+Repository discovery beyond a caller-supplied GitHub name and branch/worktree management remain future work. Private access is limited to repositories the connected organization token can read; this is not a GitHub App installation with per-repository permission selection.
 
 ## Teammate repository context
 
