@@ -149,7 +149,9 @@ async def test_inspect_pins_tree_and_manifests_to_requested_revision() -> None:
                 200,
                 json={"id": 123, "full_name": "octo/example", "default_branch": "main", "private": False},
             )
-        if request.url.path == f"/repos/octo/example/git/trees/{revision}":
+        if request.url.path == f"/repos/octo/example/git/commits/{revision}":
+            return httpx.Response(200, json={"tree": {"sha": "d" * 40}})
+        if request.url.path == f"/repos/octo/example/git/trees/{'d' * 40}":
             return httpx.Response(
                 200,
                 json={"sha": "d" * 40, "truncated": False, "tree": [{"path": "README.md", "type": "blob", "size": 6}]},
@@ -164,11 +166,13 @@ async def test_inspect_pins_tree_and_manifests_to_requested_revision() -> None:
         inspection = await github.inspect("octo/example", revision)
     await http.aclose()
 
-    assert inspection["revision"] == "d" * 40
+    assert inspection["revision"] == revision
+    assert inspection["tree_sha"] == "d" * 40
     assert inspection["manifests"]["README.md"] == "pinned"
     assert requests == [
         ("/repos/octo/example", {}),
-        (f"/repos/octo/example/git/trees/{revision}", {"recursive": "1"}),
+        (f"/repos/octo/example/git/commits/{revision}", {}),
+        (f"/repos/octo/example/git/trees/{'d' * 40}", {"recursive": "1"}),
         ("/repos/octo/example/contents/README.md", {"ref": revision}),
     ]
 
