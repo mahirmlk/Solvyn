@@ -11,6 +11,7 @@ can be selected with ``pytest -m e2e``.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta
@@ -315,8 +316,10 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
         )
         task = (await db.execute(select(Task).where(Task.id == task_id))).scalar_one()
         task.parent_task_id = parent_id
+        handoff_id = uuid.uuid4()
         db.add(
             TaskHandoff(
+                id=handoff_id,
                 tenant_id=tenant.id,
                 parent_task_id=parent_id,
                 child_task_id=task_id,
@@ -348,8 +351,12 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
         async def branch_commit(self, _full_name: str, _branch: str) -> str:
             return source_sha
 
-        async def repository_tree(self, _full_name: str, sha: str) -> tuple[str, list[dict[str, Any]]]:
-            assert sha == source_sha
+        async def commit_tree_sha(self, _full_name: str, revision: str) -> str:
+            assert revision == source_sha
+            return source_tree_sha
+
+        async def repository_tree(self, _full_name: str, tree_sha: str) -> tuple[str, list[dict[str, Any]]]:
+            assert tree_sha == source_tree_sha
             return source_tree_sha, [
                 {"path": "src/health.py", "type": "blob", "mode": "100644", "size": len(source_text)}
             ]
@@ -473,8 +480,12 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
         async def repository_metadata(self, _full_name: str) -> dict[str, Any]:
             return {"default_branch": "main", "private": False}
 
-        async def repository_tree(self, _full_name: str, sha: str) -> tuple[str, list[dict[str, Any]]]:
-            assert sha == source_sha
+        async def commit_tree_sha(self, _full_name: str, commit_sha: str) -> str:
+            assert commit_sha == source_sha
+            return source_tree_sha
+
+        async def repository_tree(self, _full_name: str, tree_sha: str) -> tuple[str, list[dict[str, Any]]]:
+            assert tree_sha == source_tree_sha
             import hashlib
 
             git_blob = hashlib.sha1(b"blob " + str(len(source_text.encode())).encode() + b"\0" + source_text.encode()).hexdigest()
@@ -633,6 +644,7 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
     assert evidence.json()["evidence"]["files"][0]["path"] == "src/health.py"
     assert evidence.json()["evidence"]["files"][0]["content"] == "def health():\n    return {'status': 'ready'}\n"
     assert "ready" in evidence.json()["evidence"]["diffs"][0]["diff"]
+
 
 
 @pytest.mark.asyncio
@@ -1483,7 +1495,16 @@ async def test_feature_workflow_runs_to_completion(client: AsyncClient) -> None:
         f"/api/v1/workflows/executions/{data['execution_id']}/tasks/{pending_handoff['child_task_id']}/activity"
     )
     assert task_activity.status_code == 200
-    outcome_events = [event for event in task_activity.json()["activity"] if event["type"] == "task_outcome"]
+    activity_events = task_activity.json()["activity"]
+    approval_events = [event for event in activity_events if event["type"] == "approval"]
+    assert len(approval_events) == 1
+    assert approval_events[0]["status"] == "approved"
+    assert approval_events[0]["details"]["task_id"] == pending_handoff["child_task_id"]
+    handoff_events = [event for event in activity_events if event["type"] == "handoff"]
+    assert len(handoff_events) == 1
+    assert handoff_events[0]["status"] == "completed"
+    assert handoff_events[0]["details"]["child_task_id"] == pending_handoff["child_task_id"]
+    outcome_events = [event for event in activity_events if event["type"] == "task_outcome"]
     assert len(outcome_events) == 1
     assert outcome_events[0]["details"]["outcome"] == "success"
     assert len(outcome_events[0]["details"]["result_sha256"]) == 64
@@ -2255,3 +2276,215 @@ def test_websocket_rejects_invalid_api_key() -> None:
                 ):
                     pass
     assert exc_info.value.code == 4001
+
+
+@pytest.mark.asyncio
+async def test_saved_conversation_conversion_gates_repository_workspace_until_approval(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """A confirmed conversation task stays gated until its handoff is approved."""
+    from sqlalchemy import select
+
+    from solvyn.api.v1 import teammates as teammate_routes
+    from solvyn.api.v1 import verification as verification_api
+    from solvyn.config import settings
+    from solvyn.db.models import (
+        Organization,
+        OrganizationMembership,
+        PermissionLevel,
+        Project,
+        Repository,
+        TeammatePermission,
+        TeammateProfile,
+        TeammateProjectAssignment,
+        TeammateStatus,
+        Tenant,
+        User,
+    )
+    from solvyn.db.session import async_session_factory, bind_tenant_scope
+    from solvyn.identity.security import create_access_token
+
+    workspace_root = str(tmp_path / "conversation-workspaces")
+    monkeypatch.setattr(settings, "sandbox_workspace_root", workspace_root)
+    monkeypatch.setattr(verification_api.settings, "sandbox_workspace_root", workspace_root)
+
+    user_id, organization_id, project_id, teammate_id, repository_id = (uuid.uuid4() for _ in range(5))
+    source_sha = "a" * 40
+    source_tree_sha = "b" * 40
+    source_text = "def status():\n    return 'ok'\n"
+    async with async_session_factory() as db:
+        tenant = (await db.execute(select(Tenant).where(Tenant.slug == "test-tenant"))).scalar_one()
+        await bind_tenant_scope(db, tenant.id)
+        db.add_all(
+            [
+                Organization(
+                    id=organization_id,
+                    name="Conversation Acceptance",
+                    slug=f"conversation-acceptance-{uuid.uuid4().hex[:10]}",
+                    tenant_id=tenant.id,
+                ),
+                Project(
+                    id=project_id,
+                    organization_id=organization_id,
+                    tenant_id=tenant.id,
+                    name="Conversation Project",
+                    slug=f"conversation-project-{uuid.uuid4().hex[:10]}",
+                ),
+            ]
+        )
+        # Repository RLS policies check the persisted project row, so commit the
+        # project before inserting its repository in the next transaction.
+        await db.flush()
+        await db.commit()
+        await bind_tenant_scope(db, tenant.id)
+        db.add_all(
+            [
+                TeammateProfile(
+                    id=teammate_id,
+                    organization_id=organization_id,
+                    tenant_id=tenant.id,
+                    name="Conversation Engineer",
+                    role="Software Engineer",
+                    agent_type="backend-engineer",
+                    status=TeammateStatus.IDLE,
+                ),
+                Repository(
+                    id=repository_id,
+                    project_id=project_id,
+                    full_name="solvyn/conversation-acceptance",
+                    provider="github",
+                    default_branch="main",
+                    url="https://github.com/solvyn/conversation-acceptance",
+                ),
+                User(id=user_id, email=f"conversation-{uuid.uuid4().hex[:10]}@example.com", password_hash="test-hash"),
+                OrganizationMembership(user_id=user_id, organization_id=organization_id, role="owner"),
+                TeammateProjectAssignment(teammate_id=teammate_id, project_id=project_id),
+                TeammatePermission(teammate_id=teammate_id, permission=PermissionLevel.READ_ONLY.value, granted=True),
+                TeammatePermission(teammate_id=teammate_id, permission=PermissionLevel.MODIFY_FILES.value, granted=True),
+                TeammatePermission(teammate_id=teammate_id, permission=PermissionLevel.EXECUTE_COMMANDS.value, granted=True),
+            ]
+        )
+        await db.commit()
+
+    client.headers["Authorization"] = f"Bearer {create_access_token(subject=str(user_id))}"
+    client.headers["X-Tenant-Slug"] = "test-tenant"
+    monkeypatch.setattr(
+        teammate_routes,
+        "run_teammate",
+        AsyncMock(return_value={"summary": "The connected project has a status endpoint."}),
+    )
+
+    conversation_response = await client.post(
+        f"/api/v1/teammates/{teammate_id}/conversations",
+        json={"project_id": str(project_id)},
+    )
+    assert conversation_response.status_code == 201, conversation_response.text
+    conversation_id = conversation_response.json()["id"]
+    message_response = await client.post(
+        f"/api/v1/teammates/{teammate_id}/conversations/{conversation_id}/messages",
+        json={"content": "Please inspect the status endpoint and make it return ready."},
+    )
+    assert message_response.status_code == 200, message_response.text
+    assert message_response.json()["messages"][0]["role"] == "user"
+    history_response = await client.get(f"/api/v1/teammates/{teammate_id}/conversations/{conversation_id}/messages")
+    assert history_response.status_code == 200, history_response.text
+    history_by_role = {item["role"]: item["content"] for item in history_response.json()["messages"]}
+    assert history_by_role["user"] == "Please inspect the status endpoint and make it return ready."
+    assert json.loads(history_by_role["assistant"]) == {"summary": "The connected project has a status endpoint."}
+
+    task_response = await client.post(
+        f"/api/v1/teammates/{teammate_id}/conversations/{conversation_id}/task",
+        json={
+            "confirmed": True,
+            "title": "Update status endpoint",
+            "description": "Change the connected project's status endpoint to return ready.",
+            "acceptance_criteria": ["The endpoint returns ready", "The change is verified"],
+        },
+    )
+    assert task_response.status_code == 201, task_response.text
+    task = task_response.json()["task"]
+    assert task["status"] == "waiting_approval"
+    assert task["handoff_status"] == "waiting_approval"
+    assert task["approval_status"] == "pending"
+    assert task["confirmed_details"]["acceptance_criteria"] == [
+        "The endpoint returns ready",
+        "The change is verified",
+    ]
+
+    class FakeRepositoryProvider:
+        async def __aenter__(self) -> FakeRepositoryProvider:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def repository_metadata(self, _full_name: str) -> dict[str, Any]:
+            return {"default_branch": "main", "private": False}
+
+        async def branch_commit(self, _full_name: str, _branch: str) -> str:
+            return source_sha
+
+        async def commit_tree_sha(self, _full_name: str, commit_sha: str) -> str:
+            assert commit_sha == source_sha
+            return source_tree_sha
+
+        async def repository_tree(self, _full_name: str, tree_sha: str) -> tuple[str, list[dict[str, Any]]]:
+            assert tree_sha == source_tree_sha
+            return source_tree_sha, [
+                {"path": "src/status.py", "type": "blob", "mode": "100644", "size": len(source_text)}
+            ]
+
+        async def text_file(self, _full_name: str, _path: str, sha: str, *, max_bytes: int) -> str:
+            assert sha == source_sha
+            assert max_bytes >= len(source_text)
+            return source_text
+
+    monkeypatch.setattr(
+        verification_api,
+        "get_authorized_repository_provider",
+        AsyncMock(return_value=FakeRepositoryProvider()),
+    )
+    workspace_url = f"/api/v1/workflows/executions/{task['execution_id']}/tasks/{task['task_id']}/workspace"
+    workspace_payload = {"repository_id": str(repository_id), "repository_paths": ["src/status.py"]}
+    blocked_workspace = await client.post(workspace_url, json=workspace_payload)
+    assert blocked_workspace.status_code == 409
+    assert blocked_workspace.json()["detail"] == "Task handoff is not approved for workspace access"
+
+    approval_response = await client.post(
+        f"/api/v1/approvals/{task['approval_id']}/approve",
+        json={"note": "Approved the confirmed repository task"},
+    )
+    assert approval_response.status_code == 200, approval_response.text
+    assert approval_response.json()["status"] == "approved"
+
+    workspace_response = await client.post(workspace_url, json=workspace_payload)
+    assert workspace_response.status_code == 201, workspace_response.text
+    assert workspace_response.json()["task_id"] == task["task_id"]
+    assert workspace_response.json()["source_commit_sha"] == source_sha
+    assert workspace_response.json()["source_paths"] == ["src/status.py"]
+
+    from solvyn.agents import teammate_runtime
+
+    async def complete_confirmed_teammate_task(*_args: Any, **kwargs: Any) -> dict[str, str]:
+        assert kwargs["task_id"] == uuid.UUID(task["task_id"])
+        assert kwargs["project_id"] == project_id
+        return {"summary": "Reviewed the assigned status endpoint change."}
+
+    monkeypatch.setattr(teammate_runtime, "run_teammate", complete_confirmed_teammate_task)
+    resumed_handoff = await client.post(
+        f"/api/v1/workflows/executions/{task['execution_id']}/tasks/{task['root_task_id']}"
+        f"/handoffs/{task['handoff_id']}/resume"
+    )
+    assert resumed_handoff.status_code == 200, resumed_handoff.text
+    assert resumed_handoff.json()["handoff_id"] == task["handoff_id"]
+    task_snapshot = await client.get(f"/api/v1/workflows/executions/{task['execution_id']}/tasks")
+    assert task_snapshot.status_code == 200, task_snapshot.text
+    root_task = next(row for row in task_snapshot.json()["tasks"] if row["task_id"] == task["root_task_id"])
+    assert root_task["input"] == {"text": task["confirmed_details"]["description"]}
+    completed_handoff = next(
+        row for row in task_snapshot.json()["handoffs"] if row["handoff_id"] == task["handoff_id"]
+    )
+    assert completed_handoff["status"] == "completed"
+    assert completed_handoff["output"] is not None

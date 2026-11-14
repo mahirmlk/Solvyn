@@ -34,6 +34,7 @@ from solvyn.db.models import (
     TaskDependency,
     TaskHandoff,
     TaskWorkspace,
+    TeammateConversation,
     TeammateProfile,
     TeammateProjectAssignment,
     VerificationRun,
@@ -45,6 +46,7 @@ from solvyn.db.session import async_session_factory, bind_tenant_scope, get_sess
 from solvyn.multi_tenant.middleware import tenant_context
 from solvyn.proactive import task_assignment_event
 from solvyn.task_results import result_metadata
+from solvyn.workflows.conversation_tasks import conversation_handoff_idempotency_key, sync_conversation_task_state
 from solvyn.workflows.executor import WorkflowExecutionTimeoutError, workflow_executor
 from solvyn.workflows.task_completion import refresh_task_completion_state
 from solvyn.workflows.task_generator import TaskGenerator
@@ -180,6 +182,10 @@ async def _execute_task_handoff(
         .where(Task.id == child.id, Task.tenant_id == tenant_id)
         .values(status="running", error=None, attempt_count=Task.attempt_count + 1, started_at=func.now())
     )
+    child.status = "running"
+    child.error = None
+    child.completed_at = None
+    await sync_conversation_task_state(db, child)
     await db.commit()
 
     from solvyn.agents.teammate_runtime import TeammateRunConflictError, run_teammate
@@ -228,6 +234,9 @@ async def _execute_task_handoff(
             .where(Task.id == child.id, Task.tenant_id == tenant_id)
             .values(status="pending", error=None)
         )
+        child.status = "pending"
+        child.error = None
+        await sync_conversation_task_state(db, child)
         await db.commit()
         raise HandoffConflictError("Teammate is already running; retry this handoff") from exc
     except asyncio.CancelledError:
@@ -243,6 +252,8 @@ async def _execute_task_handoff(
                 .where(Task.id == child.id, Task.tenant_id == tenant_id)
                 .values(status="pending")
             )
+            child.status = "pending"
+            await sync_conversation_task_state(db, child)
             await db.commit()
         else:
             await db.rollback()
@@ -270,6 +281,11 @@ async def _execute_task_handoff(
                 completed_at=func.now(),
             )
         )
+        child.status = "failed"
+        child.error = str(exc)
+        child.result_summary = "The assigned teammate failed during execution."
+        child.completed_at = datetime.now(UTC)
+        await sync_conversation_task_state(db, child)
         await db.commit()
         return {"handoff_id": str(handoff.id), "task_id": str(child.id), "status": "failed", "error": str(exc)}
 
@@ -345,6 +361,14 @@ class TaskHandoffRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=2000)
     input_data: dict[str, Any] = Field(default_factory=dict)
     requires_approval: bool = False
+    acceptance_criteria: list[str] | None = Field(default=None, max_length=20)
+
+
+def _stage_handoff_acceptance_criteria(db: AsyncSession, child: Task, tenant_id: uuid.UUID, criteria: list[str]) -> None:
+    """Stage review gates in the same transaction as the task and approval."""
+    child.acceptance_criteria_defined = True
+    db.add(child)
+    db.add_all(TaskAcceptanceCriterion(tenant_id=tenant_id, task_id=child.id, text=criterion) for criterion in criteria)
 
 
 class WorkflowScheduleRequest(BaseModel):
@@ -621,6 +645,15 @@ async def cancel_workflow_execution(execution_id: uuid.UUID) -> dict[str, str]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _task_input_from_description(description: str | None) -> Any:
+    if not description:
+        return {}
+    try:
+        return json.loads(description)
+    except json.JSONDecodeError:
+        return {"text": description}
+
+
 @router.get("/executions/{execution_id}/tasks", summary="List durable tasks for a workflow execution")
 async def list_workflow_execution_tasks(
     execution_id: uuid.UUID,
@@ -739,7 +772,7 @@ async def list_workflow_execution_tasks(
                 "attempt_count": task.attempt_count,
                 "max_attempts": task.max_attempts,
                 "dependencies": depends_on.get(task.id, []),
-                "input": json.loads(task.description) if task.description else {},
+                "input": _task_input_from_description(task.description),
                 "result": json.loads(task.result) if task.result else None,
                 "error": task.error,
                 "scheduled_at": task.scheduled_at.isoformat() if task.scheduled_at else None,
@@ -841,6 +874,27 @@ async def create_task_handoff(
     ).scalar_one_or_none()
     if parent is None:
         raise HTTPException(status_code=404, detail="Workflow task not found")
+    conversation_id = (
+        await db.execute(
+            select(TeammateConversation.id).where(
+                TeammateConversation.tenant_id == tenant_id,
+                TeammateConversation.session_id == parent.session_id,
+                TeammateConversation.root_task_id == parent.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if conversation_id is not None and payload.idempotency_key != conversation_handoff_idempotency_key(tenant_id, conversation_id):
+        raise HTTPException(status_code=409, detail="Conversation task roots only accept their confirmed handoff")
+    handoff_acceptance_criteria = payload.acceptance_criteria
+    if handoff_acceptance_criteria is not None:
+        handoff_acceptance_criteria = [criterion.strip() for criterion in handoff_acceptance_criteria]
+        if (
+            not payload.requires_approval
+            or not handoff_acceptance_criteria
+            or any(not criterion or len(criterion) > 2_000 for criterion in handoff_acceptance_criteria)
+            or len({criterion.casefold() for criterion in handoff_acceptance_criteria}) != len(handoff_acceptance_criteria)
+        ):
+            raise HTTPException(status_code=422, detail="Approval-gated handoff criteria must be non-empty, unique, and at most 2000 characters")
     input_json = json.dumps(payload.input_data)
     if len(input_json.encode("utf-8")) > _MAX_HANDOFF_INPUT_BYTES:
         raise HTTPException(status_code=413, detail="Handoff input exceeds the 24 KB limit")
@@ -978,6 +1032,7 @@ async def create_task_handoff(
                                 "handoff_id": str(handoff.id),
                                 "delegated_to": teammate.agent_type,
                                 "input": payload.input_data,
+                                "acceptance_criteria": handoff_acceptance_criteria or [],
                             }
                         ),
                         requested_by=parent.assigned_agent or "workflow",
@@ -992,6 +1047,9 @@ async def create_task_handoff(
                         task=child,
                     )
                 )
+            if handoff_acceptance_criteria is not None:
+                _stage_handoff_acceptance_criteria(db, child, tenant_id, handoff_acceptance_criteria)
+            await sync_conversation_task_state(db, child)
             await db.commit()
         except IntegrityError:
             await db.rollback()
@@ -1045,6 +1103,28 @@ async def create_task_handoff(
             "approval_id": str(approval.id) if approval else None,
             "approval_status": approval.status if approval else "pending",
         }
+
+    if conversation_id is not None and handoff.idempotency_key == conversation_handoff_idempotency_key(tenant_id, conversation_id):
+        saved_criteria = json.loads(
+            (await db.execute(select(ExecutionGraphModel.graph_data).where(ExecutionGraphModel.id == parent.execution_id))).scalar_one()
+        ).get("inputs", {}).get("acceptance_criteria", [])
+        persisted_criteria = (
+            await db.execute(
+                select(TaskAcceptanceCriterion.text).where(
+                    TaskAcceptanceCriterion.tenant_id == tenant_id,
+                    TaskAcceptanceCriterion.task_id == child.id,
+                )
+            )
+        ).scalars().all()
+        if (
+            not child.acceptance_criteria_defined
+            or not saved_criteria
+            or set(persisted_criteria) != set(saved_criteria)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Conversation task acceptance gates are incomplete; retry the same conversation task conversion before starting",
+            )
 
     try:
         await bind_tenant_scope(db, tenant_id)

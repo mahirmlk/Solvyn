@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from solvyn.config import settings
 from solvyn.db.models import Task, TaskAcceptanceCriterion, TaskHandoff, TaskWorkspace, VerificationRun
 from solvyn.sandbox.workspaces import WorkspaceError, WorkspaceManager
+from solvyn.workflows.conversation_tasks import sync_conversation_task_state
 
 
 async def refresh_task_completion_state(
@@ -125,6 +126,7 @@ async def refresh_task_completion_state(
     else:
         task.status = "review_required"
         task.completed_at = None
+    await sync_conversation_task_state(db, task)
     return task.status
 
 

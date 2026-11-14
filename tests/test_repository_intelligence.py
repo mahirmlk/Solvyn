@@ -724,3 +724,65 @@ async def test_provider_maps_explicit_rate_limit_response() -> None:
 
     assert exc.value.status_code == 429
     assert "untrusted upstream details" not in exc.value.message
+
+
+@pytest.mark.asyncio
+async def test_commit_tree_sha_resolves_before_repository_tree_read() -> None:
+    commit_sha = "a" * 40
+    tree_sha = "b" * 40
+    requested_paths: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        if request.url.path == f"/repos/octo/example/git/commits/{commit_sha}":
+            return httpx.Response(200, json={"tree": {"sha": tree_sha}})
+        if request.url.path == f"/repos/octo/example/git/trees/{tree_sha}":
+            return httpx.Response(200, json={"sha": tree_sha, "truncated": False, "tree": []})
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    async with GitHubClient(http) as github:
+        resolved_tree_sha = await github.commit_tree_sha("octo/example", commit_sha)
+        returned_tree_sha, entries = await github.repository_tree("octo/example", resolved_tree_sha)
+    await http.aclose()
+
+    assert resolved_tree_sha == tree_sha
+    assert returned_tree_sha == tree_sha
+    assert entries == []
+    assert requested_paths == [
+        f"/repos/octo/example/git/commits/{commit_sha}",
+        f"/repos/octo/example/git/trees/{tree_sha}",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_search_paths_resolves_branch_to_pinned_commit_tree() -> None:
+    revision = "1" * 40
+    tree_sha = "2" * 40
+    requested_paths: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        request_path = request.url.raw_path.decode("ascii").split("?", 1)[0]
+        requested_paths.append(request_path)
+        if request_path == "/repos/octo/example/branches/feature%2Ftopic":
+            return httpx.Response(200, json={"commit": {"sha": revision}})
+        if request.url.path == f"/repos/octo/example/git/commits/{revision}":
+            return httpx.Response(200, json={"tree": {"sha": tree_sha}})
+        if request.url.path == f"/repos/octo/example/git/trees/{tree_sha}":
+            return httpx.Response(
+                200,
+                json={"sha": tree_sha, "truncated": False, "tree": [{"path": "src/feature.ts", "type": "blob"}]},
+            )
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    async with GitHubClient(http) as github:
+        paths = await github.search_paths("octo/example", "feature/topic", "feature")
+    await http.aclose()
+
+    assert paths == ["src/feature.ts"]
+    assert requested_paths == [
+        "/repos/octo/example/branches/feature%2Ftopic",
+        f"/repos/octo/example/git/commits/{revision}",
+        f"/repos/octo/example/git/trees/{tree_sha}",
+    ]

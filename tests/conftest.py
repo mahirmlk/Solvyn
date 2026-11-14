@@ -63,6 +63,13 @@ def test_settings(monkeypatch) -> Generator[Settings, None, None]:
         mock.otlp_endpoint = None
         from solvyn import main
 
+        # The workflows router is imported during test collection, before this
+        # fixture patches main.settings. Keep its settings reference aligned
+        # so compatibility routes use the per-test tenant configuration.
+        from solvyn.api.v1 import workflows
+
+        monkeypatch.setattr(main, "settings", mock)
+        monkeypatch.setattr(workflows, "settings", mock)
         monkeypatch.setattr(main.settings, "enable_workflow_scheduler", False)
         yield mock
 

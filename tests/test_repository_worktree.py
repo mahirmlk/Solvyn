@@ -61,7 +61,12 @@ class _WorkspaceGitHub:
     async def branch_commit(self, _full_name: str, _branch: str) -> str:
         return "a" * 40
 
-    async def repository_tree(self, _full_name: str, _revision: str) -> tuple[str, list[dict[str, Any]]]:
+    async def commit_tree_sha(self, _full_name: str, commit_sha: str) -> str:
+        assert commit_sha == "a" * 40
+        return "c" * 40
+
+    async def repository_tree(self, _full_name: str, tree_sha: str) -> tuple[str, list[dict[str, Any]]]:
+        assert tree_sha == "c" * 40
         return "c" * 40, [
             {"path": "README.md", "type": "blob", "mode": "100644", "size": 6, "sha": "b" * 40}
         ]

@@ -103,6 +103,9 @@ async def test_teammate_conversation_rls_scopes_tenant_and_assignment() -> None:
     tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
     organization_a, project_a, unassigned_project = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     teammate_a, session_a, session_unassigned, conversation_a = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    graph_a, task_a = uuid.uuid4(), uuid.uuid4()
+    graph_unassigned, task_unassigned = uuid.uuid4(), uuid.uuid4()
+    session_b, graph_b, task_b = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     try:
         async with engine.connect() as connection:
             transaction = await connection.begin()
@@ -217,6 +220,79 @@ async def test_teammate_conversation_rls_scopes_tenant_and_assignment() -> None:
                             "project": unassigned_project,
                             "session": session_unassigned,
                         },
+                    )
+                await savepoint.rollback()
+
+                # A conversation may only link to a durable task in its own
+                # tenant and existing session/execution graph.
+                await connection.execute(
+                    text("INSERT INTO execution_graphs (id, session_id, graph_data, status) VALUES (:id, :session, '{}', 'waiting_approval')"),
+                    {"id": graph_a, "session": session_a},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO tasks (id, tenant_id, session_id, execution_id, node_id, title, description, status) "
+                        "VALUES (:id, :tenant, :session, :execution, :node, 'Conversation task', '{}', 'waiting_approval')"
+                    ),
+                    {"id": task_a, "tenant": tenant_a, "session": session_a, "execution": graph_a, "node": str(task_a)},
+                )
+                await connection.execute(
+                    text("UPDATE teammate_conversations SET root_task_id = :task WHERE id = :conversation"),
+                    {"task": task_a, "conversation": conversation_a},
+                )
+                linked = await connection.scalar(
+                    text("SELECT root_task_id FROM teammate_conversations WHERE id = :conversation"),
+                    {"conversation": conversation_a},
+                )
+                assert linked == task_a
+
+                await connection.execute(
+                    text("INSERT INTO execution_graphs (id, session_id, graph_data, status) VALUES (:id, :session, '{}', 'waiting_approval')"),
+                    {"id": graph_unassigned, "session": session_unassigned},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO tasks (id, tenant_id, session_id, execution_id, node_id, title, description, status) "
+                        "VALUES (:id, :tenant, :session, :execution, :node, 'Wrong session task', '{}', 'waiting_approval')"
+                    ),
+                    {
+                        "id": task_unassigned,
+                        "tenant": tenant_a,
+                        "session": session_unassigned,
+                        "execution": graph_unassigned,
+                        "node": str(task_unassigned),
+                    },
+                )
+                savepoint = await connection.begin_nested()
+                with pytest.raises(DBAPIError):
+                    await connection.execute(
+                        text("UPDATE teammate_conversations SET root_task_id = :task WHERE id = :conversation"),
+                        {"task": task_unassigned, "conversation": conversation_a},
+                    )
+                await savepoint.rollback()
+
+                await connection.execute(text("SELECT set_config('app.tenant_id', :tenant, true)"), {"tenant": str(tenant_b)})
+                await connection.execute(
+                    text("INSERT INTO sessions (id, tenant_id, title, status) VALUES (:id, :tenant, 'Tenant B', 'active')"),
+                    {"id": session_b, "tenant": tenant_b},
+                )
+                await connection.execute(
+                    text("INSERT INTO execution_graphs (id, session_id, graph_data, status) VALUES (:id, :session, '{}', 'waiting_approval')"),
+                    {"id": graph_b, "session": session_b},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO tasks (id, tenant_id, session_id, execution_id, node_id, title, description, status) "
+                        "VALUES (:id, :tenant, :session, :execution, :node, 'Tenant B task', '{}', 'waiting_approval')"
+                    ),
+                    {"id": task_b, "tenant": tenant_b, "session": session_b, "execution": graph_b, "node": str(task_b)},
+                )
+                await connection.execute(text("SELECT set_config('app.tenant_id', :tenant, true)"), {"tenant": str(tenant_a)})
+                savepoint = await connection.begin_nested()
+                with pytest.raises(DBAPIError):
+                    await connection.execute(
+                        text("UPDATE teammate_conversations SET root_task_id = :task WHERE id = :conversation"),
+                        {"task": task_b, "conversation": conversation_a},
                     )
                 await savepoint.rollback()
             finally:
