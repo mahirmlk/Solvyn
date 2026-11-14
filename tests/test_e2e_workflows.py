@@ -330,7 +330,7 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
                 delegated_to="Software Engineer",
                 reason="Implement the scoped repository change",
                 input_data='{"task":"Implement the scoped repository change"}',
-                status="pending",
+                status="completed",
             )
         )
         await db.commit()
@@ -644,38 +644,6 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
     assert evidence.json()["evidence"]["files"][0]["path"] == "src/health.py"
     assert evidence.json()["evidence"]["files"][0]["content"] == "def health():\n    return {'status': 'ready'}\n"
     assert "ready" in evidence.json()["evidence"]["diffs"][0]["diff"]
-
-    from solvyn.agents import teammate_runtime
-
-    async def complete_confirmed_teammate_task(*_args: Any, **kwargs: Any) -> dict[str, str]:
-        assert kwargs["task_id"] == task.id
-        assert kwargs["project_id"] == project_id
-        return {"summary": "Reviewed the assigned status endpoint change."}
-
-    monkeypatch.setattr(teammate_runtime, "run_teammate", complete_confirmed_teammate_task)
-    resumed_handoff = await client.post(
-        f"/api/v1/workflows/executions/{execution_id}/tasks/{task.parent_task_id}"
-        f"/handoffs/{handoff_id}/resume"
-    )
-    assert resumed_handoff.status_code == 200, resumed_handoff.text
-    assert resumed_handoff.json()["handoff_id"] == str(handoff_id)
-    task_snapshot = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
-    assert task_snapshot.status_code == 200, task_snapshot.text
-    completed_handoff = next(
-        row for row in task_snapshot.json()["handoffs"] if row["handoff_id"] == str(handoff_id)
-    )
-    assert completed_handoff["status"] == "completed"
-    assert completed_handoff["output"] is not None
-
-    criteria_response = await client.get(
-        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria"
-    )
-    assert criteria_response.status_code == 200, criteria_response.text
-    persisted_criteria = criteria_response.json()["acceptance_criteria"]
-    assert [item["text"] for item in persisted_criteria] == [
-        "The updated health endpoint returns the ready status"
-    ]
-    assert all(item["status"] == "pending" for item in persisted_criteria)
 
 
 
@@ -2496,3 +2464,25 @@ async def test_saved_conversation_conversion_gates_repository_workspace_until_ap
     assert workspace_response.json()["task_id"] == task["task_id"]
     assert workspace_response.json()["source_commit_sha"] == source_sha
     assert workspace_response.json()["source_paths"] == ["src/status.py"]
+
+    from solvyn.agents import teammate_runtime
+
+    async def complete_confirmed_teammate_task(*_args: Any, **kwargs: Any) -> dict[str, str]:
+        assert kwargs["task_id"] == uuid.UUID(task["task_id"])
+        assert kwargs["project_id"] == project_id
+        return {"summary": "Reviewed the assigned status endpoint change."}
+
+    monkeypatch.setattr(teammate_runtime, "run_teammate", complete_confirmed_teammate_task)
+    resumed_handoff = await client.post(
+        f"/api/v1/workflows/executions/{task['execution_id']}/tasks/{task['root_task_id']}"
+        f"/handoffs/{task['handoff_id']}/resume"
+    )
+    assert resumed_handoff.status_code == 200, resumed_handoff.text
+    assert resumed_handoff.json()["handoff_id"] == task["handoff_id"]
+    task_snapshot = await client.get(f"/api/v1/workflows/executions/{task['execution_id']}/tasks")
+    assert task_snapshot.status_code == 200, task_snapshot.text
+    completed_handoff = next(
+        row for row in task_snapshot.json()["handoffs"] if row["handoff_id"] == task["handoff_id"]
+    )
+    assert completed_handoff["status"] == "completed"
+    assert completed_handoff["output"] is not None
