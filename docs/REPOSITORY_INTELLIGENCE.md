@@ -16,7 +16,7 @@ See the [Repository Intelligence section in the API reference](./API.md#reposito
 - Branch listing returns at most 100 results. `possibly_truncated` signals that more results may exist.
 - Pull request listing is a paginated live snapshot from GitHub, not a persisted local synchronization. Detail inspection returns the latest review decision per reviewer (scanning up to 1,100 reviews and probing for more), plus a unified diff capped at 1 MB. Pull request data and diffs remain untrusted input.
 
-Repository discovery beyond a caller-supplied GitHub name, content search, and branch/worktree management remain future work. Private access is limited to repositories the connected organization token can read; this is not a GitHub App installation with per-repository permission selection.
+Organization owners and admins with a connected GitHub token can discover repositories through `GET /api/v1/projects/{project_id}/repository-candidates?page=1`. Each page returns at most 50 repositories visible to that organization credential, up to page 20, including public/private visibility, default branch, and whether the repository is already connected to the selected project. The repository page offers this picker with previous/next controls and retains manual `owner/repository` entry for public repositories when no token is connected. Discovery never returns the token; project members and viewers can inspect connected repositories but cannot manage credentials or connections. Private access is still limited to repositories the connected organization token can read; this is not a GitHub App installation with per-repository permission selection. Content search and branch/worktree management remain future work.
 
 ## Teammate repository context
 

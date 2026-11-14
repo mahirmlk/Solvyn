@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useState } from "react";
 import Link from "next/link";
-import { api, GitHubIntegrationInfo, ProjectInfo, RepositoryInfo, RepositoryInspection } from "@/lib/api";
+import { api, GitHubIntegrationInfo, ProjectInfo, RepositoryCandidateInfo, RepositoryInfo, RepositoryInspection } from "@/lib/api";
 import styles from "./page.module.css";
 
 export default function RepositoriesPage() {
@@ -12,6 +12,11 @@ export default function RepositoriesPage() {
   const [projectId, setProjectId] = useState("");
   const [integration, setIntegration] = useState<GitHubIntegrationInfo | null>(null);
   const [repositories, setRepositories] = useState<RepositoryInfo[]>([]);
+  const [repositoryCandidates, setRepositoryCandidates] = useState<RepositoryCandidateInfo[]>([]);
+  const [selectedCandidateName, setSelectedCandidateName] = useState("");
+  const [candidatePage, setCandidatePage] = useState(1);
+  const [candidateHasMore, setCandidateHasMore] = useState(false);
+  const [loadingCandidates, setLoadingCandidates] = useState(false);
   const [selectedRepositoryId, setSelectedRepositoryId] = useState("");
   const [inspection, setInspection] = useState<RepositoryInspection | null>(null);
   const [token, setToken] = useState("");
@@ -23,6 +28,27 @@ export default function RepositoriesPage() {
   const [inspecting, setInspecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+
+  function changeOrganization(nextOrganizationId: string) {
+    setOrganizationId(nextOrganizationId);
+    setLoadingOrganization(true);
+    setLoadingRepositories(false);
+    setLoadingCandidates(false);
+    setProjects([]);
+    setProjectId("");
+    setIntegration(null);
+    setRepositories([]);
+    setSelectedRepositoryId("");
+    setInspection(null);
+    setRepositoryCandidates([]);
+    setSelectedCandidateName("");
+    setCandidatePage(1);
+    setCandidateHasMore(false);
+    setToken("");
+    setRepositoryName("");
+    setError(null);
+    setNotice(null);
+  }
 
   useEffect(() => {
     let active = true;
@@ -101,6 +127,32 @@ export default function RepositoriesPage() {
     return () => { active = false; };
   }, [projectId]);
 
+  useEffect(() => {
+    if (!projectId || !integration?.connected || !integration.can_manage) {
+      setRepositoryCandidates([]);
+      setSelectedCandidateName("");
+      setCandidateHasMore(false);
+      return;
+    }
+    let active = true;
+    setLoadingCandidates(true);
+    setError(null);
+    api.listRepositoryCandidates(projectId, candidatePage)
+      .then((result) => {
+        if (!active) return;
+        setRepositoryCandidates(result.repositories);
+        setCandidateHasMore(result.has_more);
+        setSelectedCandidateName((current) => result.repositories.some((repository) => repository.full_name === current)
+          ? current
+          : result.repositories.find((repository) => repository.connectable && !repository.is_connected)?.full_name || "");
+      })
+      .catch((reason: unknown) => {
+        if (active) setError(reason instanceof Error ? reason.message : "Could not discover repositories for this GitHub connection.");
+      })
+      .finally(() => { if (active) setLoadingCandidates(false); });
+    return () => { active = false; };
+  }, [projectId, candidatePage, integration?.connected, integration?.can_manage]);
+
   async function connectGitHub(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!organizationId || !token.trim()) return;
@@ -135,6 +187,45 @@ export default function RepositoriesPage() {
       setNotice("Connected " + repository.full_name + ".");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not connect the repository.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function connectCandidate() {
+    if (!projectId || !selectedCandidateName) return;
+    setSaving(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const repository = await api.connectProjectRepository(projectId, selectedCandidateName);
+      setRepositories((current) => current.some((item) => item.id === repository.id) ? current : [...current, repository]);
+      setRepositoryCandidates((current) => current.map((item) => item.full_name === repository.full_name
+        ? { ...item, is_connected: true }
+        : item));
+      setSelectedRepositoryId(repository.id);
+      setInspection(null);
+      setNotice("Connected " + repository.full_name + ".");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not connect the selected repository.");
+      const [candidateRefresh, repositoryRefresh] = await Promise.allSettled([
+        api.listRepositoryCandidates(projectId, candidatePage),
+        api.listProjectRepositories(projectId),
+      ]);
+      if (candidateRefresh.status === "fulfilled") {
+        const result = candidateRefresh.value;
+        setRepositoryCandidates(result.repositories);
+        setCandidateHasMore(result.has_more);
+        setSelectedCandidateName((current) => result.repositories.some((candidate) => candidate.full_name === current)
+          ? current
+          : result.repositories.find((candidate) => candidate.connectable && !candidate.is_connected)?.full_name || "");
+      }
+      if (repositoryRefresh.status === "fulfilled") {
+        const rows = repositoryRefresh.value.repositories;
+        setRepositories(rows);
+        setSelectedRepositoryId((current) => rows.some((repository) => repository.id === current) ? current : "");
+        setInspection(null);
+      }
     } finally {
       setSaving(false);
     }
@@ -185,7 +276,7 @@ export default function RepositoriesPage() {
           <div className={styles.scopeBar}>
             <label className="field">
               <span className="field-label">Organization</span>
-              <select className="editorial-input" value={organizationId} onChange={(event) => setOrganizationId(event.target.value)} disabled={loadingOrganization || saving || inspecting}>
+              <select className="editorial-input" value={organizationId} onChange={(event) => changeOrganization(event.target.value)} disabled={loadingOrganization || saving || inspecting}>
                 {organizations.map((organization) => (
                   <option key={organization.id} value={organization.id}>{organization.name}</option>
                 ))}
@@ -193,7 +284,7 @@ export default function RepositoriesPage() {
             </label>
             <label className="field">
               <span className="field-label">Project</span>
-              <select className="editorial-input" value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={!projects.length || loadingOrganization || saving || inspecting}>
+              <select className="editorial-input" value={projectId} onChange={(event) => { setCandidatePage(1); setProjectId(event.target.value); }} disabled={!projects.length || loadingOrganization || saving || inspecting}>
                 {projects.length
                   ? projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)
                   : <option value="">No projects yet</option>}
@@ -218,24 +309,30 @@ export default function RepositoriesPage() {
                 Use an organization-owned GitHub token with access to the repositories you want Solvyn to inspect.
                 The token is sent directly to Solvyn and stored encrypted; it is never shown again.
               </p>
-              <form className={styles.tokenForm} onSubmit={connectGitHub}>
-                <label className="field">
-                  <span className="field-label">{integration?.connected ? "Replace GitHub token" : "GitHub token"}</span>
-                  <input
-                    autoComplete="new-password"
-                    className="editorial-input mono"
-                    onChange={(event) => setToken(event.target.value)}
-                    placeholder="Paste a GitHub token"
-                    required
-                    type="password"
-                    value={token}
-                  />
-                </label>
-                <button className="action-button" disabled={saving || !token.trim()} type="submit">
-                  {saving ? "Verifying…" : integration?.connected ? "Replace token" : "Connect GitHub"}
-                </button>
-              </form>
-              <p className={styles.helper}>Only organization owners and admins can connect or replace credentials.</p>
+              {integration?.can_manage ? (
+                <>
+                  <form className={styles.tokenForm} onSubmit={connectGitHub}>
+                    <label className="field">
+                      <span className="field-label">{integration.connected ? "Replace GitHub token" : "GitHub token"}</span>
+                      <input
+                        autoComplete="new-password"
+                        className="editorial-input mono"
+                        onChange={(event) => setToken(event.target.value)}
+                        placeholder="Paste a GitHub token"
+                        required
+                        type="password"
+                        value={token}
+                      />
+                    </label>
+                    <button className="action-button" disabled={saving || !token.trim()} type="submit">
+                      {saving ? "Verifying…" : integration.connected ? "Replace token" : "Connect GitHub"}
+                    </button>
+                  </form>
+                  <p className={styles.helper}>Only organization owners and admins can connect or replace credentials.</p>
+                </>
+              ) : integration ? (
+                <p className={styles.helper}>GitHub credential management is read-only for members and viewers. Ask an organization owner or admin to connect or replace the token.</p>
+              ) : null}
             </section>
           )}
 
@@ -254,24 +351,56 @@ export default function RepositoriesPage() {
                 </div>
                 <span className="status-pill">{repositories.length} Repositories</span>
               </div>
-              <form className={styles.repositoryForm} onSubmit={connectRepository}>
-                <label className="field">
-                  <span className="field-label">GitHub repository</span>
-                  <input
-                    className="editorial-input mono"
-                    onChange={(event) => setRepositoryName(event.target.value)}
-                    placeholder="owner/repository"
-                    required
-                    value={repositoryName}
-                  />
-                </label>
-                <button className="action-button" disabled={saving || !repositoryName.trim()} type="submit">
-                  {saving ? "Connecting…" : "Connect repository"}
-                </button>
-              </form>
-              {!integration?.connected && (
-                <p className={styles.helper}>Public repositories can be connected without a token. Private repositories require the organization GitHub token above.</p>
+              {integration?.connected && integration.can_manage && (
+                <div className={styles.repositoryForm}>
+                  <label className="field">
+                    <span className="field-label">Discover from connected GitHub account</span>
+                    <select className="editorial-input mono" disabled={loadingCandidates || !repositoryCandidates.length} onChange={(event) => setSelectedCandidateName(event.target.value)} value={selectedCandidateName}>
+                      <option value="">{loadingCandidates ? "Loading repositories…" : "Choose a repository"}</option>
+                      {repositoryCandidates.map((candidate) => (
+                        <option disabled={!candidate.connectable || candidate.is_connected} key={candidate.id} value={candidate.full_name}>
+                          {candidate.full_name} · {candidate.private ? "Private" : "Public"}{candidate.is_connected ? " · Connected" : !candidate.connectable ? " · Empty repository" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className={styles.discoveryActions}>
+                    <button className="action-button" disabled={saving || !selectedCandidateName || !repositoryCandidates.find((item) => item.full_name === selectedCandidateName)?.connectable || repositoryCandidates.find((item) => item.full_name === selectedCandidateName)?.is_connected} onClick={() => void connectCandidate()} type="button">
+                      {saving ? "Connecting…" : "Connect selected"}
+                    </button>
+                    <button className="action-button secondary" disabled={saving || loadingCandidates || candidatePage <= 1} onClick={() => setCandidatePage((page) => page - 1)} type="button">Previous</button>
+                    <button className="action-button secondary" disabled={saving || loadingCandidates || !candidateHasMore} onClick={() => setCandidatePage((page) => page + 1)} type="button">Next page</button>
+                  </div>
+                  <p className={styles.helper}>Discovery shows repositories visible to the organization credential. Private status is shown; the credential is never returned.</p>
+                </div>
               )}
+              {integration?.can_manage ? (
+                <>
+                  <details className={styles.manualConnect}>
+                    <summary>Connect by repository name</summary>
+                    <form className={styles.repositoryForm} onSubmit={connectRepository}>
+                      <label className="field">
+                        <span className="field-label">GitHub repository</span>
+                        <input
+                          className="editorial-input mono"
+                          onChange={(event) => setRepositoryName(event.target.value)}
+                          placeholder="owner/repository"
+                          required
+                          value={repositoryName}
+                        />
+                      </label>
+                      <button className="action-button" disabled={saving || !repositoryName.trim()} type="submit">
+                        {saving ? "Connecting…" : "Connect repository"}
+                      </button>
+                    </form>
+                  </details>
+                  {!integration.connected && (
+                    <p className={styles.helper}>Public repositories can be connected without a token. Private repositories require the organization GitHub token above.</p>
+                  )}
+                </>
+              ) : integration ? (
+                <p className={styles.helper}>Repository connections are read-only for members and viewers. Ask an organization owner or admin to connect repositories.</p>
+              ) : null}
 
               {loadingRepositories ? (
                 <div className="skeleton" style={{ minHeight: 90 }} />
