@@ -374,12 +374,6 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
 
     workspace_manager = WorkspaceManager(Path(workspace_root))
     managed = workspace_manager.get(uuid.UUID(workspace_response.json()["workspace_id"]))
-    workspace_manager.write_file(
-        managed,
-        "src/health.py",
-        b"def health():\n    return {'status': 'ready'}\n",
-    )
-
     criteria = await client.post(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria",
         json={"criteria": ["The updated health endpoint returns the ready status"]},
@@ -392,7 +386,25 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
     )
     assert accepted.status_code == 200, accepted.text
     assert len(accepted.json()["decision_workspace_digest"]) == 64
-    accepted_workspace_digest = accepted.json()["decision_workspace_digest"]
+    initial_workspace_digest = accepted.json()["decision_workspace_digest"]
+
+    workspace_manager.write_file(
+        managed,
+        "src/health.py",
+        b"def health():\n    return {'status': 'ready'}\n",
+    )
+    duplicate_criteria = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria",
+        json={"criteria": ["The updated health endpoint returns the ready status"]},
+    )
+    assert duplicate_criteria.status_code == 409, duplicate_criteria.text
+    rereview = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria/{criterion_id}/decision",
+        json={"decision": "accepted", "note": "Re-reviewed the changed repository workspace"},
+    )
+    assert rereview.status_code == 200, rereview.text
+    assert rereview.json()["decision_workspace_digest"] != initial_workspace_digest
+    accepted_workspace_digest = rereview.json()["decision_workspace_digest"]
 
     async def fake_verification_run(self: Any, managed_workspace: Any, command: list[str]) -> Any:
         from solvyn.sandbox.runtime import SandboxResult
