@@ -477,8 +477,12 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
         async def repository_metadata(self, _full_name: str) -> dict[str, Any]:
             return {"default_branch": "main", "private": False}
 
-        async def repository_tree(self, _full_name: str, sha: str) -> tuple[str, list[dict[str, Any]]]:
-            assert sha == source_sha
+        async def commit_tree_sha(self, _full_name: str, commit_sha: str) -> str:
+            assert commit_sha == source_sha
+            return source_tree_sha
+
+        async def repository_tree(self, _full_name: str, tree_sha: str) -> tuple[str, list[dict[str, Any]]]:
+            assert tree_sha == source_tree_sha
             import hashlib
 
             git_blob = hashlib.sha1(b"blob " + str(len(source_text.encode())).encode() + b"\0" + source_text.encode()).hexdigest()
@@ -2355,6 +2359,15 @@ async def test_saved_conversation_conversion_gates_repository_workspace_until_ap
                     name="Conversation Project",
                     slug=f"conversation-project-{uuid.uuid4().hex[:10]}",
                 ),
+            ]
+        )
+        # Repository RLS policies check the persisted project row, so commit the
+        # project before inserting its repository in the next transaction.
+        await db.flush()
+        await db.commit()
+        await bind_tenant_scope(db, tenant.id)
+        db.add_all(
+            [
                 TeammateProfile(
                     id=teammate_id,
                     organization_id=organization_id,

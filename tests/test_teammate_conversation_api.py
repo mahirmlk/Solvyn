@@ -71,7 +71,7 @@ def test_forged_transcript_delimiter_is_json_escaped_inside_untrusted_boundary()
 @pytest.mark.asyncio
 async def test_retry_repairs_missing_acceptance_criteria_after_handoff_commit() -> None:
     tenant_id = uuid.uuid4()
-    child = SimpleNamespace(id=uuid.uuid4(), acceptance_criteria_defined=False, status="review_required")
+    child = SimpleNamespace(id=uuid.uuid4(), tenant_id=tenant_id, acceptance_criteria_defined=False, status="review_required")
     result = MagicMock()
     result.scalars.return_value.all.return_value = []
     db = AsyncMock()
@@ -80,17 +80,19 @@ async def test_retry_repairs_missing_acceptance_criteria_after_handoff_commit() 
     db.execute.side_effect = [lock_result, result]
     criteria = ["Behavior works", "Verification passes"]
 
-    await teammate_routes._ensure_task_acceptance_criteria(
-        db,
-        tenant_id=tenant_id,
-        child=child,
-        criteria=criteria,
-    )
+    with patch("solvyn.workflows.task_completion.refresh_task_completion_state", new_callable=AsyncMock) as refresh:
+        await teammate_routes._ensure_task_acceptance_criteria(
+            db,
+            tenant_id=tenant_id,
+            child=child,
+            criteria=criteria,
+        )
 
     assert child.acceptance_criteria_defined is True
     created = [item for call in db.add_all.call_args_list for item in call.args[0]]
     assert [item.text for item in created] == criteria
     assert all(item.task_id == child.id and item.tenant_id == tenant_id for item in created)
+    refresh.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -224,6 +226,7 @@ async def test_identical_conversion_retry_reuses_saved_handoff_and_repairs_crite
         result(scalar=child),  # Existing-handoff lookup locks the child.
         result(scalars=[]),  # Crash recovery: criteria were not persisted.
         result(scalar=root),
+        result(scalar=graph),
         result(scalar=handoff),
         result(scalar=child),
         result(scalar=approval),
@@ -240,6 +243,7 @@ async def test_identical_conversion_retry_reuses_saved_handoff_and_repairs_crite
         patch.object(teammate_routes, "require_org_membership", new_callable=AsyncMock),
         patch.object(teammate_routes, "_load_teammate", new_callable=AsyncMock, return_value=teammate),
         patch.object(teammate_routes, "_load_conversation", new_callable=AsyncMock, return_value=conversation),
+        patch("solvyn.workflows.task_completion.refresh_task_completion_state", new_callable=AsyncMock) as refresh,
     ):
         response = await teammate_routes.convert_teammate_conversation_to_task(
             teammate_id,
@@ -247,6 +251,7 @@ async def test_identical_conversion_retry_reuses_saved_handoff_and_repairs_crite
             payload,
             db,
         )
+    refresh.assert_awaited_once()
 
     assert response["task"]["input_data"] == input_data
     assert response["task"]["status"] == "review_required"
@@ -475,6 +480,7 @@ async def test_send_conversation_message_persists_turn_and_reuses_bound_session(
         project_id=project_id,
         session_id=session_id,
         title="Earlier question",
+        root_task_id=None,
         created_at=None,
         updated_at=None,
     )
