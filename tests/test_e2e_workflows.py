@@ -1782,7 +1782,6 @@ async def test_workflow_cancellation_fences_handoffs_and_recovers_stale_request(
     waiting_handoff_id = uuid.uuid4()
     approved_handoff_id = uuid.uuid4()
     running_handoff_lease = uuid.uuid4()
-    approved_handoff_lease = uuid.uuid4()
     stale_execution_id = uuid.uuid4()
     stale_session_id = uuid.uuid4()
     stale_task_id = uuid.uuid4()
@@ -1911,6 +1910,7 @@ async def test_workflow_cancellation_fences_handoffs_and_recovers_stale_request(
             ]
         )
         await db.commit()
+        await bind_tenant_scope(db, tenant.id)
         db.add_all(
             [
                 TeammateProjectAssignment(teammate_id=teammate_id, project_id=project_id),
@@ -1959,8 +1959,6 @@ async def test_workflow_cancellation_fences_handoffs_and_recovers_stale_request(
                     reason="Start an already-approved feature",
                     input_data="{}",
                     status="pending",
-                    lease_owner=approved_handoff_lease,
-                    lease_expires_at=datetime.now(UTC) + timedelta(seconds=60),
                 ),
                 Approval(
                     organization_id=organization_id,
@@ -2013,7 +2011,7 @@ async def test_workflow_cancellation_fences_handoffs_and_recovers_stale_request(
             update(TaskHandoff)
             .where(
                 TaskHandoff.id.in_([running_handoff_id, approved_handoff_id]),
-                TaskHandoff.lease_owner.in_([running_handoff_lease, approved_handoff_lease]),
+                TaskHandoff.lease_owner == running_handoff_lease,
             )
             .values(status="completed")
             .returning(TaskHandoff.id)
