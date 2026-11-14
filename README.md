@@ -30,7 +30,7 @@ Solvyn is a self-hosted workspace for teams that want AI assistance with ongoing
 - Connects public GitHub repositories or private repositories authorized through an encrypted organization integration.
 - Inspects bounded repository trees and manifests, then lets an authorized user seed a task workspace with selected files from one pinned commit.
 - Gives each teammate file tools according to task permissions. Tool activity is recorded without copying file contents into the audit record.
-- Runs fixed test, build, lint, type-check, or security profiles after owner or admin approval. Verification runs in an isolated, networkless container with resource limits; Solvyn stores bounded output and the workspace digest.
+- Runs approval-gated test, build, lint, type-check, or security verification in an isolated, networkless container with resource limits. Solvyn stores bounded output and the workspace digest.
 - Shows task activity, approvals, verification attempts, diffs, delivery records, and recorded usage.
 - Creates a draft pull request for human review. It does not merge the pull request or deploy the change automatically.
 
@@ -63,8 +63,6 @@ Three workflow templates are defined: **feature** (nine agent steps), **bugfix**
 
 Persistent teammates and workflow agents serve different purposes. Teammates have project assignments, permissions, bounded project context, and project-scoped memory. Workflow agents are registered implementations that a workflow graph can instantiate. A teammate run validates the role-to-agent mapping before execution and applies the teammate's granted workspace tools.
 
-The persistent teammate roles and workflow agent types are related but separate concepts. Teammates have project assignments, permissions, bounded project context, and persistent project memory. Workflow agents are registered implementations that a workflow graph can instantiate. A teammate run validates the role-to-agent mapping before execution and applies the teammate's granted workspace tools.
-
 ## Architecture
 
 ```mermaid
@@ -87,6 +85,22 @@ PostgreSQL stores durable task and approval state; Redis supports messaging and 
 Repository discovery is deliberately bounded. The current GitHub inspection path considers up to 50 repository paths, with a 1 MB limit per fetched file and a 16 MiB aggregate limit when seeding an initial task workspace. A workspace is tied to a pinned commit so reviewers can see which repository revision supplied its context. Before a workspace is created, repository search is path-based; content search is available only over files in the task workspace.
 
 Repository files remain untrusted input throughout the workflow. Teammate system context tells the model to treat repository content as task evidence and ignore instructions found inside it. File tools enforce task grants, and activity records capture the operation without copying source contents into the audit record.
+
+### Context and run budgets
+
+Teammate context is assembled from the assigned project description and instructions, teammate responsibilities and instructions, granted permissions, project knowledge, teammate memory, and—when requested—repository context. Explicit bounds keep large project records from expanding the model prompt without limit.
+
+| Runtime budget | Default | Maximum |
+|---|---:|---:|
+| Model tokens per teammate run | 4,096 | 16,000 |
+| Teammate run duration | 300 seconds | 900 seconds |
+| Project knowledge records | Up to 100 | 100 |
+| Teammate memory records | Up to 50 | 50 |
+| Total teammate system context | 24,000 characters | 24,000 characters |
+| Repository context | 12,000 characters | 12,000 characters |
+| Selected source files added to context | Up to 4 | 4 files, 1,500 characters each |
+
+These defaults and caps are implemented in `solvyn/agents/teammate_runtime.py`. Project context sections also have their own smaller limits within the total context budget. These are input bounds, not measured token use or a performance guarantee.
 
 ## Quick start
 
@@ -154,6 +168,20 @@ Draft pull request creation is a gated operation. For repository-backed tasks, t
 
 Delivery accepts UTF-8 text changes with an aggregate content limit of 500 KB and fewer than 50 file operations. Deletions are limited to selected regular, non-executable source files from the pinned commit. If workspace files change after the preview, a fresh preview is required. If GitHub times out after a branch commit while opening the PR, Solvyn reports the outcome as unknown; the caller should check the branch before retrying. Solvyn creates a draft PR and leaves review, merge, and deployment to people and operators.
 
+### Verification kinds and default commands
+
+Verification requests use one of five kinds. A request may use the default command below or specify a command; an owner or admin must approve the request before it runs.
+
+| Kind | Default command | Intended check |
+|---|---|---|
+| `test` | `pytest -q` | Run repository tests |
+| `build` | `python -m compileall -q .` | Check Python files compile |
+| `lint` | `ruff check .` | Run Ruff lint checks |
+| `typecheck` | `mypy .` | Run mypy checks |
+| `security` | `ruff check --select S .` | Run Ruff's selected security rules |
+
+The selected kind, command, approval, workspace digest, bounded output, and result are associated with the verification record. The networkless sandbox cannot download dependencies during a run. Explicit commands remain subject to sandbox resource and network boundaries.
+
 ## CLI
 
 The Python package installs the `solvyn` command. The top-level help groups commands by status, agents, workflows, and observability. Use `solvyn COMMAND --help` for command options and examples.
@@ -173,11 +201,35 @@ The Python package installs the `solvyn` command. The top-level help groups comm
 | `solvyn audit` | Search audit entries by action or agent |
 | `solvyn list-sessions` | List recent sessions through the API |
 
+Example commands:
+
+```bash
+# Check service connectivity and configured model providers
+solvyn status
+solvyn providers
+
+# Ask a specialist to review code and save the response
+solvyn run --agent code-reviewer --task "Review the authentication changes" --output review.md
+
+# Inspect templates, then run a feature workflow
+solvyn workflows
+solvyn pipeline feature --input "Add an organization settings page"
+
+# Generate proposed tasks from a product brief
+solvyn generate-tasks --spec "Add a webhook that summarizes pull requests"
+
+# Review local traces and filter audit events
+solvyn traces --limit 20
+solvyn audit --action login --limit 50
+```
+
+The CLI's `run` and `pipeline` commands execute agent and workflow logic with the configured default tenant. The authenticated web/API task flow supplies organization membership, project assignment, approvals, and the delivery gates above. A one-off local CLI run is not the same as reviewed repository delivery.
+
 ## Security and operational design
 
 - **Human approvals:** Verification requests require owner or admin approval. Acceptance criteria are decided by an organization owner or admin before delivery.
 - **Tenant isolation:** Tenant-owned data uses PostgreSQL row-level security. Repository integrations are scoped to an organization and credentials are encrypted at rest.
-- **Restricted execution:** Verification uses fixed profiles inside an isolated, networkless container with resource limits. Teammates work through granted file tools rather than an unrestricted shell.
+- **Restricted execution:** Verification commands run inside an isolated, networkless container with resource limits and require approval. Default commands are provided for five verification kinds; a request can specify a command. Teammates work through granted file tools rather than an unrestricted shell.
 - **Auditable changes:** Task activity, tool invocations, approval decisions, verification attempts, diff digests, and delivery records are available for review.
 - **Operator-owned releases:** Draft PRs require a human merge. Staging and production deployment are separate CI operations, and production requires an explicit manual dispatch.
 
@@ -215,6 +267,8 @@ The API mounts a Prometheus exposition endpoint at [`/metrics`](http://localhost
 
 The HTTP metrics are the only metrics currently updated by request middleware. The remaining metric families have helper methods, but code search found no application call sites for those helpers; dashboards should not be expected to show meaningful values for them yet. Values are runtime measurements that depend on traffic and process lifetime, not repository-wide performance claims. Prometheus counters reset when the API process restarts unless an external monitoring system stores their history. No live production snapshot, throughput claim, latency target, or service-level objective is published here.
 
+For investigation, `solvyn traces` and `solvyn audit` expose recent traces and audit records. Trace spans can include agent type, session, provider/model, duration, token count, and errors. In-memory tracing retains up to 10,000 traces and 1,000 spans per trace; process restarts clear that local history. The tracing module can mirror traces to Langfuse when mirroring and the provider are configured. Traces are separate from the Prometheus counters above.
+
 ### Repository snapshot
 
 These are counts of definitions in the current source tree, not runtime success or quality rates.
@@ -237,10 +291,25 @@ make test
 
 CI runs Ruff lint, strict mypy type checks, the pytest suite with coverage collection, PostgreSQL and Redis-backed tests, a database backup/restore smoke check, pip-audit dependency checks, and API and frontend image builds. Staging deployment is configured for pushes to `main` and requires operator-provided Kubernetes credentials. Production deployment is a manual workflow dispatch with an explicit input and production environment. Passing CI does not by itself validate a deployment or the complete teammate-to-draft-PR product workflow. See [shipment readiness](docs/SHIPMENT_READINESS.md) and the [sandbox runtime guide](docs/SANDBOX_RUNTIME.md).
 
+## Configuration guide
+
+The repository's `.env.example` lists the environment variables. For local development, configure these groups first:
+
+| Area | Variables | Purpose |
+|---|---|---|
+| Database | `DATABASE_URL`, `MIGRATION_DATABASE_URL`, `POSTGRES_*` | Connect the API and migrations to PostgreSQL. Compose provides separate runtime and migration users. |
+| Queue and coordination | `REDIS_URL` | Connect the API and background services to Redis. |
+| Model provider | `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `DEEPSEEK_API_KEY`, `LLM_DEFAULT_PROVIDER`, `LLM_DEFAULT_MODEL` | Select a configured provider and default model for model-backed tasks. |
+| Authentication | `JWT_SECRET`, `API_KEY_SECRET`, `BOOTSTRAP_TOKEN` | Sign authentication tokens, protect API keys, and bootstrap an initial user. |
+| GitHub integration | `INTEGRATION_ENCRYPTION_KEYS`, `GITHUB_WEBHOOK_SECRET` | Encrypt organization integration credentials and authenticate repository webhooks. |
+| API and sandbox | `HOST`, `PORT`, `SANDBOX_WORKSPACE_ROOT`, `SANDBOX_IMAGE`, `WORKFLOW_EXECUTION_TIMEOUT_SECONDS` | Configure the local API address and sandbox/workflow runtime. |
+
+Registration is disabled by default. The development example contains placeholders and must not be used as a production secret set. Keep `.env` out of source control. For initial user bootstrap, encryption key rotation, network exposure, backups, and deployment, see [Deployment](DEPLOYMENT.md) and [Security](SECURITY.md).
+
 ## Current limits
 
 - Repository task workspaces contain selected files; the current task flow does not create a full clone or Git worktree.
-- Teammates cannot run arbitrary shell commands or install project dependencies. Verification uses fixed profiles in a networkless sandbox.
+- Teammates cannot run arbitrary shell commands or install project dependencies. Verification requests use default commands or an explicitly requested command, require approval, and run in a networkless sandbox.
 - Before a task workspace exists, repository search matches file paths. Content search is available inside an assigned workspace.
 - Dependency review schedules currently create reminders; Solvyn does not bundle a dependency vulnerability scanner.
 - The combined conversation-to-task-to-verified-delivery workflow, controlled staging deployment, and deployment-specific restore drill remain unverified.
