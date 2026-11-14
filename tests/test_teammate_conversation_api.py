@@ -71,7 +71,7 @@ def test_forged_transcript_delimiter_is_json_escaped_inside_untrusted_boundary()
 @pytest.mark.asyncio
 async def test_retry_repairs_missing_acceptance_criteria_after_handoff_commit() -> None:
     tenant_id = uuid.uuid4()
-    child = SimpleNamespace(id=uuid.uuid4(), acceptance_criteria_defined=False)
+    child = SimpleNamespace(id=uuid.uuid4(), acceptance_criteria_defined=False, status="review_required")
     result = MagicMock()
     result.scalars.return_value.all.return_value = []
     db = AsyncMock()
@@ -530,6 +530,7 @@ async def test_failed_conversation_turn_does_not_persist_an_unanswered_user_mess
         project_id=project_id,
         session_id=session_id,
         title="New conversation",
+        root_task_id=None,
         created_at=None,
         updated_at=None,
     )
@@ -575,6 +576,7 @@ async def test_successful_first_turn_sets_conversation_title_after_model_reply()
         project_id=project_id,
         session_id=session_id,
         title="New conversation",
+        root_task_id=None,
         created_at=None,
         updated_at=None,
     )

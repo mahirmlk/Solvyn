@@ -813,6 +813,9 @@ async def convert_teammate_conversation_to_task(
     if handoff is None:
         from solvyn.api.v1.workflows import TaskHandoffRequest, create_task_handoff
 
+        if root.execution_id is None:
+            raise HTTPException(status_code=409, detail="Conversation task workflow execution is unavailable")
+
         handoff_result = await create_task_handoff(
             execution_id=root.execution_id,
             task_id=root.id,
