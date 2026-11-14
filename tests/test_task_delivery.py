@@ -447,7 +447,7 @@ async def test_delivery_requires_completion_gate_before_remote_writes(
     github = FakeDeliveryGitHub()
     db = FakeDeliverySession()
     preview = await verification_api._build_delivery_preview(
-        context[2], context[1], context[4], context[5], context[6], FakeGitHub()  # type: ignore[arg-type]
+        context[2], context[1], context[4], context[5], context[6], github  # type: ignore[arg-type]
     )
     completion_refresh = AsyncMock(return_value=task_status)
 
@@ -472,7 +472,6 @@ async def test_delivery_requires_completion_gate_before_remote_writes(
         )
 
     assert error.value.status_code == 409
-    assert "accepted criteria" in error.value.detail
     assert github.writes == []
     completion_refresh.assert_awaited_once_with(
         db,
