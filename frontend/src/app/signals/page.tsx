@@ -19,6 +19,7 @@ function signalLabel(event: ProactiveEventInfo): string {
   if (event.event_type === "dependabot_alert") return "Dependency alert";
   if (event.event_type === "code_scanning_alert") return "Code scanning";
   if (event.event_type === "secret_scanning_alert") return "Secret scanning";
+  if (event.event_type === "dependabot_update") return "Dependabot update PR";
   if (event.event_type === "scheduled_maintenance") return "Scheduled maintenance";
   if (event.event_type === "issues") return "GitHub issue";
   if (event.event_type === "pull_request") return "Pull request";
