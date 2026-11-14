@@ -11,6 +11,7 @@ can be selected with ``pytest -m e2e``.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta
@@ -329,7 +330,7 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
                 delegated_to="Software Engineer",
                 reason="Implement the scoped repository change",
                 input_data='{"task":"Implement the scoped repository change"}',
-                status="completed",
+                status="pending",
             )
         )
         await db.commit()
