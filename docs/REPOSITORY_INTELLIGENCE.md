@@ -4,7 +4,7 @@ Repository intelligence is an early workstream. It adds a provider boundary and 
 
 ## API
 
-See the [Repository Intelligence section in API.md](../API.md#repository-intelligence) for routes and response limits.
+See the [Repository Intelligence section in the API reference](./API.md#repository-intelligence) for routes and response limits.
 
 ## Boundaries
 

@@ -696,6 +696,6 @@ Include:
 | `README.md` | New users (overview + quick start) |
 | `ARCHITECTURE.md` | Developers (system design + components) |
 | `SECURITY.md` | Security-conscious users + auditors |
-| `DEPLOYMENT.md` | DevOps / operators |
+| `docs/DEPLOYMENT.md` | DevOps / operators |
 | `CONTRIBUTING.md` | Contributors (this file) |
-| `API.md` | API consumers + frontend developers |
+| `docs/API.md` | API consumers + frontend developers |
