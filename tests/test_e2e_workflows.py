@@ -1960,6 +1960,12 @@ async def test_workflow_cancellation_fences_handoffs_and_recovers_stale_request(
                     input_data="{}",
                     status="pending",
                 ),
+            ]
+        )
+        await db.commit()
+        await bind_tenant_scope(db, tenant.id)
+        db.add_all(
+            [
                 Approval(
                     organization_id=organization_id,
                     project_id=project_id,
