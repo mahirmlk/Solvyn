@@ -13,7 +13,12 @@ from solvyn.db.models import Task, TaskAcceptanceCriterion, TaskHandoff, TaskWor
 from solvyn.sandbox.workspaces import WorkspaceError, WorkspaceManager
 
 
-async def refresh_task_completion_state(db: AsyncSession, task: Task) -> str:
+async def refresh_task_completion_state(
+    db: AsyncSession,
+    task: Task,
+    *,
+    expected_workspace_digest: str | None = None,
+) -> str:
     """Keep completed tasks in review until declared criteria and checks pass."""
     locked_task = (
         await db.execute(
@@ -37,16 +42,18 @@ async def refresh_task_completion_state(db: AsyncSession, task: Task) -> str:
             )
         )
     ).scalar_one_or_none()
-    has_handoff = False
+    handoff_status: str | None = None
     if workspace is not None:
-        has_handoff = (
+        handoff_status = (
             await db.execute(
-                select(TaskHandoff.id).where(
+                select(TaskHandoff.status).where(
                     TaskHandoff.tenant_id == task.tenant_id,
                     TaskHandoff.child_task_id == task.id,
                 )
             )
-        ).scalar_one_or_none() is not None
+        ).scalar_one_or_none()
+    has_handoff = handoff_status is not None
+    handoff_complete = not has_handoff or handoff_status == "completed"
     current_digest: str | None = None
     if workspace is not None:
         try:
@@ -54,6 +61,10 @@ async def refresh_task_completion_state(db: AsyncSession, task: Task) -> str:
             current_digest = manager.fingerprint(manager.get(workspace.id))
         except (OSError, WorkspaceError, ValueError):
             pass
+    workspace_matches_expectation = (
+        expected_workspace_digest is None
+        or (current_digest is not None and current_digest == expected_workspace_digest)
+    )
 
     criteria_pass = not task.acceptance_criteria_defined and workspace is None
     if task.acceptance_criteria_defined or workspace is not None:
@@ -65,9 +76,11 @@ async def refresh_task_completion_state(db: AsyncSession, task: Task) -> str:
                 )
             )
         ).all()
-        criteria_pass = bool(criteria) and (workspace is None or current_digest is not None) and all(
-            status == "accepted" and (workspace is None or digest == current_digest)
-            for status, digest in criteria
+        criteria_pass = (
+            bool(criteria)
+            and workspace_matches_expectation
+            and (workspace is None or current_digest is not None)
+            and all(status == "accepted" and (workspace is None or digest == current_digest) for status, digest in criteria)
         )
 
     required_runs = (
@@ -86,14 +99,19 @@ async def refresh_task_completion_state(db: AsyncSession, task: Task) -> str:
     for run in required_runs:
         latest_by_kind.setdefault(run.kind, run)
 
-    verification_pass = not latest_by_kind and (workspace is None or not has_handoff)
-    if workspace is not None:
-        verification_pass = not has_handoff and not latest_by_kind
-        if latest_by_kind and current_digest is not None:
-            verification_pass = all(
-                run.status == "passed" and run.source_digest == current_digest
-                for run in latest_by_kind.values()
-            )
+    # Repository work delivered through a handoff must have at least one
+    # completion-required verification. Each requested kind is then checked
+    # against its latest result below. Non-required runs do not satisfy this gate.
+    requires_verification = workspace is not None and getattr(workspace, "repository_id", None) is not None and has_handoff
+    verification_pass = not requires_verification and not latest_by_kind
+    if workspace is not None and latest_by_kind and current_digest is not None:
+        verification_pass = all(
+            workspace_matches_expectation
+            and handoff_complete
+            and run.status == "passed"
+            and run.source_digest == current_digest
+            for run in latest_by_kind.values()
+        )
     elif latest_by_kind:
         try:
             verification_pass = all(run.status == "passed" for run in latest_by_kind.values())

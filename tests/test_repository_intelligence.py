@@ -138,6 +138,46 @@ async def test_inspect_private_repository_uses_scoped_token_without_returning_it
 
 
 @pytest.mark.asyncio
+async def test_inspect_pins_tree_and_manifests_to_requested_revision() -> None:
+    revision = "c" * 40
+    requests: list[tuple[str, dict[str, str]]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.url.path, dict(request.url.params)))
+        if request.url.path == "/repos/octo/example":
+            return httpx.Response(
+                200,
+                json={"id": 123, "full_name": "octo/example", "default_branch": "main", "private": False},
+            )
+        if request.url.path == f"/repos/octo/example/git/commits/{revision}":
+            return httpx.Response(200, json={"tree": {"sha": "d" * 40}})
+        if request.url.path == f"/repos/octo/example/git/trees/{'d' * 40}":
+            return httpx.Response(
+                200,
+                json={"sha": "d" * 40, "truncated": False, "tree": [{"path": "README.md", "type": "blob", "size": 6}]},
+            )
+        if request.url.path == "/repos/octo/example/contents/README.md":
+            assert request.url.params.get("ref") == revision
+            return httpx.Response(200, json={"encoding": "base64", "content": base64.b64encode(b"pinned").decode()})
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    async with GitHubClient(http) as github:
+        inspection = await github.inspect("octo/example", revision)
+    await http.aclose()
+
+    assert inspection["revision"] == revision
+    assert inspection["tree_sha"] == "d" * 40
+    assert inspection["manifests"]["README.md"] == "pinned"
+    assert requests == [
+        ("/repos/octo/example", {}),
+        (f"/repos/octo/example/git/commits/{revision}", {}),
+        (f"/repos/octo/example/git/trees/{'d' * 40}", {"recursive": "1"}),
+        ("/repos/octo/example/contents/README.md", {"ref": revision}),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_inspection_rejects_truncated_repository_trees() -> None:
     revision = "f" * 40
     async def handler(request: httpx.Request) -> httpx.Response:

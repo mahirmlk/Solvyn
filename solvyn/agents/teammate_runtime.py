@@ -109,6 +109,7 @@ async def _load_repository_context(
     repository: Repository,
     source_paths: list[str] | None = None,
     *,
+    source_revision: str | None = None,
     db: AsyncSession | None = None,
     organization_id: uuid.UUID | None = None,
 ) -> str:
@@ -121,13 +122,14 @@ async def _load_repository_context(
         else:
             provider_context = get_repository_provider(repository.provider)
         async with provider_context as provider:
-            inspection = await provider.inspect(repository.full_name)
+            inspection = await provider.inspect(repository.full_name, source_revision)
             dependencies = provider.parse_dependencies(inspection.get("manifests", {}))
             frameworks = provider.detect_frameworks(dependencies)
             selected_sources = []
+            selected_source_revision = source_revision or repository.default_branch
             for path in (source_paths or [])[:_MAX_SELECTED_SOURCE_FILES]:
                 try:
-                    contents = await provider.text_file(repository.full_name, path, repository.default_branch)
+                    contents = await provider.text_file(repository.full_name, path, selected_source_revision)
                 except GitHubRepositoryError as exc:
                     if exc.status_code == 404:
                         raise ValueError(f"Selected repository file was not found: {path}") from exc
@@ -144,6 +146,7 @@ async def _load_repository_context(
     lines = [
         f"Repository: {repository.full_name}",
         f"Default branch: {repository.default_branch}",
+        *([f"Selected source revision: {source_revision}"] if source_revision else []),
         f"Description: {str(repository_info.get('description') or '')[:800]}",
         "Languages: " + ", ".join(str(name) for name in list(languages)[:12]),
         "Detected frameworks: " + (", ".join(frameworks[:20]) or "none detected"),
@@ -174,6 +177,7 @@ async def run_teammate(
     session_id: str | None = None,
     repository_id: uuid.UUID | None = None,
     repository_paths: list[str] | None = None,
+    repository_revision: str | None = None,
     task_id: uuid.UUID | None = None,
     handoff_lease_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
@@ -221,7 +225,11 @@ async def run_teammate(
         if repository.provider != "github":
             raise RepositoryContextUnavailableError("Repository context is not supported for this provider")
         repository_context = await _load_repository_context(
-            repository, repository_paths, db=db, organization_id=project.organization_id
+            repository,
+            repository_paths,
+            source_revision=repository_revision,
+            db=db,
+            organization_id=project.organization_id,
         )
 
     knowledge_result = await db.execute(

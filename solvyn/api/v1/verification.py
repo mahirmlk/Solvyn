@@ -74,6 +74,7 @@ _ACTIVITY_TASK_TREE_DEPTH_LIMIT = 32
 _MAX_LIVE_PULL_REQUESTS = 5
 _VERIFICATION_LEASE_DURATION = timedelta(minutes=10)
 _VERIFICATION_MAX_ATTEMPTS = 3
+_DELIVERY_IN_PROGRESS_STATUSES = ("starting", "branch_created", "committed", "unknown")
 VerificationKind = Literal["test", "build", "lint", "typecheck", "security", "documentation"]
 
 
@@ -203,6 +204,24 @@ async def _task_delivery_context(
     return task, workspace_record, repository, project, normalized_paths if source_paths is not None else None, manager, workspace, token
 
 
+async def _refresh_task_delivery_completion(
+    db: AsyncSession,
+    task: Task,
+    *,
+    expected_workspace_digest: str | None = None,
+    commit: bool = True,
+) -> str:
+    """Re-evaluate delivery gates against the previewed workspace snapshot."""
+    status = await refresh_task_completion_state(
+        db,
+        task,
+        expected_workspace_digest=expected_workspace_digest,
+    )
+    if commit:
+        await db.commit()
+    return status
+
+
 async def _build_delivery_preview(
     repository: Repository,
     workspace_record: TaskWorkspace,
@@ -214,6 +233,10 @@ async def _build_delivery_preview(
     source_commit_sha = workspace_record.source_commit_sha
     if not isinstance(source_commit_sha, str) or not source_commit_sha:
         raise HTTPException(status_code=409, detail="Task workspace has no pinned source commit")
+    try:
+        workspace_digest_before = manager.fingerprint(workspace)
+    except (OSError, WorkspaceError) as exc:
+        raise HTTPException(status_code=409, detail="Task workspace is missing or invalid") from exc
     try:
         metadata = await github.repository_metadata(repository.full_name)
         base_branch = metadata.get("default_branch")
@@ -255,7 +278,15 @@ async def _build_delivery_preview(
         except RepositoryWorktreeError as exc:
             raise HTTPException(status_code=409, detail="Pinned repository tree is no longer supported for delivery") from exc
         return await _build_full_repository_delivery_preview(
-            repository, workspace_record, current_paths, manager, workspace, github, base_branch, source_tree_entries
+            repository,
+            workspace_record,
+            current_paths,
+            manager,
+            workspace,
+            github,
+            base_branch,
+            source_tree_entries,
+            workspace_digest_before,
         )
     files: list[dict[str, str]] = []
     deleted_paths: list[str] = []
@@ -365,6 +396,12 @@ async def _build_delivery_preview(
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     except UnicodeEncodeError as exc:
         raise HTTPException(status_code=422, detail="Delivery files must contain valid UTF-8 text") from exc
+    try:
+        workspace_digest_after = manager.fingerprint(workspace)
+    except (OSError, WorkspaceError) as exc:
+        raise HTTPException(status_code=409, detail="Task workspace is missing or invalid") from exc
+    if workspace_digest_before != workspace_digest_after:
+        raise HTTPException(status_code=409, detail="Task workspace changed while the delivery preview was being built")
     return {
         "repository_id": str(repository.id),
         "source_commit_sha": source_commit_sha,
@@ -374,6 +411,7 @@ async def _build_delivery_preview(
         "diffs": diffs,
         "unsupported_missing_source_paths": unsupported_missing_source_paths,
         "diff_digest": digest,
+        "workspace_digest": workspace_digest_after,
         "can_deliver": bool(files or deleted_paths) and not unsupported_missing_source_paths,
     }
 
@@ -397,6 +435,7 @@ async def _build_full_repository_delivery_preview(
     github: GitHubClient,
     base_branch: str,
     source_tree_entries: dict[str, dict[str, Any]],
+    workspace_digest_before: str,
 ) -> dict[str, Any]:
     """Compare a full checkout to its pinned tree without trusting local Git metadata."""
     source_blobs = {
@@ -500,6 +539,12 @@ async def _build_full_repository_delivery_preview(
         "unsupported_missing_source_paths": unsupported,
     }
     digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    try:
+        workspace_digest_after = manager.fingerprint(workspace)
+    except (OSError, WorkspaceError) as exc:
+        raise HTTPException(status_code=409, detail="Task workspace is missing or invalid") from exc
+    if workspace_digest_before != workspace_digest_after:
+        raise HTTPException(status_code=409, detail="Task workspace changed while the delivery preview was being built")
     return {
         "repository_id": str(repository.id),
         "source_commit_sha": workspace_record.source_commit_sha,
@@ -509,6 +554,7 @@ async def _build_full_repository_delivery_preview(
         "diffs": diffs,
         "unsupported_missing_source_paths": unsupported,
         "diff_digest": digest,
+        "workspace_digest": workspace_digest_after,
         "can_deliver": bool(files or deleted_paths) and not unsupported,
     }
 
@@ -536,6 +582,37 @@ async def _owned_task(
         raise HTTPException(status_code=404, detail="Workflow task not found")
     await bind_tenant_scope(db, task.tenant_id)
     return task
+
+
+async def _lock_task_for_gate_mutation(db: AsyncSession, task: Task) -> Task:
+    """Serialize verification/review changes with the start of task delivery."""
+    locked_task = (
+        await db.execute(
+            select(Task)
+            .where(Task.tenant_id == task.tenant_id, Task.id == task.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if locked_task is None:
+        raise HTTPException(status_code=404, detail="Workflow task not found")
+    delivery_id = (
+        await db.execute(
+            select(TaskDelivery.id)
+            .where(
+                TaskDelivery.tenant_id == task.tenant_id,
+                TaskDelivery.task_id == task.id,
+                TaskDelivery.status.in_(_DELIVERY_IN_PROGRESS_STATUSES),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if delivery_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Task review and verification changes are paused while delivery is in progress or needs recovery.",
+        )
+    return locked_task
 
 
 def _verification_dict(run: VerificationRun) -> dict[str, Any]:
@@ -994,6 +1071,7 @@ async def run_task_verification(
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     task = await _owned_task(execution_id, task_id, db)
+    task = await _lock_task_for_gate_mutation(db, task)
     workspace_record = (
         await db.execute(select(TaskWorkspace).where(TaskWorkspace.tenant_id == task.tenant_id, TaskWorkspace.task_id == task.id))
     ).scalar_one_or_none()
@@ -2041,6 +2119,7 @@ async def decide_task_acceptance_criterion(
 ) -> dict[str, Any]:
     task = await _owned_task(execution_id, task_id, db)
     reviewer_user_id, reviewer_organization_id = await _require_acceptance_reviewer(db, task)
+    task = await _lock_task_for_gate_mutation(db, task)
     workspace_record = (
         await db.execute(
             select(TaskWorkspace).where(
@@ -2133,6 +2212,19 @@ async def preview_task_delivery(
             )
     except GitHubRepositoryError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    completion_status = await _refresh_task_delivery_completion(
+        db,
+        _task,
+        expected_workspace_digest=preview["workspace_digest"],
+    )
+    preview["task_status"] = completion_status
+    preview["completion_gate_passed"] = completion_status == "completed"
+    if completion_status != "completed":
+        preview["can_deliver"] = False
+        preview["delivery_block_reason"] = (
+            "Task delivery requires a completed handoff, accepted criteria, and passing verification "
+            "for the current workspace."
+        )
     deliveries = (
         await db.execute(
             select(TaskDelivery)
@@ -2199,7 +2291,7 @@ async def deliver_task_workspace(
     except GitHubRepositoryError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
     (
-        _task,
+        task,
         workspace_record,
         repository,
         _project,
@@ -2223,13 +2315,28 @@ async def deliver_task_workspace(
                     status_code=409,
                     detail="Delivery requires at least one supported change and no unsupported missing source files",
                 )
+            completion_status = await _refresh_task_delivery_completion(
+                db,
+                task,
+                expected_workspace_digest=preview["workspace_digest"],
+                commit=False,
+            )
+            if completion_status != "completed":
+                await db.commit()
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Task delivery requires a completed handoff, accepted criteria, and passing verification "
+                        "for the previewed workspace."
+                    ),
+                )
             evidence_snapshot = _delivery_evidence_snapshot(preview)
             existing = (
                 await db.execute(
                     select(TaskDelivery)
                     .where(
-                        TaskDelivery.tenant_id == _task.tenant_id,
-                        TaskDelivery.task_id == _task.id,
+                        TaskDelivery.tenant_id == task.tenant_id,
+                        TaskDelivery.task_id == task.id,
                         TaskDelivery.diff_digest == preview["diff_digest"],
                     )
                     .with_for_update()
@@ -2262,8 +2369,8 @@ async def deliver_task_workspace(
                 )
 
             delivery = TaskDelivery(
-                tenant_id=_task.tenant_id,
-                task_id=_task.id,
+                tenant_id=task.tenant_id,
+                task_id=task.id,
                 workspace_id=workspace_record.id,
                 repository_id=repository.id,
                 source_commit_sha=pinned_source_sha,
@@ -2282,8 +2389,8 @@ async def deliver_task_workspace(
                 concurrent = (
                     await db.execute(
                         select(TaskDelivery).where(
-                            TaskDelivery.tenant_id == _task.tenant_id,
-                            TaskDelivery.task_id == _task.id,
+                            TaskDelivery.tenant_id == task.tenant_id,
+                            TaskDelivery.task_id == task.id,
                             TaskDelivery.diff_digest == preview["diff_digest"],
                         )
                     )

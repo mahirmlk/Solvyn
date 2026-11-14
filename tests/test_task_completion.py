@@ -94,7 +94,7 @@ async def test_required_verification_must_pass_for_the_current_workspace(
     db.execute.side_effect = [
         _scalar(task),
         _scalar(workspace),
-        _scalar(uuid.uuid4()),
+        _scalar("completed"),
         _rows([("accepted", "workspace-digest")]),
         _scalar_rows([run]),
     ]
@@ -134,7 +134,7 @@ async def test_accepted_criteria_must_be_reapproved_after_workspace_changes(
     db.execute.side_effect = [
         _scalar(task),
         _scalar(workspace),
-        _scalar(uuid.uuid4()),
+        _scalar("completed"),
         _rows([("accepted", "old-digest")]),
         _scalar_rows([run]),
     ]
@@ -158,13 +158,53 @@ async def test_accepted_criteria_must_be_reapproved_after_workspace_changes(
 
 
 @pytest.mark.asyncio
-async def test_manual_workspace_without_handoff_can_complete_on_accepted_criteria(
+async def test_task_cannot_complete_for_a_workspace_other_than_the_preview_digest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from solvyn.workflows import task_completion
 
     task = _task(criteria_defined=True, status="review_required")
     workspace = SimpleNamespace(id=uuid.uuid4())
+    run = SimpleNamespace(kind="test", status="passed", source_digest="current-digest")
+    db = AsyncMock()
+    db.execute.side_effect = [
+        _scalar(task),
+        _scalar(workspace),
+        _scalar("completed"),
+        _rows([("accepted", "current-digest")]),
+        _scalar_rows([run]),
+    ]
+
+    class FakeWorkspaceManager:
+        def __init__(self, _root: Path) -> None:
+            pass
+
+        def get(self, _workspace_id: uuid.UUID) -> object:
+            return workspace
+
+        def fingerprint(self, _workspace: object) -> str:
+            return "current-digest"
+
+    monkeypatch.setattr(task_completion, "WorkspaceManager", FakeWorkspaceManager)
+
+    status = await refresh_task_completion_state(
+        db,
+        task,
+        expected_workspace_digest="different-preview-digest",
+    )
+
+    assert status == "review_required"
+    assert task.completed_at is None
+
+
+@pytest.mark.asyncio
+async def test_manual_workspace_without_handoff_can_complete_on_accepted_criteria(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from solvyn.workflows import task_completion
+
+    task = _task(criteria_defined=True, status="review_required")
+    workspace = SimpleNamespace(id=uuid.uuid4(), repository_id=uuid.uuid4())
     db = AsyncMock()
     db.execute.side_effect = [
         _scalar(task),
@@ -193,6 +233,128 @@ async def test_manual_workspace_without_handoff_can_complete_on_accepted_criteri
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handoff_status", "expected_status"),
+    [
+        ("pending", "review_required"),
+        ("running", "review_required"),
+        ("failed", "review_required"),
+        ("completed", "completed"),
+    ],
+)
+async def test_repository_workspace_requires_completed_handoff_even_with_passed_verification(
+    monkeypatch: pytest.MonkeyPatch,
+    handoff_status: str,
+    expected_status: str,
+) -> None:
+    from solvyn.workflows import task_completion
+
+    task = _task(criteria_defined=True, status="review_required")
+    workspace = SimpleNamespace(id=uuid.uuid4())
+    run = SimpleNamespace(kind="test", status="passed", source_digest="workspace-digest")
+    db = AsyncMock()
+    db.execute.side_effect = [
+        _scalar(task),
+        _scalar(workspace),
+        _scalar(handoff_status),
+        _rows([("accepted", "workspace-digest")]),
+        _scalar_rows([run]),
+    ]
+
+    class FakeWorkspaceManager:
+        def __init__(self, _root: Path) -> None:
+            pass
+
+        def get(self, _workspace_id: uuid.UUID) -> object:
+            return workspace
+
+        def fingerprint(self, _workspace: object) -> str:
+            return "workspace-digest"
+
+    monkeypatch.setattr(task_completion, "WorkspaceManager", FakeWorkspaceManager)
+
+    status = await refresh_task_completion_state(db, task)
+
+    assert status == expected_status
+    if expected_status == "completed":
+        assert task.completed_at is not None
+    else:
+        assert task.completed_at is None
+
+
+@pytest.mark.asyncio
+async def test_repository_handoff_requires_at_least_one_required_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from solvyn.workflows import task_completion
+
+    task = _task(criteria_defined=True, status="review_required")
+    workspace = SimpleNamespace(id=uuid.uuid4(), repository_id=uuid.uuid4())
+    db = AsyncMock()
+    db.execute.side_effect = [
+        _scalar(task),
+        _scalar(workspace),
+        _scalar("completed"),
+        _rows([("accepted", "workspace-digest")]),
+        _scalar_rows([]),
+    ]
+
+    class FakeWorkspaceManager:
+        def __init__(self, _root: Path) -> None:
+            pass
+
+        def get(self, _workspace_id: uuid.UUID) -> object:
+            return workspace
+
+        def fingerprint(self, _workspace: object) -> str:
+            return "workspace-digest"
+
+    monkeypatch.setattr(task_completion, "WorkspaceManager", FakeWorkspaceManager)
+
+    status = await refresh_task_completion_state(db, task)
+
+    assert status == "review_required"
+    assert task.completed_at is None
+    required_runs_query = db.execute.await_args_list[-1].args[0]
+    assert any("required_for_completion" in str(clause) for clause in required_runs_query._where_criteria)
+
+
+@pytest.mark.asyncio
+async def test_manual_file_handoff_does_not_require_a_verification_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from solvyn.workflows import task_completion
+
+    task = _task(criteria_defined=True, status="review_required")
+    workspace = SimpleNamespace(id=uuid.uuid4(), repository_id=None)
+    db = AsyncMock()
+    db.execute.side_effect = [
+        _scalar(task),
+        _scalar(workspace),
+        _scalar("completed"),
+        _rows([("accepted", "manual-workspace-digest")]),
+        _scalar_rows([]),
+    ]
+
+    class FakeWorkspaceManager:
+        def __init__(self, _root: Path) -> None:
+            pass
+
+        def get(self, _workspace_id: uuid.UUID) -> object:
+            return workspace
+
+        def fingerprint(self, _workspace: object) -> str:
+            return "manual-workspace-digest"
+
+    monkeypatch.setattr(task_completion, "WorkspaceManager", FakeWorkspaceManager)
+
+    status = await refresh_task_completion_state(db, task)
+
+    assert status == "completed"
+    assert task.completed_at is not None
+
+
+@pytest.mark.asyncio
 async def test_workspace_fingerprint_failure_never_satisfies_acceptance_or_verification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -206,7 +368,7 @@ async def test_workspace_fingerprint_failure_never_satisfies_acceptance_or_verif
     db.execute.side_effect = [
         _scalar(task),
         _scalar(workspace),
-        _scalar(uuid.uuid4()),
+        _scalar("completed"),
         _rows([("accepted", None)]),
         _scalar_rows([run]),
     ]
