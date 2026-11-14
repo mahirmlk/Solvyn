@@ -46,8 +46,8 @@ from solvyn.db.session import async_session_factory, bind_tenant_scope, get_sess
 from solvyn.multi_tenant.middleware import tenant_context
 from solvyn.proactive import task_assignment_event
 from solvyn.task_results import result_metadata
-from solvyn.workflows.executor import WorkflowExecutionTimeoutError, workflow_executor
 from solvyn.workflows.conversation_tasks import conversation_handoff_idempotency_key, sync_conversation_task_state
+from solvyn.workflows.executor import WorkflowExecutionTimeoutError, workflow_executor
 from solvyn.workflows.task_completion import refresh_task_completion_state
 from solvyn.workflows.task_generator import TaskGenerator
 from solvyn.workflows.templates import WORKFLOW_TEMPLATES
