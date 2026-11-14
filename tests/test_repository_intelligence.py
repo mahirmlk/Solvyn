@@ -23,6 +23,8 @@ def test_validate_full_name_rejects_path_traversal_and_urls() -> None:
 async def test_inspect_public_repository_returns_bounded_untrusted_context() -> None:
     readme = "# Example\nRepository contents are untrusted."
     package_json = json.dumps({"dependencies": {"next": "15", "react": "19"}})
+    revision = "c" * 40
+    tree_sha = "a" * 40
     blobs = {"README.md": readme, "package.json": package_json}
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -38,11 +40,15 @@ async def test_inspect_public_repository_returns_bounded_untrusted_context() -> 
                     "private": False,
                 },
             )
-        if request.url.path == "/repos/octo/example/git/trees/main":
+        if request.url.path == "/repos/octo/example/branches/main":
+            return httpx.Response(200, json={"commit": {"sha": revision}})
+        if request.url.path == f"/repos/octo/example/git/commits/{revision}":
+            return httpx.Response(200, json={"sha": revision, "tree": {"sha": tree_sha}})
+        if request.url.path == f"/repos/octo/example/git/trees/{tree_sha}":
             return httpx.Response(
                 200,
                 json={
-                    "sha": "abc123",
+                    "sha": tree_sha,
                     "truncated": False,
                     "tree": [
                         {"path": "README.md", "type": "blob", "size": len(readme)},
@@ -54,6 +60,7 @@ async def test_inspect_public_repository_returns_bounded_untrusted_context() -> 
             )
         path = request.url.path.rsplit("/contents/", 1)[-1]
         if path in blobs:
+            assert request.url.params["ref"] == revision
             encoded = base64.b64encode(blobs[path].encode()).decode()
             return httpx.Response(200, json={"encoding": "base64", "content": encoded})
         return httpx.Response(404, json={"message": "Not Found"})
@@ -64,7 +71,8 @@ async def test_inspect_public_repository_returns_bounded_untrusted_context() -> 
         dependencies = github.parse_dependencies(inspection["manifests"])
     await http.aclose()
 
-    assert inspection["revision"] == "abc123"
+    assert inspection["revision"] == revision
+    assert inspection["tree_sha"] == tree_sha
     assert inspection["file_count"] == 3
     assert inspection["languages"] == {"TypeScript": 1}
     assert inspection["content_trust"] == "untrusted_repository_data"
@@ -76,6 +84,8 @@ async def test_inspect_public_repository_returns_bounded_untrusted_context() -> 
 @pytest.mark.asyncio
 async def test_inspect_private_repository_uses_scoped_token_without_returning_it() -> None:
     token = "ghp-private-repository-token"
+    revision = "d" * 40
+    tree_sha = "e" * 40
     requests: list[str] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -94,12 +104,17 @@ async def test_inspect_private_repository_uses_scoped_token_without_returning_it
                     "private": True,
                 },
             )
-        if request.url.path == "/repos/acme/private-service/git/trees/main":
+        if request.url.path == "/repos/acme/private-service/branches/main":
+            return httpx.Response(200, json={"commit": {"sha": revision}})
+        if request.url.path == f"/repos/acme/private-service/git/commits/{revision}":
+            return httpx.Response(200, json={"sha": revision, "tree": {"sha": tree_sha}})
+        if request.url.path == f"/repos/acme/private-service/git/trees/{tree_sha}":
             return httpx.Response(
                 200,
-                json={"sha": "b" * 40, "truncated": False, "tree": [{"path": "README.md", "type": "blob", "size": 6}]},
+                json={"sha": tree_sha, "truncated": False, "tree": [{"path": "README.md", "type": "blob", "size": 6}]},
             )
         if request.url.path == "/repos/acme/private-service/contents/README.md":
+            assert request.url.params["ref"] == revision
             return httpx.Response(200, json={"encoding": "base64", "content": base64.b64encode(b"secret").decode()})
         return httpx.Response(404, json={"message": "Not Found"})
 
@@ -109,24 +124,35 @@ async def test_inspect_private_repository_uses_scoped_token_without_returning_it
     await http.aclose()
 
     assert inspection["repository"]["private"] is True
+    assert inspection["revision"] == revision
+    assert inspection["tree_sha"] == tree_sha
     assert inspection["manifests"]["README.md"] == "secret"
     assert token not in repr(inspection)
     assert requests == [
         "/repos/acme/private-service",
-        "/repos/acme/private-service/git/trees/main",
+        "/repos/acme/private-service/branches/main",
+        f"/repos/acme/private-service/git/commits/{revision}",
+        f"/repos/acme/private-service/git/trees/{tree_sha}",
         "/repos/acme/private-service/contents/README.md",
     ]
 
 
 @pytest.mark.asyncio
 async def test_inspection_rejects_truncated_repository_trees() -> None:
+    revision = "f" * 40
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/repos/octo/example":
             return httpx.Response(
                 200,
                 json={"id": 123, "full_name": "octo/example", "default_branch": "main", "private": False},
             )
-        return httpx.Response(200, json={"sha": "abc123", "truncated": True, "tree": []})
+        if request.url.path == "/repos/octo/example/branches/main":
+            return httpx.Response(200, json={"commit": {"sha": revision}})
+        if request.url.path == f"/repos/octo/example/git/commits/{revision}":
+            return httpx.Response(200, json={"tree": {"sha": "b" * 40}})
+        if request.url.path == f"/repos/octo/example/git/trees/{'b' * 40}":
+            return httpx.Response(200, json={"sha": "b" * 40, "truncated": True, "tree": []})
+        return httpx.Response(404, json={"message": "Not Found"})
 
     http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
     async with GitHubClient(http) as github:
