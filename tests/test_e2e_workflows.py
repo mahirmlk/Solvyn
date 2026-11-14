@@ -218,6 +218,336 @@ async def test_repository_workspace_requires_a_delegated_task_handoff(client: As
 
 
 @pytest.mark.asyncio
+async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """Exercise repository authorization, pinned source, and draft delivery over HTTP."""
+    from sqlalchemy import select
+
+    from solvyn.api.v1 import verification as verification_api
+    from solvyn.config import settings
+    from solvyn.db.models import (
+        Organization,
+        OrganizationMembership,
+        Project,
+        Repository,
+        Task,
+        TaskHandoff,
+        TeammateProfile,
+        TeammateProjectAssignment,
+        Tenant,
+        User,
+    )
+    from solvyn.db.session import async_session_factory, bind_tenant_scope
+    from solvyn.identity.security import create_access_token
+    from solvyn.sandbox.workspaces import WorkspaceManager
+    from solvyn.workflows import task_completion
+
+    workspace_root = str(tmp_path / "repository-workspaces")
+    monkeypatch.setattr(settings, "sandbox_workspace_root", workspace_root)
+    monkeypatch.setattr(verification_api.settings, "sandbox_workspace_root", workspace_root)
+    monkeypatch.setattr(task_completion.settings, "sandbox_workspace_root", workspace_root)
+
+    workflow = await client.post(
+        "/api/v1/workflows/feature/run",
+        json={"requirement": "Update the connected repository health endpoint"},
+    )
+    assert workflow.status_code == 200
+    execution_id = uuid.UUID(workflow.json()["execution_id"])
+    listed = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
+    assert listed.status_code == 200
+    parent_id, task_id = (uuid.UUID(row["task_id"]) for row in listed.json()["tasks"][:2])
+
+    user_id, organization_id, project_id, teammate_id, repository_id = (uuid.uuid4() for _ in range(5))
+    source_sha = "a" * 40
+    source_tree_sha = "b" * 40
+    source_text = "def health():\n    return {'status': 'ok'}\n"
+    async with async_session_factory() as db:
+        tenant = (await db.execute(select(Tenant).where(Tenant.slug == "test-tenant"))).scalar_one()
+        await bind_tenant_scope(db, tenant.id)
+        db.add_all(
+            [
+                Organization(
+                    id=organization_id,
+                    name="Repository Acceptance",
+                    slug=f"repo-acceptance-{uuid.uuid4().hex[:10]}",
+                    tenant_id=tenant.id,
+                ),
+                Project(
+                    id=project_id,
+                    organization_id=organization_id,
+                    tenant_id=tenant.id,
+                    name="Connected API",
+                    slug=f"connected-api-{uuid.uuid4().hex[:10]}",
+                ),
+                TeammateProfile(
+                    id=teammate_id,
+                    organization_id=organization_id,
+                    tenant_id=tenant.id,
+                    name="Repository Engineer",
+                    role="Software Engineer",
+                    agent_type="backend-engineer",
+                ),
+            ]
+        )
+        # The repository RLS policy checks for its project row while inserting.
+        # Commit the organization/project first so the policy can authorize the
+        # repository insert in a new transaction under the same tenant scope.
+        await db.flush()
+        await db.commit()
+        await bind_tenant_scope(db, tenant.id)
+        db.add_all(
+            [
+                Repository(
+                    id=repository_id,
+                    project_id=project_id,
+                    full_name="solvyn/acceptance-fixture",
+                    provider="github",
+                    default_branch="main",
+                    url="https://github.com/solvyn/acceptance-fixture",
+                ),
+                User(id=user_id, email=f"repo-acceptance-{uuid.uuid4().hex[:10]}@example.com", password_hash="test-hash"),
+                OrganizationMembership(user_id=user_id, organization_id=organization_id, role="owner"),
+                TeammateProjectAssignment(teammate_id=teammate_id, project_id=project_id),
+            ]
+        )
+        task = (await db.execute(select(Task).where(Task.id == task_id))).scalar_one()
+        task.parent_task_id = parent_id
+        db.add(
+            TaskHandoff(
+                tenant_id=tenant.id,
+                parent_task_id=parent_id,
+                child_task_id=task_id,
+                idempotency_key=uuid.uuid4(),
+                teammate_id=teammate_id,
+                project_id=project_id,
+                delegated_from="Tech Lead",
+                delegated_to="Software Engineer",
+                reason="Implement the scoped repository change",
+                input_data='{"task":"Implement the scoped repository change"}',
+                status="completed",
+            )
+        )
+        await db.commit()
+
+    client.headers["Authorization"] = f"Bearer {create_access_token(subject=str(user_id))}"
+    client.headers["X-Tenant-Slug"] = "test-tenant"
+
+    class FakeRepositoryProvider:
+        async def __aenter__(self) -> FakeRepositoryProvider:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def repository_metadata(self, _full_name: str) -> dict[str, Any]:
+            return {"default_branch": "main", "private": False}
+
+        async def branch_commit(self, _full_name: str, _branch: str) -> str:
+            return source_sha
+
+        async def repository_tree(self, _full_name: str, sha: str) -> tuple[str, list[dict[str, Any]]]:
+            assert sha == source_sha
+            return source_tree_sha, [
+                {"path": "src/health.py", "type": "blob", "mode": "100644", "size": len(source_text)}
+            ]
+
+        async def text_file(self, _full_name: str, _path: str, sha: str, *, max_bytes: int) -> str:
+            assert sha == source_sha
+            assert max_bytes >= len(source_text)
+            return source_text
+
+    monkeypatch.setattr(
+        verification_api,
+        "get_authorized_repository_provider",
+        AsyncMock(return_value=FakeRepositoryProvider()),
+    )
+    workspace_response = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/workspace",
+        json={"repository_id": str(repository_id), "repository_paths": ["src/health.py"]},
+    )
+    assert workspace_response.status_code == 201, workspace_response.text
+    assert workspace_response.json()["source_commit_sha"] == source_sha
+    assert workspace_response.json()["source_paths"] == ["src/health.py"]
+
+    workspace_manager = WorkspaceManager(Path(workspace_root))
+    managed = workspace_manager.get(uuid.UUID(workspace_response.json()["workspace_id"]))
+    workspace_manager.write_file(
+        managed,
+        "src/health.py",
+        b"def health():\n    return {'status': 'ready'}\n",
+    )
+
+    criteria = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria",
+        json={"criteria": ["The updated health endpoint returns the ready status"]},
+    )
+    assert criteria.status_code == 201, criteria.text
+    criterion_id = criteria.json()["acceptance_criteria"][0]["id"]
+    accepted = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria/{criterion_id}/decision",
+        json={"decision": "accepted", "note": "Reviewed the updated repository workspace"},
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert len(accepted.json()["decision_workspace_digest"]) == 64
+
+    async def fake_verification_run(self: Any, managed_workspace: Any, command: list[str]) -> Any:
+        from solvyn.sandbox.runtime import SandboxResult
+
+        return SandboxResult(uuid.uuid4(), tuple(command), 0, False, "1 passed", "", False, 0.05)
+
+    monkeypatch.setattr(verification_api.DockerSandboxRunner, "run", fake_verification_run)
+    verification = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs",
+        json={"kind": "test"},
+    )
+    assert verification.status_code == 202, verification.text
+    approval = await client.post(
+        f"/api/v1/approvals/{verification.json()['approval_id']}/approve",
+        json={"note": "Approved the task verification"},
+    )
+    assert approval.status_code == 200, approval.text
+    verification_result = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs/"
+        f"{verification.json()['verification_run']['id']}/execute"
+    )
+    assert verification_result.status_code == 200, verification_result.text
+    assert verification_result.json()["status"] == "passed"
+    current_digest = workspace_manager.fingerprint(managed)
+    acceptance_after = await client.get(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria"
+    )
+    verification_after = await client.get(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs"
+    )
+    criterion_evidence = acceptance_after.json()["acceptance_criteria"][0]
+    run_evidence = verification_after.json()["verification_runs"][0]
+    assert criterion_evidence["status"] == "accepted"
+    assert criterion_evidence["decision_workspace_digest"] == current_digest
+    assert run_evidence["required_for_completion"] is True
+    assert run_evidence["status"] == "passed"
+    assert run_evidence["source_digest"] == current_digest
+    completed_tasks = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
+    completed_tasks_body = completed_tasks.json()
+    delivery_task = next(item for item in completed_tasks_body["tasks"] if item["task_id"] == str(task_id))
+    delivery_handoff = next(
+        item for item in completed_tasks_body["handoffs"] if item["child_task_id"] == str(task_id)
+    )
+    assert delivery_task["status"] == "completed", (
+        "Task completion gates did not pass: "
+        f"task_status={delivery_task['status']!r}, workspace_digest={current_digest!r}, "
+        f"criteria={delivery_task['acceptance_criteria']!r}, "
+        f"required_verifications={[run for run in delivery_task['verification_runs'] if run['required_for_completion']]!r}, "
+        f"handoff_status={delivery_handoff['status']!r}"
+    )
+
+    class FakeGitHub:
+        def __init__(self, *, token: str) -> None:
+            assert token == "test-github-token"
+            self.write_calls: list[str] = []
+
+        async def __aenter__(self) -> FakeGitHub:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def repository_metadata(self, _full_name: str) -> dict[str, Any]:
+            return {"default_branch": "main", "private": False}
+
+        async def repository_tree(self, _full_name: str, sha: str) -> tuple[str, list[dict[str, Any]]]:
+            assert sha == source_sha
+            import hashlib
+
+            git_blob = hashlib.sha1(b"blob " + str(len(source_text.encode())).encode() + b"\0" + source_text.encode()).hexdigest()
+            return source_tree_sha, [
+                {"path": "src/health.py", "type": "blob", "mode": "100644", "size": len(source_text), "sha": git_blob}
+            ]
+
+        async def text_file(self, _full_name: str, _path: str, sha: str, *, max_bytes: int) -> str:
+            assert sha == source_sha
+            assert max_bytes > 0
+            return source_text
+
+        async def create_branch_at_commit(self, _full_name: str, name: str, sha: str) -> dict[str, str]:
+            self.write_calls.append("branch")
+            assert sha == source_sha
+            return {"name": name, "sha": "c" * 40}
+
+        async def commit_files(
+            self,
+            _full_name: str,
+            _branch: str,
+            *,
+            expected_head_sha: str,
+            message: str,
+            files: list[dict[str, str]],
+            deleted_paths: list[str],
+        ) -> dict[str, str]:
+            self.write_calls.append("commit")
+            assert expected_head_sha == "c" * 40
+            assert message
+            assert files == [{"path": "src/health.py", "content": "def health():\n    return {'status': 'ready'}\n"}]
+            assert deleted_paths == []
+            return {"sha": "d" * 40}
+
+        async def create_pull_request(self, _full_name: str, *, title: str, body: str, head: str, base: str) -> dict[str, Any]:
+            self.write_calls.append("pull_request")
+            assert title
+            assert head.startswith("solvyn/")
+            assert base == "main"
+            return {"number": 12, "title": title, "url": "https://github.com/solvyn/acceptance-fixture/pull/12", "state": "open", "draft": True}
+
+    monkeypatch.setattr(verification_api, "load_organization_github_token", AsyncMock(return_value="test-github-token"))
+    fake_github = FakeGitHub(token="test-github-token")
+    monkeypatch.setattr(verification_api, "GitHubClient", lambda *, token: fake_github)
+
+    preview = await client.get(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/delivery-preview"
+    )
+    assert preview.status_code == 200, preview.text
+    preview_body = preview.json()
+    assert preview_body["can_deliver"] is True
+    assert preview_body["source_commit_sha"] == source_sha
+    assert preview_body["diffs"][0]["path"] == "src/health.py"
+
+    payload = {
+        "expected_diff_digest": preview_body["diff_digest"],
+        "branch_name": "solvyn/acceptance-health-fix",
+        "commit_message": "Improve health readiness response",
+        "pull_request_title": "Improve health readiness response",
+        "pull_request_body": "Updates the scoped health response.",
+    }
+    delivered = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/deliver",
+        json=payload,
+    )
+    assert delivered.status_code == 201, delivered.text
+    assert delivered.json()["merged"] is False
+    assert delivered.json()["pull_request"]["draft"] is True
+    assert delivered.json()["approved_diff_digest"] == preview_body["diff_digest"]
+    assert fake_github.write_calls == ["branch", "commit", "pull_request"]
+
+    replay = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/deliver",
+        json=payload,
+    )
+    assert replay.status_code == 201, replay.text
+    assert replay.json()["replayed"] is True
+    assert replay.json()["pull_request"]["url"] == delivered.json()["pull_request"]["url"]
+    assert fake_github.write_calls == ["branch", "commit", "pull_request"]
+
+    evidence = await client.get(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/deliveries/{delivered.json()['delivery_id']}/evidence"
+    )
+    assert evidence.status_code == 200, evidence.text
+    assert evidence.json()["evidence"]["files"][0]["path"] == "src/health.py"
+    assert "ready" in evidence.json()["evidence"]["diffs"][0]["diff"]
+
+
+@pytest.mark.asyncio
 async def test_task_verification_is_sandboxed_and_durable(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -225,8 +555,8 @@ async def test_task_verification_is_sandboxed_and_durable(
 ) -> None:
     from sqlalchemy import select
 
-    from solvyn.config import settings
     from solvyn.api.v1 import verification as verification_api
+    from solvyn.config import settings
     from solvyn.sandbox.runtime import DockerSandboxRunner, SandboxResult
     from solvyn.workflows import task_completion
 
@@ -239,7 +569,13 @@ async def test_task_verification_is_sandboxed_and_durable(
     assert workflow.status_code == 200
     execution_id = workflow.json()["execution_id"]
     task_list = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
-    task_id = task_list.json()["tasks"][0]["task_id"]
+    task_list_body = task_list.json()
+    selected_task = task_list_body["tasks"][0]
+    assert selected_task["acceptance_criteria_defined"] is False, (
+        "Fresh workflow task unexpectedly has acceptance criteria defined: "
+        f"task={selected_task!r}, handoffs={task_list_body['handoffs']!r}"
+    )
+    task_id = selected_task["task_id"]
 
     workspace = await client.post(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/workspace",
