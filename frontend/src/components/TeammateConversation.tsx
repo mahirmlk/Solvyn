@@ -202,11 +202,11 @@ export default function TeammateConversation({ teammate, projectId }: Props) {
     setError("");
     try {
       await api.createTaskHandoff(currentTaskState.execution_id, currentTaskState.root_task_id, {
-        idempotency_key: currentTaskState.idempotency_key,
+        idempotency_key: currentTaskState.idempotency_key!,
         target_teammate_id: teammate.id,
         project_id: projectId,
-        reason: currentTaskState.reason,
-        input_data: currentTaskState.input_data,
+        reason: currentTaskState.reason!,
+        input_data: currentTaskState.input_data!,
         requires_approval: true,
       });
       const history = await api.getTeammateConversationMessages(teammate.id, targetConversationId);
