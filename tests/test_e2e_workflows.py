@@ -2481,6 +2481,8 @@ async def test_saved_conversation_conversion_gates_repository_workspace_until_ap
     assert resumed_handoff.json()["handoff_id"] == task["handoff_id"]
     task_snapshot = await client.get(f"/api/v1/workflows/executions/{task['execution_id']}/tasks")
     assert task_snapshot.status_code == 200, task_snapshot.text
+    root_task = next(row for row in task_snapshot.json()["tasks"] if row["task_id"] == task["root_task_id"])
+    assert root_task["input"] == {"text": task["confirmed_details"]["description"]}
     completed_handoff = next(
         row for row in task_snapshot.json()["handoffs"] if row["handoff_id"] == task["handoff_id"]
     )

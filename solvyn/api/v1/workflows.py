@@ -645,6 +645,15 @@ async def cancel_workflow_execution(execution_id: uuid.UUID) -> dict[str, str]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _task_input_from_description(description: str | None) -> Any:
+    if not description:
+        return {}
+    try:
+        return json.loads(description)
+    except json.JSONDecodeError:
+        return {"text": description}
+
+
 @router.get("/executions/{execution_id}/tasks", summary="List durable tasks for a workflow execution")
 async def list_workflow_execution_tasks(
     execution_id: uuid.UUID,
@@ -763,7 +772,7 @@ async def list_workflow_execution_tasks(
                 "attempt_count": task.attempt_count,
                 "max_attempts": task.max_attempts,
                 "dependencies": depends_on.get(task.id, []),
-                "input": json.loads(task.description) if task.description else {},
+                "input": _task_input_from_description(task.description),
                 "result": json.loads(task.result) if task.result else None,
                 "error": task.error,
                 "scheduled_at": task.scheduled_at.isoformat() if task.scheduled_at else None,
