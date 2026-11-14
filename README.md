@@ -128,7 +128,7 @@ On Windows PowerShell, activate a virtual environment with `.venv\Scripts\Activa
 
 ### Configure and start services
 
-Copy `.env.example` to `.env`. Set unique local values for `POSTGRES_PASSWORD`, `JWT_SECRET`, and `API_KEY_SECRET`, and add a key for the model provider you use. Keep `.env` out of source control. Public registration is disabled by default; see [deployment](DEPLOYMENT.md) for the bootstrap and networked setup guidance.
+Copy `.env.example` to `.env`. Set unique local values for `POSTGRES_PASSWORD`, `JWT_SECRET`, and `API_KEY_SECRET`, and add a key for the model provider you use. Keep `.env` out of source control. Public registration is disabled by default; see [deployment](docs/DEPLOYMENT.md) for the bootstrap and networked setup guidance.
 
 ```bash
 docker compose up -d db redis
@@ -304,7 +304,7 @@ The repository's `.env.example` lists the environment variables. For local devel
 | GitHub integration | `INTEGRATION_ENCRYPTION_KEYS`, `GITHUB_WEBHOOK_SECRET` | Encrypt organization integration credentials and authenticate repository webhooks. |
 | API and sandbox | `HOST`, `PORT`, `SANDBOX_WORKSPACE_ROOT`, `SANDBOX_IMAGE`, `WORKFLOW_EXECUTION_TIMEOUT_SECONDS` | Configure the local API address and sandbox/workflow runtime. |
 
-Registration is disabled by default. The development example contains placeholders and must not be used as a production secret set. Keep `.env` out of source control. For initial user bootstrap, encryption key rotation, network exposure, backups, and deployment, see [Deployment](DEPLOYMENT.md) and [Security](SECURITY.md).
+Registration is disabled by default. The development example contains placeholders and must not be used as a production secret set. Keep `.env` out of source control. For initial user bootstrap, encryption key rotation, network exposure, backups, and deployment, see [Deployment](docs/DEPLOYMENT.md) and [Security](SECURITY.md).
 
 ## Current limits
 
@@ -319,9 +319,9 @@ Registration is disabled by default. The development example contains placeholde
 | Guide | Contents |
 |---|---|
 | [Architecture](ARCHITECTURE.md) | Services, data flow, and design decisions |
-| [API reference](API.md) | Routes, authentication, request/response schemas, and errors |
-| [Deployment](DEPLOYMENT.md) | Local setup, self-hosted Compose, Kubernetes workflow, backups, and recovery |
-| [Project plan](PLAN.md) | Product requirements, architecture decisions, and planned work |
+| [API reference](docs/API.md) | Routes, authentication, request/response schemas, and errors |
+| [Deployment](docs/DEPLOYMENT.md) | Local setup, self-hosted Compose, Kubernetes workflow, backups, and recovery |
+| [Product vision](docs/PRODUCT_VISION.md) | Product direction and planned architecture, with aspirational requirements identified |
 | [Security](SECURITY.md) | Authentication, tenant isolation, integrations, and execution boundaries |
 | [Repository intelligence](docs/REPOSITORY_INTELLIGENCE.md) | GitHub connection, repository inspection, and access limits |
 | [Sandbox runtime](docs/SANDBOX_RUNTIME.md) | Workspace tools, verification profiles, and container isolation |
