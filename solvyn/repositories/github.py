@@ -725,7 +725,7 @@ class GitHubClient(RepositoryProvider):
                     break
                 excerpt = line.strip()
                 if len(excerpt) > _MAX_CONTENT_SEARCH_SNIPPET_CHARS:
-                    excerpt = excerpt[: _MAX_CONTENT_SEARCH_SNIPPET_CHARS - 1] + "â€¦"
+                    excerpt = excerpt[: _MAX_CONTENT_SEARCH_SNIPPET_CHARS - 1] + "…"
                 results.append(
                     {
                         "path": entry["path"],

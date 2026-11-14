@@ -1,6 +1,6 @@
 """End-to-end tests for Solvyn API workflows.
 
-These tests exercise the full HTTPâ†’middlewareâ†’routeâ†’agentâ†’LLM stack via
+These tests exercise the full HTTP→middleware→route→agent→LLM stack via
 ``httpx.AsyncClient`` (HTTP) and ``fastapi.testclient.TestClient`` (WebSocket).
 All LLM calls are mocked so the suite runs hermetically without any real
 API keys.
@@ -28,7 +28,7 @@ from httpx import ASGITransport, AsyncClient
 pytestmark = pytest.mark.e2e
 
 
-# â”€â”€â”€ Module-level fixtures â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─── Module-level fixtures ──────────────────────────────────────────────
 
 
 @pytest.fixture(autouse=True)
@@ -111,14 +111,14 @@ def low_rate_limit() -> Any:
 
 @pytest_asyncio.fixture
 async def unauthed_client(app: Any) -> AsyncGenerator[AsyncClient, None]:
-    """Client with no API key â€” used to verify public vs. protected paths."""
+    """Client with no API key — used to verify public vs. protected paths."""
     transport = ASGITransport(app=app)
     async with LifespanManager(app):
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             yield ac
 
 
-# â”€â”€â”€ Health check flow â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─── Health check flow ──────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -161,7 +161,7 @@ async def test_health_endpoints_share_no_auth_requirement(unauthed_client: Async
     assert deep.status_code in (200, 503)
 
 
-# â”€â”€â”€ Full feature workflow â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─── Full feature workflow ──────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -353,7 +353,8 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
             return source_tree_sha
 
         async def repository_tree(self, _full_name: str, tree_sha: str) -> tuple[str, list[dict[str, Any]]]:
-            assert tree_sha == source_tree_sha            return source_tree_sha, [
+            assert tree_sha == source_tree_sha
+            return source_tree_sha, [
                 {"path": "src/health.py", "type": "blob", "mode": "100644", "size": len(source_text)}
             ]
 
@@ -1971,7 +1972,7 @@ async def test_audit_endpoint_requires_tenant_context(unauthed_client: AsyncClie
     assert response.status_code == 401
 
 
-# â”€â”€â”€ Tenant isolation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─── Tenant isolation ───────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -2016,7 +2017,7 @@ async def test_workflows_endpoint_distinguishes_tenants(client: AsyncClient) -> 
         response_a = await client.get("/api/v1/workflows/", headers={"X-Tenant-Slug": "tenant-a"})
         response_b = await client.get("/api/v1/workflows/", headers={"X-Tenant-Slug": "tenant-b"})
 
-    # Both requests succeed â€” the proof of isolation is that the tenant
+    # Both requests succeed — the proof of isolation is that the tenant
     # middleware dispatched each one with the correct slug header.
     assert response_a.status_code == 200
     assert response_b.status_code == 200
@@ -2065,7 +2066,7 @@ async def test_session_listing_returns_empty_without_tenant(client: AsyncClient)
     assert body["sessions"] == []
 
 
-# â”€â”€â”€ API key auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─── API key auth ───────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -2195,7 +2196,7 @@ async def test_agents_endpoint_requires_auth(unauthed_client: AsyncClient) -> No
     assert response.status_code == 401
 
 
-# â”€â”€â”€ Rate limiting â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─── Rate limiting ──────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -2228,7 +2229,7 @@ async def test_rate_limit_response_payload_shape(
     assert "scope" in body
 
 
-# â”€â”€â”€ WebSocket connection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─── WebSocket connection ──────────────────────────────────────────────
 
 
 def test_websocket_connects_with_valid_api_key() -> None:
