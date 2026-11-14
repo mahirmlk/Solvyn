@@ -10,6 +10,7 @@ from sqlalchemy import and_, func, or_, select, update
 
 from solvyn.agents.graph import AgentGraph
 from solvyn.agents.schema import ExecutionEdge, ExecutionGraph, ExecutionNode
+from solvyn.config import settings
 from solvyn.db.models import ExecutionGraph as ExecutionGraphModel
 from solvyn.db.models import Session, Task, TaskDependency, Tenant
 from solvyn.db.session import async_session_factory, bind_tenant_scope
@@ -20,6 +21,10 @@ from solvyn.workflows.templates import WORKFLOW_TEMPLATES, WorkflowStep
 logger = logging.getLogger(__name__)
 _LEASE_DURATION = timedelta(seconds=60)
 _LEASE_HEARTBEAT_INTERVAL = 20
+
+
+class WorkflowExecutionTimeoutError(TimeoutError):
+    """Raised when a workflow exceeds its configured wall-clock deadline."""
 
 
 class WorkflowExecutor:
@@ -78,8 +83,13 @@ class WorkflowExecutor:
                         graph_id=execution_id,
                     ),
                 )
-        except BaseException:
-            await self._mark_failed(execution_id, lease_id, tenant_uuid)
+        except BaseException as exc:
+            await self._mark_failed(
+                execution_id,
+                lease_id,
+                tenant_uuid,
+                error_message=str(exc) if isinstance(exc, WorkflowExecutionTimeoutError) else "Workflow execution failed",
+            )
             raise
 
         # Build runtime outputs from completed nodes and re-resolve inputs
@@ -271,8 +281,13 @@ class WorkflowExecutor:
                         execution_status="resuming",
                     ),
                 )
-        except BaseException:
-            await self._mark_failed(str(execution_id), lease_id, tenant_uuid)
+        except BaseException as exc:
+            await self._mark_failed(
+                str(execution_id),
+                lease_id,
+                tenant_uuid,
+                error_message=str(exc) if isinstance(exc, WorkflowExecutionTimeoutError) else "Workflow execution failed",
+            )
             raise
         return result
 
@@ -529,7 +544,16 @@ class WorkflowExecutor:
         execution_task: asyncio.Task[ExecutionGraph] = asyncio.create_task(execution)
         heartbeat_task: asyncio.Task[bool] = asyncio.create_task(self._heartbeat(execution_id, lease_id, tenant_id))
         try:
-            done, _ = await asyncio.wait({execution_task, heartbeat_task}, return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait(
+                {execution_task, heartbeat_task},
+                timeout=settings.workflow_execution_timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                raise WorkflowExecutionTimeoutError(
+                    "Workflow execution exceeded "
+                    f"{settings.workflow_execution_timeout_seconds} seconds"
+                )
             if execution_task in done:
                 return await execution_task
             if heartbeat_task in done:
@@ -564,7 +588,14 @@ class WorkflowExecutor:
                 if renewed.scalar_one_or_none() != uuid.UUID(execution_id):
                     return False
 
-    async def _mark_failed(self, execution_id: str, lease_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
+    async def _mark_failed(
+        self,
+        execution_id: str,
+        lease_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        *,
+        error_message: str = "Workflow execution failed",
+    ) -> None:
         async with async_session_factory() as db:
             await bind_tenant_scope(db, tenant_id)
             identity_scope = (
@@ -600,13 +631,40 @@ class WorkflowExecutor:
                 await db.commit()
                 return
 
-            await db.execute(
+            failed = await db.execute(
                 update(ExecutionGraphModel)
                 .where(
                     *identity_scope,
                     ExecutionGraphModel.status.in_(["running", "resuming"]),
                 )
                 .values(status="failed", lease_owner=None, lease_expires_at=None)
+                .returning(ExecutionGraphModel.id)
+            )
+            if failed.scalar_one_or_none() is None:
+                await db.commit()
+                return
+            record = await db.get(ExecutionGraphModel, uuid.UUID(execution_id))
+            if record is not None:
+                graph_data = json.loads(record.graph_data)
+                graph_data["status"] = "failed"
+                for node in graph_data.get("nodes", []):
+                    if node.get("status") in {"pending", "running"}:
+                        node["status"] = "failed"
+                        node["error"] = error_message[:2_000]
+                        node["completed_at"] = datetime.now(UTC).isoformat()
+                record.graph_data = json.dumps(graph_data)
+            await db.execute(
+                update(Task)
+                .where(
+                    Task.execution_id == uuid.UUID(execution_id),
+                    Task.tenant_id == tenant_id,
+                    Task.status.in_(["pending", "running", "resuming"]),
+                )
+                .values(
+                    status="failed",
+                    error=error_message[:2_000],
+                    completed_at=func.now(),
+                )
             )
             await db.commit()
 

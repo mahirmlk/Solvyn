@@ -1,4 +1,4 @@
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     sandbox_runtime_url: str = ""
     sandbox_runtime_token: str = ""
     enable_workflow_scheduler: bool = True
+    workflow_execution_timeout_seconds: int = Field(default=1800, ge=1, le=86_400)
 
     openrouter_api_key: str = ""
     groq_api_key: str = ""
