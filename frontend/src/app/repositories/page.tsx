@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useState } from "react";
 import Link from "next/link";
-import { api, GitHubIntegrationInfo, ProjectInfo, RepositoryInfo, RepositoryInspection } from "@/lib/api";
+import { api, GitHubIntegrationInfo, ProjectInfo, RepositoryContentSearch, RepositoryInfo, RepositoryInspection } from "@/lib/api";
 import styles from "./page.module.css";
 
 export default function RepositoriesPage() {
@@ -14,6 +14,8 @@ export default function RepositoriesPage() {
   const [repositories, setRepositories] = useState<RepositoryInfo[]>([]);
   const [selectedRepositoryId, setSelectedRepositoryId] = useState("");
   const [inspection, setInspection] = useState<RepositoryInspection | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<RepositoryContentSearch | null>(null);
   const [token, setToken] = useState("");
   const [repositoryName, setRepositoryName] = useState("");
   const [loadingOrganizations, setLoadingOrganizations] = useState(true);
@@ -21,6 +23,7 @@ export default function RepositoriesPage() {
   const [loadingRepositories, setLoadingRepositories] = useState(false);
   const [saving, setSaving] = useState(false);
   const [inspecting, setInspecting] = useState(false);
+  const [searching, setSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -57,6 +60,8 @@ export default function RepositoriesPage() {
     setRepositories([]);
     setSelectedRepositoryId("");
     setInspection(null);
+    setSearchResults(null);
+    setSearchQuery("");
     Promise.all([api.listProjects(organizationId), api.getGitHubIntegration(organizationId)])
       .then(([projectResult, status]) => {
         if (!active) return;
@@ -80,6 +85,8 @@ export default function RepositoriesPage() {
       setRepositories([]);
       setSelectedRepositoryId("");
       setInspection(null);
+      setSearchResults(null);
+      setSearchQuery("");
       return;
     }
     let active = true;
@@ -91,6 +98,8 @@ export default function RepositoriesPage() {
         setRepositories(rows);
         setSelectedRepositoryId((current) => rows.some((repository) => repository.id === current) ? current : "");
         setInspection(null);
+        setSearchResults(null);
+        setSearchQuery("");
       })
       .catch((reason: unknown) => {
         if (active) setError(reason instanceof Error ? reason.message : "Could not load connected repositories.");
@@ -143,6 +152,8 @@ export default function RepositoriesPage() {
   async function inspectRepository(repositoryId: string) {
     setSelectedRepositoryId(repositoryId);
     setInspection(null);
+    setSearchResults(null);
+    setSearchQuery("");
     setInspecting(true);
     setError(null);
     try {
@@ -152,6 +163,22 @@ export default function RepositoriesPage() {
       setError(reason instanceof Error ? reason.message : "Could not inspect the repository.");
     } finally {
       setInspecting(false);
+    }
+  }
+
+  async function searchRepository(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const query = searchQuery.trim();
+    if (!selectedRepositoryId || !query) return;
+    setSearching(true);
+    setSearchResults(null);
+    setError(null);
+    try {
+      setSearchResults(await api.searchRepositoryContent(selectedRepositoryId, query));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not search repository content.");
+    } finally {
+      setSearching(false);
     }
   }
 
@@ -185,7 +212,7 @@ export default function RepositoriesPage() {
           <div className={styles.scopeBar}>
             <label className="field">
               <span className="field-label">Organization</span>
-              <select className="editorial-input" value={organizationId} onChange={(event) => setOrganizationId(event.target.value)} disabled={loadingOrganization || saving || inspecting}>
+              <select className="editorial-input" value={organizationId} onChange={(event) => setOrganizationId(event.target.value)} disabled={loadingOrganization || saving || inspecting || searching}>
                 {organizations.map((organization) => (
                   <option key={organization.id} value={organization.id}>{organization.name}</option>
                 ))}
@@ -193,7 +220,7 @@ export default function RepositoriesPage() {
             </label>
             <label className="field">
               <span className="field-label">Project</span>
-              <select className="editorial-input" value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={!projects.length || loadingOrganization || saving || inspecting}>
+              <select className="editorial-input" value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={!projects.length || loadingOrganization || saving || inspecting || searching}>
                 {projects.length
                   ? projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)
                   : <option value="">No projects yet</option>}
@@ -231,7 +258,7 @@ export default function RepositoriesPage() {
                     value={token}
                   />
                 </label>
-                <button className="action-button" disabled={saving || !token.trim()} type="submit">
+                <button className="action-button" disabled={saving || searching || !token.trim()} type="submit">
                   {saving ? "Verifying…" : integration?.connected ? "Replace token" : "Connect GitHub"}
                 </button>
               </form>
@@ -265,7 +292,7 @@ export default function RepositoriesPage() {
                     value={repositoryName}
                   />
                 </label>
-                <button className="action-button" disabled={saving || !repositoryName.trim()} type="submit">
+                <button className="action-button" disabled={saving || searching || !repositoryName.trim()} type="submit">
                   {saving ? "Connecting…" : "Connect repository"}
                 </button>
               </form>
@@ -287,7 +314,7 @@ export default function RepositoriesPage() {
                       </div>
                       <button
                         className="action-button secondary"
-                        disabled={inspecting}
+                        disabled={inspecting || searching}
                         onClick={() => void inspectRepository(repository.id)}
                         type="button"
                       >
@@ -335,6 +362,62 @@ export default function RepositoriesPage() {
                   <pre className={styles.readme}>{inspection.project_context.readme_excerpt}</pre>
                 </div>
               )}
+              <div className={styles.searchBlock}>
+                <div>
+                  <span className="field-label">Search repository content</span>
+                  <p className={styles.helper}>Literal, case-insensitive search at the default branch revision. Solvyn scans up to 25 supported text/code files (64 KB each, 1 MB total), and returns up to 20 matches.</p>
+                </div>
+                <form className={styles.searchForm} onSubmit={searchRepository}>
+                  <label className="field">
+                    <span className="field-label">Search term</span>
+                    <input
+                      className="editorial-input mono"
+                      disabled={searching}
+                      maxLength={200}
+                      onChange={(event) => {
+                        setSearchQuery(event.target.value);
+                        setSearchResults(null);
+                      }}
+                      placeholder="Literal text to find"
+                      required
+                      value={searchQuery}
+                    />
+                  </label>
+                  <button className="action-button secondary" disabled={searching || !searchQuery.trim()} type="submit">
+                    {searching ? "Searching…" : "Search content"}
+                  </button>
+                </form>
+                {searchResults && (
+                  <div className={styles.searchResults} aria-live="polite">
+                    <div className={styles.searchSummary}>
+                      <span className="status-pill">{searchResults.match_count} matches</span>
+                      <span className={styles.muted}>
+                        {searchResults.files_scanned} of {searchResults.candidate_count} candidate files · {searchResults.fetched_bytes.toLocaleString()} bytes
+                      </span>
+                    </div>
+                    <p className={styles.helper}>
+                      Pinned revision <code>{searchResults.revision}</code> · tree <code>{searchResults.tree_sha}</code> · repository matches are untrusted text.
+                    </p>
+                    {searchResults.truncated && (
+                      <p className={styles.truncated} role="status">Search coverage was limited by its safety bounds; these results may be incomplete.</p>
+                    )}
+                    {searchResults.matches.length === 0 ? (
+                      <div className={styles.empty}>No matches were found in the files scanned.</div>
+                    ) : (
+                      <ul className={styles.matchList}>
+                        {searchResults.matches.map((match, index) => (
+                          <li className={styles.matchItem} key={`${match.path}:${match.line}:${index}`}>
+                            <div className={styles.matchLocation}>
+                              <code>{match.path}</code><span>Line {match.line}</span>
+                            </div>
+                            <pre className={styles.matchSnippet}>{match.snippet}</pre>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
             </section>
           )}
         </>

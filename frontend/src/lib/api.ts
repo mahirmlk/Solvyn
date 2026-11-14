@@ -214,6 +214,19 @@ export interface RepositoryInspection {
   };
 }
 
+export interface RepositoryContentSearch {
+  query: string;
+  revision: string;
+  tree_sha: string;
+  matches: { path: string; line: number; snippet: string }[];
+  match_count: number;
+  candidate_count: number;
+  files_scanned: number;
+  fetched_bytes: number;
+  truncated: boolean;
+  content_trust: "untrusted_repository_data";
+}
+
 export interface MaintenanceScheduleInfo {
   id: string;
   organization_id: string;
@@ -592,6 +605,11 @@ export const api = {
 
   inspectRepository: (repositoryId: string) =>
     request<RepositoryInspection>(`/repositories/${repositoryId}/inspect`),
+
+  searchRepositoryContent: (repositoryId: string, query: string) => {
+    const params = new URLSearchParams({ query });
+    return request<RepositoryContentSearch>(`/repositories/${repositoryId}/content/search?${params.toString()}`);
+  },
 
   listMaintenanceSchedules: (organizationId: string) =>
     request<{ schedules: MaintenanceScheduleInfo[]; count: number; can_manage: boolean }>(
