@@ -42,7 +42,9 @@ async def test_inspect_public_repository_returns_bounded_untrusted_context() -> 
             )
         if request.url.path == "/repos/octo/example/branches/main":
             return httpx.Response(200, json={"commit": {"sha": revision}})
-        if request.url.path == f"/repos/octo/example/git/trees/{revision}":
+        if request.url.path == f"/repos/octo/example/git/commits/{revision}":
+            return httpx.Response(200, json={"sha": revision, "tree": {"sha": tree_sha}})
+        if request.url.path == f"/repos/octo/example/git/trees/{tree_sha}":
             return httpx.Response(
                 200,
                 json={
@@ -104,7 +106,9 @@ async def test_inspect_private_repository_uses_scoped_token_without_returning_it
             )
         if request.url.path == "/repos/acme/private-service/branches/main":
             return httpx.Response(200, json={"commit": {"sha": revision}})
-        if request.url.path == f"/repos/acme/private-service/git/trees/{revision}":
+        if request.url.path == f"/repos/acme/private-service/git/commits/{revision}":
+            return httpx.Response(200, json={"sha": revision, "tree": {"sha": tree_sha}})
+        if request.url.path == f"/repos/acme/private-service/git/trees/{tree_sha}":
             return httpx.Response(
                 200,
                 json={"sha": tree_sha, "truncated": False, "tree": [{"path": "README.md", "type": "blob", "size": 6}]},
@@ -127,7 +131,8 @@ async def test_inspect_private_repository_uses_scoped_token_without_returning_it
     assert requests == [
         "/repos/acme/private-service",
         "/repos/acme/private-service/branches/main",
-        f"/repos/acme/private-service/git/trees/{revision}",
+        f"/repos/acme/private-service/git/commits/{revision}",
+        f"/repos/acme/private-service/git/trees/{tree_sha}",
         "/repos/acme/private-service/contents/README.md",
     ]
 
@@ -143,7 +148,11 @@ async def test_inspection_rejects_truncated_repository_trees() -> None:
             )
         if request.url.path == "/repos/octo/example/branches/main":
             return httpx.Response(200, json={"commit": {"sha": revision}})
-        return httpx.Response(200, json={"sha": "b" * 40, "truncated": True, "tree": []})
+        if request.url.path == f"/repos/octo/example/git/commits/{revision}":
+            return httpx.Response(200, json={"tree": {"sha": "b" * 40}})
+        if request.url.path == f"/repos/octo/example/git/trees/{'b' * 40}":
+            return httpx.Response(200, json={"sha": "b" * 40, "truncated": True, "tree": []})
+        return httpx.Response(404, json={"message": "Not Found"})
 
     http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
     async with GitHubClient(http) as github:
