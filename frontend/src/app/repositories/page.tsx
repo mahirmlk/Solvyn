@@ -48,6 +48,9 @@ export default function RepositoriesPage() {
       setProjectId("");
       setIntegration(null);
       setCanManage(false);
+      setToken("");
+      setRepositoryName("");
+      setNotice(null);
       return;
     }
     let active = true;
@@ -57,6 +60,9 @@ export default function RepositoriesPage() {
     setProjectId("");
     setIntegration(null);
     setCanManage(false);
+    setToken("");
+    setRepositoryName("");
+    setNotice(null);
     setRepositories([]);
     setSelectedRepositoryId("");
     setInspection(null);
