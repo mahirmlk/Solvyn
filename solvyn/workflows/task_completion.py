@@ -99,17 +99,19 @@ async def refresh_task_completion_state(
     for run in required_runs:
         latest_by_kind.setdefault(run.kind, run)
 
-    verification_pass = not latest_by_kind and (workspace is None or not has_handoff)
-    if workspace is not None:
-        verification_pass = not has_handoff and not latest_by_kind
-        if latest_by_kind and current_digest is not None:
-            verification_pass = all(
-                workspace_matches_expectation
-                and handoff_complete
-                and run.status == "passed"
-                and run.source_digest == current_digest
-                for run in latest_by_kind.values()
-            )
+    # Repository work delivered through a handoff must have at least one
+    # completion-required verification. Each requested kind is then checked
+    # against its latest result below. Non-required runs do not satisfy this gate.
+    requires_verification = workspace is not None and has_handoff
+    verification_pass = not requires_verification and not latest_by_kind
+    if workspace is not None and latest_by_kind and current_digest is not None:
+        verification_pass = all(
+            workspace_matches_expectation
+            and handoff_complete
+            and run.status == "passed"
+            and run.source_digest == current_digest
+            for run in latest_by_kind.values()
+        )
     elif latest_by_kind:
         try:
             verification_pass = all(run.status == "passed" for run in latest_by_kind.values())

@@ -473,6 +473,8 @@ async def test_delivery_requires_completion_gate_before_remote_writes(
 
     assert error.value.status_code == 409
     assert github.writes == []
+    # A review_required result (including a handoff with no required check)
+    # must stop before any branch, commit, or pull request write.
     completion_refresh.assert_awaited_once_with(
         db,
         context[0],
