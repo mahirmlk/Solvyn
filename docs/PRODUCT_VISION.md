@@ -1,3 +1,4 @@
+> **Status:** This document records product direction and planned capabilities. It is an aspirational requirements brief, not a description of the current implementation. For implemented scope and open release work, see [shipment readiness](SHIPMENT_READINESS.md).
 AI Operating Center for Engineering Teams
 
 A full autonomous engineering workspace where agents collaborate like a real software company.

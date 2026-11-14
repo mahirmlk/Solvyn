@@ -1,0 +1,207 @@
+.scopeBar,
+.panelHead,
+.tokenForm,
+.repositoryForm,
+.repositoryItem,
+.inspectionGrid,
+.dependencyList li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.scopeBar,
+.panel {
+  width: min(100% - 40px, 1120px);
+  margin: 0 auto 20px;
+}
+
+.scopeBar {
+  align-items: end;
+  justify-content: flex-start;
+}
+
+.scopeBar label {
+  width: min(100%, 380px);
+}
+
+.panel {
+  display: grid;
+  gap: 16px;
+  padding: clamp(20px, 4vw, 32px);
+  border: 1px solid var(--line-light);
+  background: var(--color-pearl, #f6f5f0);
+}
+
+.panel h2 {
+  margin: 5px 0 0;
+  font-family: var(--font-display);
+  font-size: clamp(17px, 2vw, 22px);
+  letter-spacing: 0.035em;
+}
+
+.panel p {
+  margin: 0;
+}
+
+.panelHead {
+  align-items: flex-start;
+}
+
+.muted,
+.helper {
+  color: var(--color-muted);
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+.helper {
+  font-size: 10px;
+}
+
+.tokenForm,
+.repositoryForm {
+  align-items: end;
+}
+
+.tokenForm label,
+.repositoryForm label {
+  flex: 1;
+  min-width: 0;
+}
+
+.repositoryList,
+.dependencyList {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.repositoryItem,
+.dependencyList li {
+  padding: 13px 0;
+  border-top: 1px solid var(--line-light);
+}
+
+.repositoryItem > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.repositoryItem a {
+  overflow-wrap: anywhere;
+  color: var(--color-ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.repositoryItem code,
+.inspectionGrid code {
+  font-family: var(--font-mono, monospace);
+  overflow-wrap: anywhere;
+}
+
+.inspectionGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.inspectionGrid > div {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line-light);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.detailBlock {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.dependencyList li {
+  align-items: flex-start;
+  justify-content: flex-start;
+  font-size: 10px;
+}
+
+.dependencyList strong {
+  flex: 0 0 120px;
+}
+
+.dependencyList span {
+  overflow-wrap: anywhere;
+}
+
+.readme {
+  max-height: 280px;
+  margin: 0;
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid var(--line-light);
+  background: rgba(25, 27, 38, 0.035);
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.empty {
+  padding: 18px;
+  border: 1px dashed var(--line-light);
+  color: var(--color-muted);
+  font-size: 11px;
+}
+
+.error,
+.notice {
+  width: min(100% - 40px, 1120px);
+  margin: 0 auto 16px;
+  padding: 13px 16px;
+  border: 1px solid var(--line-light);
+  font-size: 11px;
+}
+
+.error {
+  border-color: rgba(178, 103, 105, 0.4);
+  color: var(--color-error);
+}
+
+.notice {
+  color: var(--color-ink);
+  background: rgba(25, 27, 38, 0.035);
+}
+
+@media (max-width: 680px) {
+  .scopeBar,
+  .tokenForm,
+  .repositoryForm {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .scopeBar label,
+  .tokenForm label,
+  .repositoryForm label {
+    width: 100%;
+  }
+
+  .panelHead,
+  .repositoryItem {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .inspectionGrid {
+    grid-template-columns: 1fr;
+  }
+}

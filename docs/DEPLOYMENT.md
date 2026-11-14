@@ -175,7 +175,7 @@ The workflow scheduler runs in exactly one `worker` service; the API disables it
 
 The `docker-entrypoint-initdb.d` role setup runs only when PostgreSQL initializes an empty data directory. For an existing volume, provision separate `NOSUPERUSER NOBYPASSRLS` migration/runtime roles plus dedicated backup/restore roles; transfer database, schema, table, and sequence ownership to the migration role and grant the runtime role CRUD and sequence privileges. Give the backup role `CONNECT`, schema `USAGE`, `SELECT` on all tables, `USAGE/SELECT` on all sequences, and matching default privileges for future objects created by the migration role. Give the restore role `BYPASSRLS` and membership in the migration role so it can load all tenant rows and restore object ownership. These roles bypass RLS intentionally: the backup role only reads data, while the restore role can modify schema/data. Compose passes only the explicitly configured database bootstrap values to PostgreSQL and only `MIGRATION_DATABASE_URL` to Alembic; backup and restore URLs remain host-side. Keep backup/restore credentials out of application containers. Set the database role URLs in their designated secrets files before enabling this migration. Update the role setup on existing Kubernetes volumes as a separate operator migration; init scripts are not replayed for initialized data directories. PostgreSQL superusers always bypass RLS, even when a table uses `FORCE ROW LEVEL SECURITY`.
 
-For status and explicitly outstanding product blockers, see [Shipment readiness](./docs/SHIPMENT_READINESS.md).
+For status and explicitly outstanding product blockers, see [Shipment readiness](./SHIPMENT_READINESS.md).
 
 ### Container images
 
