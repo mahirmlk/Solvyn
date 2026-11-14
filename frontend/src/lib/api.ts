@@ -178,6 +178,42 @@ export interface ProjectInfo {
   created_at: string;
 }
 
+export interface RepositoryInfo {
+  id: string;
+  project_id: string;
+  integration_id: string | null;
+  full_name: string;
+  provider: string;
+  default_branch: string;
+  url: string;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface GitHubIntegrationInfo {
+  connected: boolean;
+  integration_id: string | null;
+  account_login?: string | null;
+  updated_at?: string | null;
+}
+
+export interface RepositoryInspection {
+  revision: string;
+  file_count: number;
+  top_level_entries: string[];
+  languages: Record<string, number>;
+  manifests: Record<string, string>;
+  dependencies: Record<string, string[]>;
+  project_context: {
+    description: string;
+    default_branch: string;
+    top_level_entries: string[];
+    languages: Record<string, number>;
+    frameworks: string[];
+    readme_excerpt: string;
+  };
+}
+
 export interface MaintenanceScheduleInfo {
   id: string;
   organization_id: string;
@@ -552,6 +588,27 @@ export const api = {
 
   listProjects: (organizationId: string) =>
     request<{ projects: ProjectInfo[]; count: number }>(`/organizations/${organizationId}/projects`),
+
+  getGitHubIntegration: (organizationId: string) =>
+    request<GitHubIntegrationInfo>(`/organizations/${organizationId}/integrations/github`),
+
+  connectGitHubIntegration: (organizationId: string, accessToken: string) =>
+    request<GitHubIntegrationInfo>(`/organizations/${organizationId}/integrations/github`, {
+      method: "PUT",
+      body: JSON.stringify({ access_token: accessToken }),
+    }),
+
+  listProjectRepositories: (projectId: string) =>
+    request<{ repositories: RepositoryInfo[]; count: number }>(`/projects/${projectId}/repositories`),
+
+  connectProjectRepository: (projectId: string, fullName: string) =>
+    request<RepositoryInfo>(`/projects/${projectId}/repositories`, {
+      method: "POST",
+      body: JSON.stringify({ full_name: fullName }),
+    }),
+
+  inspectRepository: (repositoryId: string) =>
+    request<RepositoryInspection>(`/repositories/${repositoryId}/inspect`),
 
   listMaintenanceSchedules: (organizationId: string) =>
     request<{ schedules: MaintenanceScheduleInfo[]; count: number; can_manage: boolean }>(
