@@ -315,8 +315,10 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
         )
         task = (await db.execute(select(Task).where(Task.id == task_id))).scalar_one()
         task.parent_task_id = parent_id
+        handoff_id = uuid.uuid4()
         db.add(
             TaskHandoff(
+                id=handoff_id,
                 tenant_id=tenant.id,
                 parent_task_id=parent_id,
                 child_task_id=task_id,
@@ -645,31 +647,33 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
     from solvyn.agents import teammate_runtime
 
     async def complete_confirmed_teammate_task(*_args: Any, **kwargs: Any) -> dict[str, str]:
-        assert kwargs["task_id"] == uuid.UUID(task["task_id"])
+        assert kwargs["task_id"] == task.id
         assert kwargs["project_id"] == project_id
         return {"summary": "Reviewed the assigned status endpoint change."}
 
     monkeypatch.setattr(teammate_runtime, "run_teammate", complete_confirmed_teammate_task)
     resumed_handoff = await client.post(
-        f"/api/v1/workflows/executions/{task['execution_id']}/tasks/{task['root_task_id']}"
-        f"/handoffs/{task['handoff_id']}/resume"
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task.parent_task_id}"
+        f"/handoffs/{handoff_id}/resume"
     )
     assert resumed_handoff.status_code == 200, resumed_handoff.text
-    assert resumed_handoff.json()["handoff_id"] == task["handoff_id"]
-    task_snapshot = await client.get(f"/api/v1/workflows/executions/{task['execution_id']}/tasks")
+    assert resumed_handoff.json()["handoff_id"] == str(handoff_id)
+    task_snapshot = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
     assert task_snapshot.status_code == 200, task_snapshot.text
     completed_handoff = next(
-        row for row in task_snapshot.json()["handoffs"] if row["handoff_id"] == task["handoff_id"]
+        row for row in task_snapshot.json()["handoffs"] if row["handoff_id"] == str(handoff_id)
     )
     assert completed_handoff["status"] == "completed"
     assert completed_handoff["output"] is not None
 
     criteria_response = await client.get(
-        f"/api/v1/workflows/executions/{task['execution_id']}/tasks/{task['task_id']}/acceptance-criteria"
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria"
     )
     assert criteria_response.status_code == 200, criteria_response.text
     persisted_criteria = criteria_response.json()["acceptance_criteria"]
-    assert [item["text"] for item in persisted_criteria] == task["confirmed_details"]["acceptance_criteria"]
+    assert [item["text"] for item in persisted_criteria] == [
+        "The updated health endpoint returns the ready status"
+    ]
     assert all(item["status"] == "pending" for item in persisted_criteria)
 
 
@@ -2417,7 +2421,9 @@ async def test_saved_conversation_conversion_gates_repository_workspace_until_ap
     assert message_response.json()["messages"][0]["role"] == "user"
     history_response = await client.get(f"/api/v1/teammates/{teammate_id}/conversations/{conversation_id}/messages")
     assert history_response.status_code == 200, history_response.text
-    assert history_response.json()["messages"][0]["content"] == "Please inspect the status endpoint and make it return ready."
+    history_by_role = {item["role"]: item["content"] for item in history_response.json()["messages"]}
+    assert history_by_role["user"] == "Please inspect the status endpoint and make it return ready."
+    assert json.loads(history_by_role["assistant"]) == {"summary": "The connected project has a status endpoint."}
 
     task_response = await client.post(
         f"/api/v1/teammates/{teammate_id}/conversations/{conversation_id}/task",
