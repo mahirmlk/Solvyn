@@ -204,7 +204,7 @@ async def test_manual_workspace_without_handoff_can_complete_on_accepted_criteri
     from solvyn.workflows import task_completion
 
     task = _task(criteria_defined=True, status="review_required")
-    workspace = SimpleNamespace(id=uuid.uuid4())
+    workspace = SimpleNamespace(id=uuid.uuid4(), repository_id=uuid.uuid4())
     db = AsyncMock()
     db.execute.side_effect = [
         _scalar(task),
@@ -289,7 +289,7 @@ async def test_repository_handoff_requires_at_least_one_required_verification(
     from solvyn.workflows import task_completion
 
     task = _task(criteria_defined=True, status="review_required")
-    workspace = SimpleNamespace(id=uuid.uuid4())
+    workspace = SimpleNamespace(id=uuid.uuid4(), repository_id=uuid.uuid4())
     db = AsyncMock()
     db.execute.side_effect = [
         _scalar(task),
@@ -317,6 +317,41 @@ async def test_repository_handoff_requires_at_least_one_required_verification(
     assert task.completed_at is None
     required_runs_query = db.execute.await_args_list[-1].args[0]
     assert any("required_for_completion" in str(clause) for clause in required_runs_query._where_criteria)
+
+
+@pytest.mark.asyncio
+async def test_manual_file_handoff_does_not_require_a_verification_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from solvyn.workflows import task_completion
+
+    task = _task(criteria_defined=True, status="review_required")
+    workspace = SimpleNamespace(id=uuid.uuid4(), repository_id=None)
+    db = AsyncMock()
+    db.execute.side_effect = [
+        _scalar(task),
+        _scalar(workspace),
+        _scalar("completed"),
+        _rows([("accepted", "manual-workspace-digest")]),
+        _scalar_rows([]),
+    ]
+
+    class FakeWorkspaceManager:
+        def __init__(self, _root: Path) -> None:
+            pass
+
+        def get(self, _workspace_id: uuid.UUID) -> object:
+            return workspace
+
+        def fingerprint(self, _workspace: object) -> str:
+            return "manual-workspace-digest"
+
+    monkeypatch.setattr(task_completion, "WorkspaceManager", FakeWorkspaceManager)
+
+    status = await refresh_task_completion_state(db, task)
+
+    assert status == "completed"
+    assert task.completed_at is not None
 
 
 @pytest.mark.asyncio
