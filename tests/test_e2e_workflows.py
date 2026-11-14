@@ -293,9 +293,11 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
             ]
         )
         # The repository RLS policy checks for its project row while inserting.
-        # Persist the organization/project before adding the repository so the
-        # policy can authorize it inside this transaction.
+        # Commit the organization/project first so the policy can authorize the
+        # repository insert in a new transaction under the same tenant scope.
         await db.flush()
+        await db.commit()
+        await bind_tenant_scope(db, tenant.id)
         db.add_all(
             [
                 Repository(
