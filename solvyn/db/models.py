@@ -179,6 +179,33 @@ class TaskEvent(Base):
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class AgentEvaluationRun(Base):
+    """Append-only, tenant-scoped summary of a versioned agent evaluation run."""
+
+    __tablename__ = "agent_evaluation_runs"
+    __table_args__ = (
+        CheckConstraint("length(agent_type) > 0", name="ck_agent_evaluation_runs_agent_type_nonempty"),
+        CheckConstraint("length(dataset_id) > 0", name="ck_agent_evaluation_runs_dataset_id_nonempty"),
+        CheckConstraint("length(dataset_version) > 0", name="ck_agent_evaluation_runs_dataset_version_nonempty"),
+        Index("ix_agent_evaluation_runs_tenant_created", "tenant_id", "created_at", "id"),
+        Index("ix_agent_evaluation_runs_tenant_task_created", "tenant_id", "task_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # Historical task reference is intentionally not a foreign key so evaluation
+    # history remains available after the task is removed.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    task_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    agent_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    dataset_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    dataset_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Store bounded aggregate/case scores only; never prompts or model outputs.
+    summary: Mapped[dict[str, object]] = mapped_column(JSON().with_variant(JSONB, "postgresql"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class OrchestrationEvent(Base):
     """Append-only task, approval, handoff, and dependency history."""
 
