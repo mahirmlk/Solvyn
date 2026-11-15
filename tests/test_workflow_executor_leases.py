@@ -89,6 +89,7 @@ async def test_timeout_failure_marks_unfinished_nodes_and_tasks_failed(monkeypat
                 "nodes": [
                     {"id": "active", "status": "running"},
                     {"id": "waiting", "status": "pending"},
+                    {"id": "approval", "status": "waiting_approval"},
                     {"id": "done", "status": "completed"},
                 ]
             }
@@ -101,6 +102,9 @@ async def test_timeout_failure_marks_unfinished_nodes_and_tasks_failed(monkeypat
 
         def scalar_one_or_none(self) -> object | None:
             return self.value
+
+        def scalars(self) -> SimpleNamespace:
+            return SimpleNamespace(all=lambda: [])
 
     class FakeSession:
         def __init__(self) -> None:
@@ -143,9 +147,10 @@ async def test_timeout_failure_marks_unfinished_nodes_and_tasks_failed(monkeypat
     assert nodes[0]["status"] == "failed"
     assert nodes[0]["error"] == "Workflow execution exceeded 1800 seconds"
     assert nodes[1]["status"] == "failed"
-    assert nodes[2]["status"] == "completed"
-    assert session.execute_calls == 3
-    task_update_params = session.statements[2].compile().params
+    assert nodes[2]["status"] == "failed"
+    assert nodes[3]["status"] == "completed"
+    assert session.execute_calls == 4
+    task_update_params = session.statements[3].compile().params
     assert "failed" in task_update_params.values()
     assert "Workflow execution exceeded 1800 seconds" in task_update_params.values()
     assert session.committed
