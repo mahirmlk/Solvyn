@@ -2663,6 +2663,8 @@ async def test_task_dependency_rls_is_tenant_scoped_and_rejects_cross_tenant_edg
 async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from solvyn.db.session import bind_tenant_scope
+
     database_url = os.environ.get("DATABASE_URL", "")
     if not database_url.startswith("postgresql+"):
         pytest.skip("RLS behavior requires PostgreSQL and migrations at head")
@@ -3018,6 +3020,22 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
             ).all()
             assert set(events_b) == {(run_b, "running"), (run_b, "interrupted")}
 
+        # Link an already-approved run as the redrive child, then exercise its
+        # worker claim and sandbox-result persistence under tenant RLS.
+        tenant_context.set(tenant_a, "rls-redrive")
+        async with sessions() as session:
+            await bind_tenant_scope(session, tenant_a)
+            await session.execute(
+                update(VerificationRun)
+                .where(
+                    VerificationRun.id == run_approved_a,
+                    VerificationRun.tenant_id == tenant_a,
+                    VerificationRun.status == "approved",
+                )
+                .values(redriven_from_run_id=run_exhausted)
+            )
+            await session.commit()
+
         tenant_context.clear()
         monkeypatch.setattr(scheduler, "_VERIFICATION_BATCH_SIZE", 100)
         async with sessions() as session:
@@ -3116,6 +3134,53 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                 assert run_state == ("passed", 1, None, None)
                 assert approval_status == "consumed"
                 assert attempt_statuses == ["passed"]
+
+        tenant_context.set(tenant_a, "rls-redrive-result")
+        async with sessions() as session:
+            source_state = (
+                await session.execute(
+                    select(
+                        VerificationRun.status,
+                        VerificationRun.attempt_count,
+                        VerificationRun.lease_owner,
+                        VerificationRun.lease_expires_at,
+                    ).where(VerificationRun.id == run_exhausted)
+                )
+            ).one()
+            child_state = (
+                await session.execute(
+                    select(
+                        VerificationRun.status,
+                        VerificationRun.attempt_count,
+                        VerificationRun.redriven_from_run_id,
+                        VerificationRun.lease_owner,
+                        VerificationRun.lease_expires_at,
+                    ).where(VerificationRun.id == run_approved_a)
+                )
+            ).one()
+            approval_status = (
+                await session.execute(
+                    select(Approval.status).where(Approval.id == approval_approved_a)
+                )
+            ).scalar_one()
+            child_events = (
+                await session.execute(
+                    select(VerificationAttemptEvent.event_type, VerificationAttemptEvent.status)
+                    .where(VerificationAttemptEvent.verification_run_id == run_approved_a)
+                    .order_by(VerificationAttemptEvent.event_type)
+                )
+            ).all()
+            source_events = (
+                await session.execute(
+                    select(VerificationAttemptEvent.event_type, VerificationAttemptEvent.status)
+                    .where(VerificationAttemptEvent.verification_run_id == run_exhausted)
+                )
+            ).all()
+            assert source_state == ("dead_letter", 3, None, None)
+            assert child_state == ("passed", 1, run_exhausted, None, None)
+            assert approval_status == "consumed"
+            assert child_events == [("finished", "passed"), ("started", "running")]
+            assert set(source_events) == {("started", "running"), ("finished", "dead_letter")}
 
         # Validate recovery through a fresh scheduler process, not an in-process
         # call to the claim helper. The first worker is killed while its remote
