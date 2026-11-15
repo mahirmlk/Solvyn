@@ -2830,6 +2830,7 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                         else (org_b, project_b, teammate_b, handoff_b)
                     )
                     approval_id = approval_a if tenant_id == tenant_a else approval_b
+                    approval_handoff_id = None if run_id == run_a else handoff_id
                     await connection.execute(
                         text(
                             "INSERT INTO approvals "
@@ -2843,7 +2844,7 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                             "organization_id": organization_id,
                             "project_id": project_id,
                             "teammate_id": teammate_id,
-                            "handoff_id": handoff_id,
+                            "handoff_id": approval_handoff_id,
                             "run_id": run_id,
                         },
                     )
