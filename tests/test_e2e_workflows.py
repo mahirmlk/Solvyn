@@ -1932,9 +1932,11 @@ async def test_workflow_cancellation_fences_handoffs_and_recovers_stale_request(
         )
         await db.commit()
         await bind_tenant_scope(db, tenant.id)
+        db.add(TeammateProjectAssignment(teammate_id=teammate_id, project_id=project_id))
+        await db.commit()
+        await bind_tenant_scope(db, tenant.id)
         db.add_all(
             [
-                TeammateProjectAssignment(teammate_id=teammate_id, project_id=project_id),
                 TaskHandoff(
                     id=running_handoff_id,
                     tenant_id=tenant.id,
