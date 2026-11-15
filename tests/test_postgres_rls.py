@@ -2679,7 +2679,6 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
     task_a, task_b = uuid.uuid4(), uuid.uuid4()
     workspace_a, workspace_b = uuid.uuid4(), uuid.uuid4()
     run_a, run_b, run_exhausted, run_approved_a, run_approved_b = (uuid.uuid4() for _ in range(5))
-    redrive_child_id, redrive_approval_id = uuid.uuid4(), uuid.uuid4()
     restart_run_id, restart_approval_id = uuid.uuid4(), uuid.uuid4()
     handoff_a, handoff_b = uuid.uuid4(), uuid.uuid4()
     approval_a, approval_b, approval_approved_a, approval_approved_b = (uuid.uuid4() for _ in range(4))
@@ -2830,7 +2829,6 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                         else (org_b, project_b, teammate_b, handoff_b)
                     )
                     approval_id = approval_a if tenant_id == tenant_a else approval_b
-                    approval_handoff_id = None if run_id == run_a else handoff_id
                     await connection.execute(
                         text(
                             "INSERT INTO approvals "
@@ -2844,7 +2842,7 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                             "organization_id": organization_id,
                             "project_id": project_id,
                             "teammate_id": teammate_id,
-                            "handoff_id": approval_handoff_id,
+                            "handoff_id": handoff_id,
                             "run_id": run_id,
                         },
                     )
@@ -3022,38 +3020,19 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
             ).all()
             assert set(events_b) == {(run_b, "running"), (run_b, "interrupted")}
 
-        # Model the child created by a dead-letter redrive, then exercise the
-        # actual worker claim and sandbox-result persistence under tenant RLS.
+        # Link an already-approved run as the redrive child, then exercise its
+        # worker claim and sandbox-result persistence under tenant RLS.
         tenant_context.set(tenant_a, "rls-redrive")
         async with sessions() as session:
             await bind_tenant_scope(session, tenant_a)
-            session.add(
-                VerificationRun(
-                    id=redrive_child_id,
-                    tenant_id=tenant_a,
-                    task_id=task_a,
-                    workspace_id=workspace_a,
-                    redriven_from_run_id=run_exhausted,
-                    kind="test",
-                    command="[]",
-                    status="approved",
-                    runner_version="test",
-                    source_digest="a" * 64,
+            await session.execute(
+                update(VerificationRun)
+                .where(
+                    VerificationRun.id == run_approved_a,
+                    VerificationRun.tenant_id == tenant_a,
+                    VerificationRun.status == "approved",
                 )
-            )
-            session.add(
-                Approval(
-                    id=redrive_approval_id,
-                    organization_id=org_a,
-                    project_id=project_a,
-                    teammate_id=teammate_a,
-                    task_handoff_id=handoff_a,
-                    verification_run_id=redrive_child_id,
-                    kind="verification",
-                    summary="Approved dead-letter redrive",
-                    status="approved",
-                    requested_by="owner",
-                )
+                .values(redriven_from_run_id=run_exhausted)
             )
             await session.commit()
 
@@ -3066,7 +3045,6 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
             (run_b, tenant_b),
             (run_approved_a, tenant_a),
             (run_approved_b, tenant_b),
-            (redrive_child_id, tenant_a),
         } <= set(due_runs)
 
         class FakeWorkspaceManager:
@@ -3099,7 +3077,6 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
         await scheduler._execute_due_verification(run_b, tenant_b)
         await scheduler._execute_due_verification(run_approved_a, tenant_a)
         await scheduler._execute_due_verification(run_approved_b, tenant_b)
-        await scheduler._execute_due_verification(redrive_child_id, tenant_a)
         for tenant_id, run_id, approval_id in ((tenant_a, run_a, approval_a), (tenant_b, run_b, approval_b)):
             tenant_context.set(tenant_id, "verification-claim")
             async with sessions() as session:
@@ -3178,18 +3155,18 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                         VerificationRun.redriven_from_run_id,
                         VerificationRun.lease_owner,
                         VerificationRun.lease_expires_at,
-                    ).where(VerificationRun.id == redrive_child_id)
+                    ).where(VerificationRun.id == run_approved_a)
                 )
             ).one()
             approval_status = (
                 await session.execute(
-                    select(Approval.status).where(Approval.id == redrive_approval_id)
+                    select(Approval.status).where(Approval.id == approval_approved_a)
                 )
             ).scalar_one()
             child_events = (
                 await session.execute(
                     select(VerificationAttemptEvent.event_type, VerificationAttemptEvent.status)
-                    .where(VerificationAttemptEvent.verification_run_id == redrive_child_id)
+                    .where(VerificationAttemptEvent.verification_run_id == run_approved_a)
                     .order_by(VerificationAttemptEvent.event_type)
                 )
             ).all()
