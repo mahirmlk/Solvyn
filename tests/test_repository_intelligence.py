@@ -786,3 +786,114 @@ async def test_search_paths_resolves_branch_to_pinned_commit_tree() -> None:
         f"/repos/octo/example/git/commits/{revision}",
         f"/repos/octo/example/git/trees/{tree_sha}",
     ]
+
+
+@pytest.mark.asyncio
+async def test_accessible_repositories_returns_one_bounded_token_scoped_page() -> None:
+    token = "ghp-discovery-token"
+    observed: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        observed.append(request)
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": 42,
+                    "full_name": "acme/private-app",
+                    "default_branch": "main",
+                    "html_url": "https://github.com/acme/private-app",
+                    "private": True,
+                },
+                {
+                    "id": 43,
+                    "full_name": "acme/empty-app",
+                    "default_branch": None,
+                    "html_url": "https://github.com/acme/empty-app",
+                    "private": False,
+                },
+                {"id": 44, "full_name": "bad/../path"},
+            ],
+        )
+
+    http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    async with GitHubClient(http, token=token) as github:
+        repositories = await github.accessible_repositories(page=2)
+    await http.aclose()
+
+    assert len(observed) == 1
+    assert observed[0].url.path == "/user/repos"
+    assert observed[0].url.params["page"] == "2"
+    assert observed[0].url.params["per_page"] == "50"
+    assert observed[0].url.params["affiliation"] == "owner,collaborator,organization_member"
+    assert observed[0].headers["authorization"] == f"Bearer {token}"
+    assert repositories == [
+        {
+            "id": 42,
+            "full_name": "acme/private-app",
+            "default_branch": "main",
+            "url": "https://github.com/acme/private-app",
+            "private": True,
+        },
+        {
+            "id": 43,
+            "full_name": "acme/empty-app",
+            "default_branch": "",
+            "url": "https://github.com/acme/empty-app",
+            "private": False,
+        },
+    ]
+    assert token not in json.dumps(repositories)
+
+
+@pytest.mark.asyncio
+async def test_accessible_repositories_requires_token_and_bounds_pages() -> None:
+    public_http = httpx.AsyncClient(base_url="https://api.github.com")
+    async with GitHubClient(public_http) as public_client:
+        with pytest.raises(GitHubRepositoryError) as missing_token:
+            await public_client.accessible_repositories()
+    await public_http.aclose()
+    assert missing_token.value.status_code == 409
+
+    token_http = httpx.AsyncClient(base_url="https://api.github.com")
+    async with GitHubClient(token_http, token="ghp-token") as client:
+        with pytest.raises(GitHubRepositoryError) as invalid_page:
+            await client.accessible_repositories(page=21)
+    await token_http.aclose()
+    assert invalid_page.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_accessible_repositories_reads_next_page_from_github_link_header() -> None:
+    token = "ghp-discovery-token"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/user/repos"
+        assert request.url.params["page"] == "19"
+        return httpx.Response(
+            200,
+            json=[{"id": 42, "full_name": "acme/private-app", "default_branch": "main", "private": True}],
+            headers={"Link": '<https://api.github.com/user/repos?page=20>; rel="next", <https://api.github.com/user/repos?page=20>; rel="last"'},
+        )
+
+    http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    async with GitHubClient(http, token=token) as github:
+        repositories, has_next = await github.accessible_repository_page(page=19)
+    await http.aclose()
+
+    assert repositories[0]["full_name"] == "acme/private-app"
+    assert has_next is True
+
+
+@pytest.mark.asyncio
+async def test_accessible_repositories_reports_no_next_page_without_github_link() -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[])
+
+    http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    async with GitHubClient(http, token="ghp-discovery-token") as github:
+        repositories, has_next = await github.accessible_repository_page(page=1)
+    await http.aclose()
+
+    assert repositories == []
+    assert has_next is False

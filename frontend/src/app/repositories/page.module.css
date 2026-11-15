@@ -65,6 +65,27 @@
   align-items: end;
 }
 
+.discoveryActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.manualConnect {
+  border-top: 1px solid var(--line-light);
+  padding-top: 12px;
+}
+
+.manualConnect summary {
+  cursor: pointer;
+  color: var(--color-muted);
+  font-size: 11px;
+}
+
+.manualConnect .repositoryForm {
+  margin-top: 12px;
+}
+
 .tokenForm label,
 .repositoryForm label {
   flex: 1;
