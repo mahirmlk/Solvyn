@@ -1202,6 +1202,27 @@ async def test_task_verification_is_sandboxed_and_durable(
     source_queue_item = next(item for item in dead_letter_queue.json()["items"] if item["id"] == str(dead_letter_id))
     assert source_queue_item["redriven_to_run_id"] == child_id
 
+    monkeypatch.setattr(DockerSandboxRunner, "run", fake_run)
+    await scheduler._execute_due_verification(uuid.UUID(child_id), tenant.id)
+    from solvyn.db.models import VerificationAttemptEvent
+
+    async with async_session_factory() as db:
+        await bind_tenant_scope(db, tenant.id)
+        source_run = await db.get(VerificationRun, dead_letter_id)
+        child_run = await db.get(VerificationRun, uuid.UUID(child_id))
+        child_attempts = (
+            await db.execute(
+                select(VerificationAttemptEvent.event_type, VerificationAttemptEvent.status)
+                .where(VerificationAttemptEvent.verification_run_id == uuid.UUID(child_id))
+                .order_by(VerificationAttemptEvent.event_type)
+            )
+        ).all()
+    assert source_run is not None and source_run.status == "dead_letter" and source_run.attempt_count == 3
+    assert child_run is not None
+    assert child_run.status == "passed" and child_run.attempt_count == 1
+    assert child_run.redriven_from_run_id == dead_letter_id
+    assert child_attempts == [("finished", "passed"), ("started", "running")]
+
     async with async_session_factory() as db:
         await bind_tenant_scope(db, tenant.id)
         source_task = await db.get(Task, uuid.UUID(task_id))

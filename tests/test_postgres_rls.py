@@ -2677,6 +2677,7 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
     task_a, task_b = uuid.uuid4(), uuid.uuid4()
     workspace_a, workspace_b = uuid.uuid4(), uuid.uuid4()
     run_a, run_b, run_exhausted, run_approved_a, run_approved_b = (uuid.uuid4() for _ in range(5))
+    redrive_child_id, redrive_approval_id = uuid.uuid4(), uuid.uuid4()
     restart_run_id, restart_approval_id = uuid.uuid4(), uuid.uuid4()
     handoff_a, handoff_b = uuid.uuid4(), uuid.uuid4()
     approval_a, approval_b, approval_approved_a, approval_approved_b = (uuid.uuid4() for _ in range(4))
@@ -3018,6 +3019,39 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
             ).all()
             assert set(events_b) == {(run_b, "running"), (run_b, "interrupted")}
 
+        # Model the child created by a dead-letter redrive, then exercise the
+        # actual worker claim and sandbox-result persistence under tenant RLS.
+        tenant_context.set(tenant_a, "rls-redrive")
+        async with sessions() as session:
+            session.add(
+                VerificationRun(
+                    id=redrive_child_id,
+                    tenant_id=tenant_a,
+                    task_id=task_a,
+                    workspace_id=workspace_a,
+                    redriven_from_run_id=run_exhausted,
+                    kind="test",
+                    command="[]",
+                    status="approved",
+                    runner_version="test",
+                    source_digest="a" * 64,
+                )
+            )
+            session.add(
+                Approval(
+                    id=redrive_approval_id,
+                    organization_id=org_a,
+                    project_id=project_a,
+                    teammate_id=teammate_a,
+                    verification_run_id=redrive_child_id,
+                    kind="verification",
+                    summary="Approved dead-letter redrive",
+                    status="approved",
+                    requested_by="owner",
+                )
+            )
+            await session.commit()
+
         tenant_context.clear()
         monkeypatch.setattr(scheduler, "_VERIFICATION_BATCH_SIZE", 100)
         async with sessions() as session:
@@ -3027,6 +3061,7 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
             (run_b, tenant_b),
             (run_approved_a, tenant_a),
             (run_approved_b, tenant_b),
+            (redrive_child_id, tenant_a),
         } <= set(due_runs)
 
         class FakeWorkspaceManager:
@@ -3059,6 +3094,7 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
         await scheduler._execute_due_verification(run_b, tenant_b)
         await scheduler._execute_due_verification(run_approved_a, tenant_a)
         await scheduler._execute_due_verification(run_approved_b, tenant_b)
+        await scheduler._execute_due_verification(redrive_child_id, tenant_a)
         for tenant_id, run_id, approval_id in ((tenant_a, run_a, approval_a), (tenant_b, run_b, approval_b)):
             tenant_context.set(tenant_id, "verification-claim")
             async with sessions() as session:
@@ -3116,6 +3152,53 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                 assert run_state == ("passed", 1, None, None)
                 assert approval_status == "consumed"
                 assert attempt_statuses == ["passed"]
+
+        tenant_context.set(tenant_a, "rls-redrive-result")
+        async with sessions() as session:
+            source_state = (
+                await session.execute(
+                    select(
+                        VerificationRun.status,
+                        VerificationRun.attempt_count,
+                        VerificationRun.lease_owner,
+                        VerificationRun.lease_expires_at,
+                    ).where(VerificationRun.id == run_exhausted)
+                )
+            ).one()
+            child_state = (
+                await session.execute(
+                    select(
+                        VerificationRun.status,
+                        VerificationRun.attempt_count,
+                        VerificationRun.redriven_from_run_id,
+                        VerificationRun.lease_owner,
+                        VerificationRun.lease_expires_at,
+                    ).where(VerificationRun.id == redrive_child_id)
+                )
+            ).one()
+            approval_status = (
+                await session.execute(
+                    select(Approval.status).where(Approval.id == redrive_approval_id)
+                )
+            ).scalar_one()
+            child_events = (
+                await session.execute(
+                    select(VerificationAttemptEvent.event_type, VerificationAttemptEvent.status)
+                    .where(VerificationAttemptEvent.verification_run_id == redrive_child_id)
+                    .order_by(VerificationAttemptEvent.event_type)
+                )
+            ).all()
+            source_events = (
+                await session.execute(
+                    select(VerificationAttemptEvent.event_type, VerificationAttemptEvent.status)
+                    .where(VerificationAttemptEvent.verification_run_id == run_exhausted)
+                )
+            ).all()
+            assert source_state == ("dead_letter", 3, None, None)
+            assert child_state == ("passed", 1, run_exhausted, None, None)
+            assert approval_status == "consumed"
+            assert child_events == [("finished", "passed"), ("started", "running")]
+            assert set(source_events) == {("started", "running"), ("finished", "dead_letter")}
 
         # Validate recovery through a fresh scheduler process, not an in-process
         # call to the claim helper. The first worker is killed while its remote
