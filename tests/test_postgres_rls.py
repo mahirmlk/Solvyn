@@ -3023,6 +3023,7 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
         # actual worker claim and sandbox-result persistence under tenant RLS.
         tenant_context.set(tenant_a, "rls-redrive")
         async with sessions() as session:
+            await bind_tenant_scope(session, tenant_a)
             session.add(
                 VerificationRun(
                     id=redrive_child_id,
