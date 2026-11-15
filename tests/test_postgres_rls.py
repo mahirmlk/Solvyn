@@ -2663,6 +2663,8 @@ async def test_task_dependency_rls_is_tenant_scoped_and_rejects_cross_tenant_edg
 async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from solvyn.db.session import bind_tenant_scope
+
     database_url = os.environ.get("DATABASE_URL", "")
     if not database_url.startswith("postgresql+"):
         pytest.skip("RLS behavior requires PostgreSQL and migrations at head")
