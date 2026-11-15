@@ -197,6 +197,16 @@ export interface GitHubIntegrationInfo {
   updated_at?: string | null;
 }
 
+export interface RepositoryCandidateInfo {
+  id: number;
+  full_name: string;
+  default_branch: string;
+  url: string;
+  private: boolean;
+  is_connected: boolean;
+  connectable: boolean;
+}
+
 export interface RepositoryInspection {
   revision: string;
   file_count: number;
@@ -629,6 +639,11 @@ export const api = {
 
   listProjectRepositories: (projectId: string) =>
     request<{ repositories: RepositoryInfo[]; count: number }>(`/projects/${projectId}/repositories`),
+
+  listRepositoryCandidates: (projectId: string, page = 1) =>
+    request<{ repositories: RepositoryCandidateInfo[]; count: number; page: number; per_page: number; has_more: boolean; possibly_truncated: boolean }>(
+      `/projects/${projectId}/repository-candidates?page=${page}`,
+    ),
 
   connectProjectRepository: (projectId: string, fullName: string) =>
     request<RepositoryInfo>(`/projects/${projectId}/repositories`, {

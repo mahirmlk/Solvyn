@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useState } from "react";
 import Link from "next/link";
-import { api, GitHubIntegrationInfo, ProjectInfo, RepositoryContentSearch, RepositoryInfo, RepositoryInspection } from "@/lib/api";
+import { api, GitHubIntegrationInfo, ProjectInfo, RepositoryCandidateInfo, RepositoryContentSearch, RepositoryInfo, RepositoryInspection } from "@/lib/api";
 import styles from "./page.module.css";
 
 export default function RepositoriesPage() {
@@ -13,6 +13,12 @@ export default function RepositoriesPage() {
   const [integration, setIntegration] = useState<GitHubIntegrationInfo | null>(null);
   const [canManage, setCanManage] = useState(false);
   const [repositories, setRepositories] = useState<RepositoryInfo[]>([]);
+  const [repositoryCandidates, setRepositoryCandidates] = useState<RepositoryCandidateInfo[]>([]);
+  const [selectedCandidateName, setSelectedCandidateName] = useState("");
+  const [candidatePage, setCandidatePage] = useState(1);
+  const [candidateHasMore, setCandidateHasMore] = useState(false);
+  const [candidateMayBeTruncated, setCandidateMayBeTruncated] = useState(false);
+  const [loadingCandidates, setLoadingCandidates] = useState(false);
   const [selectedRepositoryId, setSelectedRepositoryId] = useState("");
   const [inspection, setInspection] = useState<RepositoryInspection | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -27,6 +33,29 @@ export default function RepositoriesPage() {
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+
+  function changeOrganization(nextOrganizationId: string) {
+    setOrganizationId(nextOrganizationId);
+    setLoadingOrganization(true);
+    setLoadingRepositories(false);
+    setLoadingCandidates(false);
+    setCanManage(false);
+    setProjects([]);
+    setProjectId("");
+    setIntegration(null);
+    setRepositories([]);
+    setSelectedRepositoryId("");
+    setInspection(null);
+    setRepositoryCandidates([]);
+    setSelectedCandidateName("");
+    setCandidatePage(1);
+    setCandidateHasMore(false);
+    setCandidateMayBeTruncated(false);
+    setToken("");
+    setRepositoryName("");
+    setError(null);
+    setNotice(null);
+  }
 
   useEffect(() => {
     let active = true;
@@ -47,10 +76,21 @@ export default function RepositoriesPage() {
 
   useEffect(() => {
     if (!organizationId) {
+      setLoadingOrganization(false);
+      setLoadingRepositories(false);
       setProjects([]);
       setProjectId("");
       setIntegration(null);
       setCanManage(false);
+      setRepositories([]);
+      setSelectedRepositoryId("");
+      setInspection(null);
+      setRepositoryCandidates([]);
+      setSelectedCandidateName("");
+      setCandidatePage(1);
+      setCandidateHasMore(false);
+      setCandidateMayBeTruncated(false);
+      setLoadingCandidates(false);
       setToken("");
       setRepositoryName("");
       setNotice(null);
@@ -129,6 +169,39 @@ export default function RepositoriesPage() {
     return () => { active = false; };
   }, [projectId]);
 
+  useEffect(() => {
+    if (!projectId || !canManage || !integration?.connected) {
+      setRepositoryCandidates([]);
+      setSelectedCandidateName("");
+      setCandidateHasMore(false);
+      setCandidateMayBeTruncated(false);
+      setLoadingCandidates(false);
+      return;
+    }
+    let active = true;
+    setLoadingCandidates(true);
+    setRepositoryCandidates([]);
+    setSelectedCandidateName("");
+    setCandidateHasMore(false);
+    setCandidateMayBeTruncated(false);
+    setError(null);
+    api.listRepositoryCandidates(projectId, candidatePage)
+      .then((result) => {
+        if (!active) return;
+        setRepositoryCandidates(result.repositories);
+        setCandidateHasMore(result.has_more);
+        setCandidateMayBeTruncated(result.possibly_truncated);
+        setSelectedCandidateName((current) => result.repositories.some((repository) => repository.full_name === current)
+          ? current
+          : result.repositories.find((repository) => repository.connectable && !repository.is_connected)?.full_name || "");
+      })
+      .catch((reason: unknown) => {
+        if (active) setError(reason instanceof Error ? reason.message : "Could not discover repositories for this GitHub connection.");
+      })
+      .finally(() => { if (active) setLoadingCandidates(false); });
+    return () => { active = false; };
+  }, [projectId, candidatePage, canManage, integration?.connected]);
+
   async function connectGitHub(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!organizationId || !canManage || !token.trim()) return;
@@ -163,6 +236,48 @@ export default function RepositoriesPage() {
       setNotice("Connected " + repository.full_name + ".");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not connect the repository.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function connectCandidate() {
+    const candidate = repositoryCandidates.find((item) => item.full_name === selectedCandidateName);
+    if (!canManage || !integration?.connected || !projectId || !candidate?.connectable || candidate.is_connected || saving) return;
+    setSaving(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const repository = await api.connectProjectRepository(projectId, selectedCandidateName);
+      setRepositories((current) => current.some((item) => item.id === repository.id) ? current : [...current, repository]);
+      setRepositoryCandidates((current) => current.map((item) => item.full_name === repository.full_name
+        ? { ...item, is_connected: true }
+        : item));
+      setSelectedCandidateName("");
+      setSelectedRepositoryId(repository.id);
+      setInspection(null);
+      setNotice("Connected " + repository.full_name + ".");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not connect the selected repository.");
+      const [candidateRefresh, repositoryRefresh] = await Promise.allSettled([
+        api.listRepositoryCandidates(projectId, candidatePage),
+        api.listProjectRepositories(projectId),
+      ]);
+      if (candidateRefresh.status === "fulfilled") {
+        const result = candidateRefresh.value;
+        setRepositoryCandidates(result.repositories);
+        setCandidateHasMore(result.has_more);
+        setCandidateMayBeTruncated(result.possibly_truncated);
+        setSelectedCandidateName((current) => result.repositories.some((candidate) => candidate.full_name === current)
+          ? current
+          : result.repositories.find((candidate) => candidate.connectable && !candidate.is_connected)?.full_name || "");
+      }
+      if (repositoryRefresh.status === "fulfilled") {
+        const rows = repositoryRefresh.value.repositories;
+        setRepositories(rows);
+        setSelectedRepositoryId((current) => rows.some((repository) => repository.id === current) ? current : "");
+        setInspection(null);
+      }
     } finally {
       setSaving(false);
     }
@@ -231,7 +346,7 @@ export default function RepositoriesPage() {
           <div className={styles.scopeBar}>
             <label className="field">
               <span className="field-label">Organization</span>
-              <select className="editorial-input" value={organizationId} onChange={(event) => setOrganizationId(event.target.value)} disabled={loadingOrganization || saving || inspecting || searching}>
+              <select className="editorial-input" value={organizationId} onChange={(event) => changeOrganization(event.target.value)} disabled={loadingOrganization || saving || inspecting || searching}>
                 {organizations.map((organization) => (
                   <option key={organization.id} value={organization.id}>{organization.name}</option>
                 ))}
@@ -239,7 +354,7 @@ export default function RepositoriesPage() {
             </label>
             <label className="field">
               <span className="field-label">Project</span>
-              <select className="editorial-input" value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={!projects.length || loadingOrganization || saving || inspecting || searching}>
+              <select className="editorial-input" value={projectId} onChange={(event) => { setCandidatePage(1); setCandidateHasMore(false); setCandidateMayBeTruncated(false); setRepositoryCandidates([]); setSelectedCandidateName(""); setProjectId(event.target.value); }} disabled={!projects.length || loadingOrganization || saving || inspecting || searching}>
                 {projects.length
                   ? projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)
                   : <option value="">No projects yet</option>}
@@ -304,7 +419,36 @@ export default function RepositoriesPage() {
                 <span className="status-pill">{repositories.length} Repositories</span>
               </div>
               {canManage ? (
-                <form className={styles.repositoryForm} onSubmit={connectRepository}>
+                <>
+                  {integration?.connected && (
+                    <div className={styles.repositoryForm}>
+                      <label className="field">
+                        <span className="field-label">Discover from connected GitHub account</span>
+                        <select className="editorial-input mono" disabled={loadingCandidates || !repositoryCandidates.length || saving} onChange={(event) => setSelectedCandidateName(event.target.value)} value={selectedCandidateName}>
+                          <option value="">{loadingCandidates ? "Loading repositories…" : "Choose a repository"}</option>
+                          {repositoryCandidates.map((candidate) => (
+                            <option disabled={!candidate.connectable || candidate.is_connected} key={candidate.id} value={candidate.full_name}>
+                              {candidate.full_name} · {candidate.private ? "Private" : "Public"}{candidate.is_connected ? " · Connected" : !candidate.connectable ? " · Empty repository" : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <div className={styles.discoveryActions}>
+                        <button className="action-button" disabled={saving || loadingCandidates || !selectedCandidateName || !repositoryCandidates.find((item) => item.full_name === selectedCandidateName)?.connectable || repositoryCandidates.find((item) => item.full_name === selectedCandidateName)?.is_connected} onClick={() => void connectCandidate()} type="button">
+                          {saving ? "Connecting…" : "Connect selected"}
+                        </button>
+                        <button className="action-button secondary" disabled={saving || loadingCandidates || candidatePage <= 1} onClick={() => setCandidatePage((page) => page - 1)} type="button">Previous</button>
+                        <button className="action-button secondary" disabled={saving || loadingCandidates || !candidateHasMore} onClick={() => setCandidatePage((page) => page + 1)} type="button">Next page</button>
+                      </div>
+                      {candidateMayBeTruncated && candidatePage >= 20 ? (
+                        <p className={styles.helper} role="status">The discovery limit is 1,000 repositories. More repositories may exist beyond the visible results.</p>
+                      ) : candidateMayBeTruncated ? (
+                        <p className={styles.helper}>GitHub reports another page of repositories.</p>
+                      ) : null}
+                      <p className={styles.helper}>Discovery shows repositories visible to the organization credential. The credential is never returned.</p>
+                    </div>
+                  )}
+                  <form className={styles.repositoryForm} onSubmit={connectRepository}>
                   <label className="field">
                     <span className="field-label">GitHub repository</span>
                     <input
@@ -318,7 +462,8 @@ export default function RepositoriesPage() {
                   <button className="action-button" disabled={saving || searching || !repositoryName.trim()} type="submit">
                     {saving ? "Connecting…" : "Connect repository"}
                   </button>
-                </form>
+                  </form>
+                </>
               ) : (
                 <p className={styles.helper}>Only organization owners and admins can connect repositories to projects.</p>
               )}
