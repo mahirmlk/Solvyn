@@ -3046,6 +3046,7 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                     organization_id=org_a,
                     project_id=project_a,
                     teammate_id=teammate_a,
+                    task_handoff_id=handoff_a,
                     verification_run_id=redrive_child_id,
                     kind="verification",
                     summary="Approved dead-letter redrive",
