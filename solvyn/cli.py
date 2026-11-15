@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.metadata
+import json
 import os
 import platform
 import subprocess
@@ -22,6 +23,7 @@ import sys
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -31,6 +33,7 @@ from rich.text import Text
 
 from solvyn.agents.registry import agent_registry
 from solvyn.config import settings
+from solvyn.eval.benchmark import load_dataset, run_agents
 from solvyn.workflows.task_generator import TaskGenerator
 from solvyn.workflows.templates import WORKFLOW_TEMPLATES
 
@@ -49,6 +52,8 @@ app = typer.Typer(
     context_settings={"help_option_names": ["-h", "--help"]},
 )
 console = Console()
+eval_app = typer.Typer(help="Run versioned, deterministic evaluations against registered teammate agents.")
+app.add_typer(eval_app, name="eval")
 
 AGENT_TYPES = sorted(agent_registry.list_agents().keys())
 AGENT_DESCRIPTIONS = {m.agent_type: m.description for m in agent_registry.list_agents().values()}
@@ -68,6 +73,7 @@ COMMAND_CATALOGUE: list[tuple[str, str, str]] = [
     ("agents", "List available agent types", "agents"),
     ("chat", "Start an interactive chat session with an agent", "agents"),
     ("run", "Run a single non-interactive task with an agent", "agents"),
+    ("eval", "Run role-specific teammate evaluation cases", "agents"),
     ("workflows", "List available workflow templates", "workflows"),
     ("pipeline", "Execute a workflow pipeline", "workflows"),
     ("generate-tasks", "Generate tasks from a product specification", "workflows"),
@@ -300,6 +306,132 @@ def run(
             console.print(f"[red]Error: {e}[/]")
 
     asyncio.run(_run_task())
+
+
+@eval_app.command("datasets")
+def eval_datasets() -> None:
+    """List the versioned evaluation dataset and its role coverage."""
+    dataset = load_dataset()
+    grouped: dict[str, int] = {}
+    for case in dataset["cases"]:
+        grouped[case["agent_type"]] = grouped.get(case["agent_type"], 0) + 1
+    table = Table(title=f"{dataset['id']} v{dataset['version']}")
+    table.add_column("Agent type", style="cyan")
+    table.add_column("Cases", justify="right")
+    for agent_type, count in sorted(grouped.items()):
+        table.add_row(agent_type, str(count))
+    console.print(table)
+    console.print(f"[dim]{dataset['description']}[/]")
+
+
+@eval_app.command("run")
+def eval_run(
+    provider: str = typer.Option("", help="Override the default LLM provider for this evaluation."),
+    model: str = typer.Option("", help="Override the default LLM model for this evaluation."),
+    report_path: Path | None = typer.Option(None, "--report", help="Optional path for a redacted JSON report."),
+) -> None:
+    """Run the packaged evaluation cases and persist score history for the default tenant."""
+    from solvyn.db.models import AgentEvaluationRun
+    from solvyn.db.session import async_session_factory, bind_tenant_scope
+
+    dataset = load_dataset()
+    tenant_id = uuid.UUID(settings.default_tenant_id)
+    selected_provider = provider.strip() or None
+    selected_model = model.strip() or None
+
+    async def _run_evaluation() -> dict[str, Any]:
+        report = await run_agents(
+            dataset,
+            tenant_id=str(tenant_id),
+            provider=selected_provider,
+            model=selected_model,
+        )
+        report_data = report.to_dict()
+        async with async_session_factory() as session:
+            await bind_tenant_scope(session, tenant_id)
+            session.add(
+                AgentEvaluationRun(
+                    id=uuid.UUID(report.run_id),
+                    tenant_id=tenant_id,
+                    task_id=None,
+                    agent_type="engineering-team",
+                    dataset_id=report.dataset_id,
+                    dataset_version=report.dataset_version,
+                    provider=report.provider,
+                    model=report.model,
+                    summary={"summary": report.summary, "cases": report_data["cases"]},
+                )
+            )
+            await session.commit()
+        return report_data
+
+    try:
+        result = asyncio.run(_run_evaluation())
+    except Exception as exc:
+        console.print(f"[red]Evaluation failed: {type(exc).__name__}[/]")
+        raise typer.Exit(1) from exc
+
+    if report_path is not None:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    console.print_json(json.dumps(result, ensure_ascii=False))
+    if report_path is not None:
+        console.print(f"[dim]Report saved to {report_path}[/]")
+
+
+@eval_app.command("history")
+def eval_history(limit: int = typer.Option(25, min=1, max=100, help="Number of recent evaluation runs to show.")) -> None:
+    """Show recent persisted evaluation summaries for the configured tenant."""
+    from sqlalchemy import select
+
+    from solvyn.db.models import AgentEvaluationRun
+    from solvyn.db.session import async_session_factory, bind_tenant_scope
+
+    tenant_id = uuid.UUID(settings.default_tenant_id)
+
+    async def _load_history() -> list[AgentEvaluationRun]:
+        async with async_session_factory() as session:
+            await bind_tenant_scope(session, tenant_id)
+            query = (
+                select(AgentEvaluationRun)
+                .where(AgentEvaluationRun.tenant_id == tenant_id)
+                .order_by(AgentEvaluationRun.created_at.desc(), AgentEvaluationRun.id.desc())
+                .limit(limit)
+            )
+            result = await session.execute(query)
+            return list(result.scalars().all())
+
+    try:
+        runs = asyncio.run(_load_history())
+    except Exception as exc:
+        console.print(f"[red]Could not load evaluation history: {type(exc).__name__}[/]")
+        raise typer.Exit(1) from exc
+
+    table = Table(title="Recent Agent Evaluations")
+    table.add_column("Created", style="dim")
+    table.add_column("Dataset", style="cyan")
+    table.add_column("Provider / Model")
+    table.add_column("Passed", justify="right")
+    table.add_column("Run errors", justify="right")
+    table.add_column("Pass rate", justify="right")
+    for run_record in runs:
+        raw_metrics = run_record.summary.get("summary")
+        metrics: dict[str, object] = raw_metrics if isinstance(raw_metrics, dict) else {}
+        passed = metrics.get("passed")
+        evaluated = metrics.get("evaluated_cases")
+        execution_failures = metrics.get("execution_failures")
+        pass_rate = metrics.get("pass_rate")
+        table.add_row(
+            run_record.created_at.isoformat() if run_record.created_at else "—",
+            f"{run_record.dataset_id} v{run_record.dataset_version}",
+            f"{run_record.provider or 'unknown'} / {run_record.model or 'unknown'}",
+            f"{passed}/{evaluated}" if isinstance(passed, int) and isinstance(evaluated, int) else "—",
+            str(execution_failures) if isinstance(execution_failures, int) else "—",
+            f"{pass_rate:.1%}" if isinstance(pass_rate, (int, float)) else "—",
+        )
+    console.print(table)
+    if not runs:
+        console.print("[dim]No persisted evaluation runs for this tenant.[/]")
 
 
 # ---------------------------------------------------------------------------

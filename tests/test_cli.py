@@ -23,6 +23,13 @@ def test_agents() -> None:
     assert "product-manager" in result.stdout
 
 
+def test_eval_datasets_lists_role_coverage() -> None:
+    result = runner.invoke(app, ["eval", "datasets"])
+    assert result.exit_code == 0
+    assert "solvyn-engineering-teammates" in result.stdout
+    assert "security-auditor" in result.stdout
+
+
 def test_providers() -> None:
     result = runner.invoke(app, ["providers"])
     assert result.exit_code == 0

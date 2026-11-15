@@ -59,6 +59,17 @@ class AgentEvaluator:
                 duration_ms=(time.monotonic() - start) * 1000,
             )
 
+        if not isinstance(parsed, dict):
+            return EvalResult(
+                agent_type=agent_type,
+                test_name=test_name,
+                passed=False,
+                score=0.0,
+                details="JSON output must be an object",
+                metrics={"missing_keys": required_keys, "found_keys": []},
+                duration_ms=(time.monotonic() - start) * 1000,
+            )
+
         missing = [k for k in required_keys if k not in parsed]
         score = (len(required_keys) - len(missing)) / len(required_keys) if required_keys else 1.0
         return EvalResult(
@@ -74,6 +85,18 @@ class AgentEvaluator:
 
     def evaluate_length(self, agent_type: str, output: str, min_length: int = 1, max_length: int = 10000, test_name: str = "length_check") -> EvalResult:
         start = time.monotonic()
+        if min_length < 0 or max_length < min_length:
+            raise ValueError("Expected 0 <= min_length <= max_length")
+        if not isinstance(output, str):
+            return EvalResult(
+                agent_type=agent_type,
+                test_name=test_name,
+                passed=False,
+                score=0.0,
+                details="Output must be text",
+                metrics={"min_length": min_length, "max_length": max_length},
+                duration_ms=(time.monotonic() - start) * 1000,
+            )
         length = len(output)
         passed = min_length <= length <= max_length
         if passed:
@@ -95,8 +118,18 @@ class AgentEvaluator:
 
     def evaluate_no_hallucination(self, agent_type: str, output: str, forbidden_phrases: list[str], test_name: str = "no_hallucination") -> EvalResult:
         start = time.monotonic()
+        if not isinstance(output, str):
+            return EvalResult(
+                agent_type=agent_type,
+                test_name=test_name,
+                passed=False,
+                score=0.0,
+                details="Output must be text",
+                metrics={"forbidden_found": [], "forbidden_total": len(forbidden_phrases)},
+                duration_ms=(time.monotonic() - start) * 1000,
+            )
         found = [p for p in forbidden_phrases if p.lower() in output.lower()]
-        score = 1.0 if not found else max(0.0, 1.0 - len(found) / len(forbidden_phrases))
+        score = 1.0 if not found or not forbidden_phrases else max(0.0, 1.0 - len(found) / len(forbidden_phrases))
         return EvalResult(
             agent_type=agent_type,
             test_name=test_name,

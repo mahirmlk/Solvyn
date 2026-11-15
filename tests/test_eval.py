@@ -37,6 +37,12 @@ class TestAgentEvaluator:
         assert result.passed is False
         assert result.score == 0.0
 
+    def test_evaluate_json_requires_object(self) -> None:
+        evaluator = AgentEvaluator()
+        result = evaluator.evaluate_json_output("pm", "[]", ["key"])
+        assert result.passed is False
+        assert result.details == "JSON output must be an object"
+
     def test_evaluate_length_ok(self) -> None:
         evaluator = AgentEvaluator()
         result = evaluator.evaluate_length("pm", "hello world", min_length=1, max_length=100)
@@ -56,6 +62,17 @@ class TestAgentEvaluator:
         evaluator = AgentEvaluator()
         result = evaluator.evaluate_no_hallucination("pm", "This contains forbidden content", ["forbidden"])
         assert result.passed is False
+
+    def test_evaluate_no_hallucination_with_empty_rubric(self) -> None:
+        evaluator = AgentEvaluator()
+        result = evaluator.evaluate_no_hallucination("pm", "This is fine", [])
+        assert result.passed is True
+        assert result.score == 1.0
+
+    def test_evaluate_length_rejects_invalid_bounds(self) -> None:
+        evaluator = AgentEvaluator()
+        with pytest.raises(ValueError, match="min_length"):
+            evaluator.evaluate_length("pm", "text", min_length=5, max_length=2)
 
     def test_evaluate_code_quality_clean(self) -> None:
         evaluator = AgentEvaluator()

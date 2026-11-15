@@ -44,6 +44,9 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["solvyn", "solvyn.*"]
 
+[tool.setuptools.package-data]
+"solvyn.eval" = ["datasets/*.json"]
+
 [tool.ruff]
 line-length = 160
 target-version = "py312"

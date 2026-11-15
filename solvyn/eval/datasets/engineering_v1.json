@@ -1,0 +1,59 @@
+{
+  "id": "solvyn-engineering-teammates",
+  "version": "1.0.0",
+  "description": "Structured-output checks for the initial engineering teammate roles. Scores format and explicit rubric signals; it is not a complete measure of engineering quality.",
+  "cases": [
+    {
+      "id": "tech-lead.tenant-workspace-design",
+      "agent_type": "system-designer",
+      "response_field": "design",
+      "input": {
+        "requirements": "Design a small multi-tenant service that stores customer projects and lets an authenticated project member list only that project's records. Include durable writes and a paginated list endpoint.",
+        "constraints": "PostgreSQL, FastAPI, tenant identity comes from authenticated membership, and every list endpoint must be bounded."
+      },
+      "required_json_keys": ["architecture_overview", "tech_stack", "database_schema", "api_endpoints", "data_flow_diagram", "design_decisions"],
+      "must_mention_any": [["tenant", "organization"], ["pagination", "paginated", "limit"], ["authorization", "membership", "permission"]],
+      "must_not_mention": []
+    },
+    {
+      "id": "software-engineer.validated-create-endpoint",
+      "agent_type": "backend-engineer",
+      "response_field": "code",
+      "input": {
+        "specification": "Add a FastAPI endpoint to create a project note with a required title and body. Reject blank titles, cap the body at 20,000 characters, and return the created record.",
+        "language": "python",
+        "framework": "fastapi"
+      },
+      "required_json_keys": ["models_code", "api_code", "service_code", "tests_code", "instructions"],
+      "must_mention_any": [["validation", "min_length", "field_validator", "constr"], ["test", "pytest", "assert"]],
+      "must_not_mention": []
+    },
+    {
+      "id": "qa-engineer.parser-boundaries",
+      "agent_type": "qa-engineer",
+      "response_field": "tests",
+      "input": {
+        "code": "def parse_limit(value):\n    limit = int(value)\n    if limit < 1 or limit > 100:\n        raise ValueError('limit out of range')\n    return limit\n",
+        "test_framework": "pytest",
+        "coverage_target": 80
+      },
+      "required_json_keys": ["unit_tests", "integration_tests", "fixtures", "coverage_analysis", "edge_cases_found"],
+      "must_mention_any": [["zero", "below minimum", "less than 1"], ["101", "above maximum", "greater than 100"], ["non-numeric", "not an integer", "invalid input"]],
+      "must_not_mention": []
+    },
+    {
+      "id": "security-auditor.sql-injection",
+      "agent_type": "security-auditor",
+      "response_field": "audit",
+      "input": {
+        "language": "python",
+        "code": "def get_user(cursor, user_id):\n    cursor.execute(\"SELECT * FROM users WHERE id = %s\" % user_id)\n    return cursor.fetchone()\n",
+        "scan_type": "full",
+        "compliance": ""
+      },
+      "required_json_keys": ["critical_findings", "high_findings", "medium_findings", "low_findings", "compliance_issues", "overall_risk_score", "summary"],
+      "must_mention_any": [["sql injection", "injection flaw"], ["parameterized", "bind parameter", "prepared statement"]],
+      "must_not_mention": []
+    }
+  ]
+}
