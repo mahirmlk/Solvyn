@@ -14,7 +14,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from importlib.resources import files
-from typing import Any
+from typing import Any, cast
 
 from solvyn.agents.registry import agent_registry
 
@@ -72,7 +72,7 @@ def load_dataset() -> dict[str, Any]:
     case_ids = [case.get("id") for case in cases]
     if any(not isinstance(case_id, str) or not case_id for case_id in case_ids) or len(case_ids) != len(set(case_ids)):
         raise ValueError("Evaluation case IDs must be unique non-empty strings")
-    return dataset
+    return cast(dict[str, Any], dataset)
 
 
 def _score_case(

@@ -415,14 +415,19 @@ def eval_history(limit: int = typer.Option(25, min=1, max=100, help="Number of r
     table.add_column("Run errors", justify="right")
     table.add_column("Pass rate", justify="right")
     for run_record in runs:
-        metrics = run_record.summary.get("summary", {})
+        raw_metrics = run_record.summary.get("summary")
+        metrics: dict[str, object] = raw_metrics if isinstance(raw_metrics, dict) else {}
+        passed = metrics.get("passed")
+        evaluated = metrics.get("evaluated_cases")
+        execution_failures = metrics.get("execution_failures")
+        pass_rate = metrics.get("pass_rate")
         table.add_row(
             run_record.created_at.isoformat() if run_record.created_at else "—",
             f"{run_record.dataset_id} v{run_record.dataset_version}",
             f"{run_record.provider or 'unknown'} / {run_record.model or 'unknown'}",
-            f"{metrics.get('passed', 0)}/{metrics.get('evaluated_cases', 0)}",
-            str(metrics.get("execution_failures", 0)),
-            f"{float(metrics['pass_rate']):.1%}" if metrics.get("pass_rate") is not None else "—",
+            f"{passed}/{evaluated}" if isinstance(passed, int) and isinstance(evaluated, int) else "—",
+            str(execution_failures) if isinstance(execution_failures, int) else "—",
+            f"{pass_rate:.1%}" if isinstance(pass_rate, (int, float)) else "—",
         )
     console.print(table)
     if not runs:
