@@ -2791,6 +2791,15 @@ async def test_saved_conversation_conversion_gates_repository_workspace_until_ap
         AsyncMock(return_value=FakeRepositoryProvider()),
     )
     workspace_url = f"/api/v1/workflows/executions/{task['execution_id']}/tasks/{task['task_id']}/workspace"
+    workspace_context = await client.get(workspace_url)
+    assert workspace_context.status_code == 200, workspace_context.text
+    assert workspace_context.json()["workspace"] is None
+    assert workspace_context.json()["handoff"] == {
+        "project_id": str(project_id),
+        "status": "waiting_approval",
+        "requires_approval": True,
+        "approval_status": "pending",
+    }
     workspace_payload = {"repository_id": str(repository_id), "repository_paths": ["src/status.py"]}
     blocked_workspace = await client.post(workspace_url, json=workspace_payload)
     assert blocked_workspace.status_code == 409
@@ -2808,6 +2817,16 @@ async def test_saved_conversation_conversion_gates_repository_workspace_until_ap
     assert workspace_response.json()["task_id"] == task["task_id"]
     assert workspace_response.json()["source_commit_sha"] == source_sha
     assert workspace_response.json()["source_paths"] == ["src/status.py"]
+    workspace_context = await client.get(workspace_url)
+    assert workspace_context.status_code == 200, workspace_context.text
+    assert workspace_context.json()["workspace"] == {
+        "workspace_id": workspace_response.json()["workspace_id"],
+        "repository_id": str(repository_id),
+        "source_commit_sha": source_sha,
+        "source_paths": ["src/status.py"],
+        "workspace_mode": "selected_files",
+    }
+    assert workspace_context.json()["handoff"]["approval_status"] == "approved"
 
     from solvyn.agents import teammate_runtime
 

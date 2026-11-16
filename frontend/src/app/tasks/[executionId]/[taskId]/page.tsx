@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useState } from "react";
-import { api, TaskActivityEvent, TaskDeliveryDiff, TaskDeliveryEvidence, TaskDeliveryResult, WorkflowExecutionTask } from "@/lib/api";
+import { api, RepositoryInfo, TaskActivityEvent, TaskDeliveryDiff, TaskDeliveryEvidence, TaskDeliveryResult, TaskWorkspaceContext, WorkflowExecutionTask } from "@/lib/api";
 import styles from "./page.module.css";
 
 export default function TaskDeliveryReviewPage() {
@@ -14,6 +14,14 @@ export default function TaskDeliveryReviewPage() {
   const [loading, setLoading] = useState(true);
   const [activity, setActivity] = useState<TaskActivityEvent[]>([]);
   const [taskInfo, setTaskInfo] = useState<WorkflowExecutionTask | null>(null);
+  const [workspaceContext, setWorkspaceContext] = useState<TaskWorkspaceContext | null>(null);
+  const [workspaceRepositories, setWorkspaceRepositories] = useState<RepositoryInfo[]>([]);
+  const [workspaceRepositoryId, setWorkspaceRepositoryId] = useState("");
+  const [workspacePathsDraft, setWorkspacePathsDraft] = useState("");
+  const [fullRepository, setFullRepository] = useState(false);
+  const [workspaceBusy, setWorkspaceBusy] = useState(false);
+  const [workspaceLoading, setWorkspaceLoading] = useState(true);
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
   const [activityLoading, setActivityLoading] = useState(true);
   const [activityError, setActivityError] = useState<string | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
@@ -74,6 +82,64 @@ export default function TaskDeliveryReviewPage() {
   }, [executionId, taskId]);
 
   useEffect(() => { void loadActivity(); }, [loadActivity]);
+
+  const loadWorkspace = useCallback(async () => {
+    setWorkspaceLoading(true);
+    setWorkspaceError(null);
+    try {
+      const context = await api.getTaskWorkspaceContext(executionId, taskId);
+      setWorkspaceContext(context);
+      if (context.workspace) {
+        setWorkspaceRepositoryId(context.workspace.repository_id ?? "");
+      } else if (context.plan) {
+        setWorkspaceRepositoryId(context.plan.repository_id);
+        setWorkspacePathsDraft(context.plan.repository_paths.join("\n"));
+      } else if (context.handoff) {
+        const repositories = await api.listProjectRepositories(context.handoff.project_id);
+        const available = repositories.repositories.filter((repository) => repository.provider === "github" && repository.is_active);
+        setWorkspaceRepositories(available);
+        setWorkspaceRepositoryId((current) => current || available[0]?.id || "");
+      }
+    } catch (reason) {
+      setWorkspaceError(reason instanceof Error ? reason.message : "Could not load workspace setup.");
+    } finally {
+      setWorkspaceLoading(false);
+    }
+  }, [executionId, taskId]);
+
+  useEffect(() => { void loadWorkspace(); }, [loadWorkspace]);
+
+  async function createWorkspace(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const context = workspaceContext;
+    if (!context?.handoff || !workspaceRepositoryId) return;
+    const handoffReady = (!context.handoff.requires_approval || context.handoff.approval_status === "approved")
+      && ["pending", "running", "failed", "completed"].includes(context.handoff.status);
+    if (!handoffReady) {
+      setWorkspaceError("Approve the assigned handoff before creating a repository workspace.");
+      return;
+    }
+    const paths = workspacePathsDraft.split(/\r?\n|,/).map((path) => path.trim()).filter(Boolean);
+    if (!fullRepository && paths.length === 0) {
+      setWorkspaceError("Select at least one repository path, or choose the full repository.");
+      return;
+    }
+    setWorkspaceBusy(true);
+    setWorkspaceError(null);
+    try {
+      await api.createTaskWorkspace(executionId, taskId, {
+        repository_id: workspaceRepositoryId,
+        ...(fullRepository ? { full_repository: true } : { repository_paths: paths }),
+        ...(context.plan ? { source_commit_sha: context.plan.source_commit_sha } : {}),
+      });
+      setReviewNotice("Repository workspace created from the authorized source revision.");
+      await Promise.allSettled([loadWorkspace(), loadActivity(), loadPreview()]);
+    } catch (reason) {
+      setWorkspaceError(reason instanceof Error ? reason.message : "Could not create the task workspace.");
+    } finally {
+      setWorkspaceBusy(false);
+    }
+  }
 
   async function addAcceptanceCriteria(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -213,6 +279,53 @@ export default function TaskDeliveryReviewPage() {
       </section>
 
       {error && <section className={styles.notice} role="alert"><p>{error}</p></section>}
+
+      <section className={`${styles.diffPanel} pearl-pane`} aria-labelledby="workspace-setup-heading" aria-busy={workspaceLoading || workspaceBusy}>
+        <div className={styles.sectionHead}>
+          <div>
+            <span className="eyebrow">Repository workspace</span>
+            <h2 id="workspace-setup-heading">Source and sandbox</h2>
+          </div>
+          {workspaceContext?.workspace && <span className="status-pill">ready · {workspaceContext.workspace.workspace_mode.replaceAll("_", " ")}</span>}
+        </div>
+        <p className={styles.intro}>Create an isolated workspace from the assigned project repository. The source commit is pinned before the teammate can make changes.</p>
+        {workspaceError && <p className={styles.activityError} role="alert">{workspaceError}</p>}
+        {workspaceLoading ? <div className="skeleton" style={{ minHeight: 72 }} /> : workspaceContext?.workspace ? (
+          <div className={styles.source}>
+            <div><span className="field-label">Repository</span><code>{workspaceContext.workspace.repository_id ?? "Manual files"}</code></div>
+            <div><span className="field-label">Pinned source</span><code>{workspaceContext.workspace.source_commit_sha ?? "Not applicable"}</code></div>
+            {workspaceContext.workspace.source_paths && <div><span className="field-label">Selected paths</span><code>{workspaceContext.workspace.source_paths.join(", ")}</code></div>}
+          </div>
+        ) : !workspaceContext?.handoff ? (
+          <p className={styles.muted}>This task has no assigned project handoff. Repository workspaces are available after a teammate is assigned.</p>
+        ) : (workspaceContext.handoff.requires_approval && workspaceContext.handoff.approval_status !== "approved") || !["pending", "running", "failed", "completed"].includes(workspaceContext.handoff.status) ? (
+          <div className={styles.blocker}>
+            <p>The assigned handoff must be approved before its repository can be opened.</p>
+            <Link className="action-button secondary" href="/approvals">Review approval</Link>
+          </div>
+        ) : (
+          <form className={styles.workspaceForm} onSubmit={(event) => void createWorkspace(event)}>
+            <div className={styles.workspaceSource}>
+              <label>
+                <span className="field-label">GitHub repository</span>
+                <select className="editorial-input" disabled={Boolean(workspaceContext.plan)} onChange={(event) => setWorkspaceRepositoryId(event.target.value)} value={workspaceRepositoryId}>
+                  {workspaceContext.plan ? <option value={workspaceContext.plan.repository_id}>{workspaceContext.plan.repository_id} · confirmed plan</option> : workspaceRepositories.map((repository) => <option key={repository.id} value={repository.id}>{repository.full_name}</option>)}
+                </select>
+              </label>
+              {workspaceContext.plan && <div><span className="field-label">Confirmed plan revision</span><code>{workspaceContext.plan.source_commit_sha}</code></div>}
+            </div>
+            <label className={styles.fullRepository}>
+              <input checked={fullRepository} onChange={(event) => setFullRepository(event.target.checked)} type="checkbox" />
+              <span>Clone the full repository (up to the workspace size limit)</span>
+            </label>
+            {!fullRepository && <label>
+              <span className="field-label">Repository paths · one per line</span>
+              <textarea className="editorial-input" onChange={(event) => setWorkspacePathsDraft(event.target.value)} placeholder="src/app.py" rows={3} value={workspacePathsDraft} />
+            </label>}
+            <button className="action-button" disabled={workspaceBusy || !workspaceRepositoryId || (!workspaceContext.plan && workspaceRepositories.length === 0)} type="submit">{workspaceBusy ? "Creating workspace…" : "Create workspace"}</button>
+          </form>
+        )}
+      </section>
 
       <section className={`${styles.diffPanel} pearl-pane`} aria-labelledby="completion-review-heading">
         <div className={styles.sectionHead}>
