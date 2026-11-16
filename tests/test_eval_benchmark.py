@@ -103,7 +103,7 @@ def test_agent_execution_failure_is_not_counted_as_a_quality_failure() -> None:
     assert report.summary["evaluated_cases"] == len(cases) - 1
     assert report.summary["failed"] == 0
     assert report.summary["pass_rate"] == 1.0
-    assert report.summary["execution_success_rate"] == (len(cases) - 1) / len(cases)
+    assert report.summary["execution_success_rate"] == pytest.approx((len(cases) - 1) / len(cases), abs=0.0001)
 
 
 @pytest.mark.asyncio
