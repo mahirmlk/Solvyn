@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import socket
@@ -20,6 +21,7 @@ from solvyn.db.models import (
     Organization,
     ProactiveEvent,
     Project,
+    Repository,
     Session,
     Task,
     TaskHandoff,
@@ -33,6 +35,10 @@ from solvyn.db.models import (
 )
 from solvyn.db.session import async_session_factory, bind_tenant_scope
 from solvyn.multi_tenant.middleware import tenant_context
+from solvyn.proactive_dependabot import dependabot_alert_signal
+from solvyn.repositories.credentials import CredentialEncryptionUnavailableError, GitHubCredentialNotFoundError
+from solvyn.repositories.github import GitHubRepositoryError
+from solvyn.repositories.providers import get_authorized_repository_provider
 from solvyn.workflows.executor import workflow_executor
 
 logger = logging.getLogger(__name__)
@@ -47,6 +53,133 @@ _WORKER_NAME = "workflow-scheduler"
 _WORKER_HEARTBEAT_INTERVAL_SECONDS = 5
 _WORKER_HEARTBEAT_RETENTION = timedelta(days=30)
 _MAINTENANCE_TENANT_OFFSET = 0
+_MAX_DEPENDABOT_REPOSITORIES = 10
+
+
+def _dependabot_error_outcome(exc: Exception) -> tuple[str, str, str]:
+    """Map provider failures to safe, explicit triage outcomes."""
+    if isinstance(exc, GitHubRepositoryError):
+        if exc.status_code == 403:
+            return "blocked", "permission_required", "blocked"
+        if exc.status_code == 401:
+            return "blocked", "credential_invalid", "blocked"
+        if exc.status_code == 404:
+            return "blocked", "alerts_unavailable_or_not_enabled", "blocked"
+        if exc.status_code == 429:
+            return "failed", "rate_limited", "failed"
+        return "failed", "provider_unavailable", "failed"
+    if isinstance(exc, GitHubCredentialNotFoundError | CredentialEncryptionUnavailableError):
+        return "blocked", "github_credential_unavailable", "blocked"
+    return "failed", "provider_unavailable", "failed"
+
+
+async def _reconcile_dependabot_schedule(db: AsyncSession, schedule: MaintenanceSchedule) -> None:
+    """Queue a bounded snapshot of open Dependabot alerts for this project."""
+    repositories = list((
+        await db.execute(
+            select(Repository)
+            .where(
+                Repository.project_id == schedule.project_id,
+                Repository.provider == "github",
+                Repository.is_active.is_(True),
+            )
+            .order_by(Repository.full_name)
+            .limit(_MAX_DEPENDABOT_REPOSITORIES + 1)
+        )
+    ).scalars().all())
+    exceeded_repository_limit = len(repositories) > _MAX_DEPENDABOT_REPOSITORIES
+    if exceeded_repository_limit:
+        # A partial repository set cannot establish an organization-wide zero.
+        repositories = []
+    signals: dict[str, dict[str, str]] = {}
+    incomplete_reason = "repository_limit_reached" if exceeded_repository_limit else ""
+    incomplete_action = "incomplete" if incomplete_reason else ""
+    incomplete_status = "blocked" if incomplete_reason else ""
+
+    for repository in repositories:
+        try:
+            provider = await get_authorized_repository_provider(
+                repository.provider, db, repository, schedule.organization_id
+            )
+            async with provider:
+                alerts, complete = await provider.list_dependabot_alerts(repository.full_name)
+        except Exception as exc:
+            logger.warning(
+                "Dependabot reconciliation unavailable for repository %s (schedule %s): %s",
+                repository.full_name[:255],
+                schedule.id,
+                type(exc).__name__,
+            )
+            if not incomplete_reason:
+                incomplete_action, incomplete_reason, incomplete_status = _dependabot_error_outcome(exc)
+            continue
+
+        if not complete and not incomplete_reason:
+            incomplete_reason = "alert_page_limit_reached"
+            incomplete_action, incomplete_status = "incomplete", "blocked"
+        for alert in alerts:
+            signal = dependabot_alert_signal(repository.full_name, alert, action="created")
+            if signal is not None:
+                signals[signal["source_event_id"]] = signal
+            elif not incomplete_reason:
+                incomplete_reason = "invalid_alert_data"
+                incomplete_action, incomplete_status = "incomplete", "failed"
+
+    if signals:
+        existing_sources = set((
+            await db.execute(
+                select(ProactiveEvent.source_event_id).where(
+                    ProactiveEvent.organization_id == schedule.organization_id,
+                    ProactiveEvent.project_id == schedule.project_id,
+                    ProactiveEvent.source_event_id.in_(list(signals)),
+                )
+            )
+        ).scalars().all())
+        for source_event_id, signal in signals.items():
+            if source_event_id in existing_sources:
+                continue
+            stable_delivery = "dependabot-poll:" + hashlib.sha256(source_event_id.encode("utf-8")).hexdigest()
+            db.add(
+                ProactiveEvent(
+                    organization_id=schedule.organization_id,
+                    project_id=schedule.project_id,
+                    delivery_id=stable_delivery[:128],
+                    source_event_id=source_event_id,
+                    event_type="dependabot_alert",
+                    action=signal["action"],
+                    repository_name=signal["repository_name"],
+                    workflow_name=signal["workflow_name"],
+                    conclusion=signal["conclusion"],
+                    branch=signal["branch"],
+                    details_url=signal["details_url"],
+                    status="pending",
+                )
+            )
+
+    scheduled_for = schedule.next_run_at.isoformat()
+    if incomplete_reason:
+        action, conclusion, status = incomplete_action or "incomplete", incomplete_reason, incomplete_status or "blocked"
+    elif not repositories:
+        action, conclusion, status = "completed", "no_connected_repositories", "pending"
+    else:
+        action, conclusion, status = "completed", f"open_alerts:{len(signals)}", "pending"
+    reconciliation_id = f"dependabot-reconciliation:{schedule.id}:{scheduled_for}"[:320]
+    db.add(
+        ProactiveEvent(
+            organization_id=schedule.organization_id,
+            project_id=schedule.project_id,
+            delivery_id="dependabot-run:" + hashlib.sha256(reconciliation_id.encode("utf-8")).hexdigest(),
+            source_event_id=reconciliation_id,
+            event_type="dependency_review",
+            action=action,
+            repository_name="",
+            workflow_name=f"Dependabot review: {schedule.title}"[:255],
+            conclusion=conclusion[:50],
+            branch="",
+            details_url="",
+            status=status,
+        )
+    )
 
 
 async def _write_worker_heartbeat(status: str) -> None:
@@ -126,6 +259,11 @@ async def _queue_due_maintenance_events(db: AsyncSession) -> int:
             outcome = "scheduled"
             status = "pending"
             action = "due"
+            if schedule.maintenance_type == "dependency_review":
+                await _reconcile_dependabot_schedule(db, schedule)
+                # Skip missed intervals rather than flooding the inbox after downtime.
+                schedule.next_run_at = now + timedelta(days=schedule.interval_days)
+                continue
             if schedule.maintenance_type in ("code_quality", "documentation_review") and schedule.task_id is not None:
                 target = (
                     await db.execute(

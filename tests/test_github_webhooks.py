@@ -480,6 +480,139 @@ async def test_signed_dependabot_alert_persists_once_and_deduplicates_replay() -
     assert event.delivery_id == first_delivery
 
 
+def test_dependabot_reopened_webhook_uses_polling_compatible_source_id() -> None:
+    from solvyn.api.v1.webhooks import _parse_security_alert
+    from solvyn.proactive_dependabot import dependabot_alert_signal
+
+    alert = {
+        "number": 73,
+        "state": "open",
+        "security_advisory": {"summary": "Prototype pollution", "severity": "high"},
+    }
+    reopened = _parse_security_alert(
+        "dependabot_alert",
+        {"action": "reopened", "repository": {"full_name": "octo/repo"}, "alert": alert},
+    )
+    polled = dependabot_alert_signal("octo/repo", alert, action="created")
+
+    assert reopened is not None
+    assert polled is not None
+    assert reopened["action"] == "reopened"
+    assert reopened["source_event_id"] == polled["source_event_id"] == "dependabot_alert:octo/repo:73:created"
+
+
+@pytest.mark.asyncio
+async def test_dependabot_reopen_rearms_acknowledged_event_once_per_delivery() -> None:
+    tenant_id, organization_id, project_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    created_delivery = str(uuid.uuid4())
+    event = ProactiveEvent(
+        id=uuid.uuid4(),
+        organization_id=organization_id,
+        project_id=project_id,
+        delivery_id=created_delivery,
+        source_event_id="dependabot_alert:octo/repo:73:created",
+        event_type="dependabot_alert",
+        action="created",
+        repository_name="octo/repo",
+        workflow_name="Prototype pollution",
+        conclusion="high",
+        branch="main",
+        details_url="https://github.com/octo/repo/security/dependabot/73",
+        status="acknowledged",
+    )
+    body = json.dumps(
+        {
+            "action": "reopened",
+            "repository": {"full_name": "octo/repo"},
+            "alert": {
+                "number": 73,
+                "state": "open",
+                "security_advisory": {"summary": "Prototype pollution", "severity": "high"},
+                "html_url": "https://github.com/octo/repo/security/dependabot/73",
+            },
+        }
+    ).encode()
+
+    class StubDB:
+        def __init__(self) -> None:
+            self.execute_count = 0
+            self.commits = 0
+
+        async def execute(self, _query: object) -> SimpleNamespace:
+            self.execute_count += 1
+            query_step = (self.execute_count - 1) % 3
+            if query_step == 0:
+                return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [tenant_id]))
+            if query_step == 1:
+                return SimpleNamespace(all=lambda: [(project_id, organization_id, tenant_id)])
+            return SimpleNamespace(scalar_one_or_none=lambda: event)
+
+        def add(self, _item: object) -> None:
+            raise AssertionError("reopen should update the existing alert row")
+
+        async def flush(self) -> None:
+            return None
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+        async def refresh(self, _event: ProactiveEvent) -> None:
+            return None
+
+    db = StubDB()
+    first_reopen_delivery = str(uuid.uuid4())
+    with (
+        patch("solvyn.api.v1.webhooks.settings.github_webhook_secret", "webhook-secret"),
+        patch("solvyn.api.v1.webhooks.bind_tenant_scope", new_callable=AsyncMock),
+    ):
+        first = await receive_github_webhook(
+            _request(
+                body,
+                event="dependabot_alert",
+                delivery=first_reopen_delivery,
+                signature=_signature("webhook-secret", body),
+            ),
+            db=cast(AsyncSession, db),
+        )
+        assert first["duplicate_count"] == 1
+        assert event.status == "pending"
+        assert event.action == "reopened"
+        assert event.delivery_id == first_reopen_delivery
+
+        # Once the reopened item has been acknowledged, replaying this same
+        # delivery must not reopen it again.
+        event.status = "acknowledged"
+        replay = await receive_github_webhook(
+            _request(
+                body,
+                event="dependabot_alert",
+                delivery=first_reopen_delivery,
+                signature=_signature("webhook-secret", body),
+            ),
+            db=cast(AsyncSession, db),
+        )
+        assert replay["duplicate_count"] == 1
+        assert event.status == "acknowledged"
+
+        # A later, distinct GitHub reopen delivery rearms the same stable row.
+        next_reopen_delivery = str(uuid.uuid4())
+        later = await receive_github_webhook(
+            _request(
+                body,
+                event="dependabot_alert",
+                delivery=next_reopen_delivery,
+                signature=_signature("webhook-secret", body),
+            ),
+            db=cast(AsyncSession, db),
+        )
+
+    assert later["duplicate_count"] == 1
+    assert event.status == "pending"
+    assert event.action == "reopened"
+    assert event.delivery_id == next_reopen_delivery
+    assert db.commits == 3
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("event_type", "item_key", "number"),

@@ -19,6 +19,7 @@ from solvyn.api.v1._rbac import ANY_ROLE, OWNER_ADMIN, require_org_membership
 from solvyn.config import settings
 from solvyn.db.models import Organization, ProactiveEvent, Project, Repository, Tenant
 from solvyn.db.session import bind_tenant_scope, get_session
+from solvyn.proactive_dependabot import dependabot_alert_signal
 from solvyn.repositories.github import GitHubRepositoryError, validate_full_name
 
 router = APIRouter(tags=["webhooks", "proactive engineering"])
@@ -139,6 +140,11 @@ def _parse_security_alert(event_type: str, payload: Any) -> dict[str, str] | Non
     alert = alert_value if isinstance(alert_value, dict) else {}
     if not action or not alert:
         return None
+    if event_type == "dependabot_alert":
+        repository_value = payload.get("repository")
+        repository = repository_value if isinstance(repository_value, dict) else {}
+        full_name = repository.get("full_name")
+        return dependabot_alert_signal(full_name, alert, action=action) if isinstance(full_name, str) else None
     # Resolved alerts are not new work for the human triage inbox.
     if action.lower() in {"fixed", "closed_by_user", "dismissed", "resolved", "resolved_by_user", "auto_dismissed"}:
         return None
@@ -330,6 +336,25 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
                     )
                 ).scalar_one_or_none()
                 if existing is not None:
+                    if (
+                        event_type == "dependabot_alert"
+                        and signal.get("action") == "reopened"
+                        and existing.status == "acknowledged"
+                        and existing.delivery_id != normalized_delivery_id
+                    ):
+                        # Reuse the stable alert row, but reopen human triage
+                        # once per distinct GitHub delivery. Recording that
+                        # delivery makes a replay idempotent even after a user
+                        # acknowledges the reopened alert.
+                        existing.delivery_id = normalized_delivery_id
+                        existing.event_type = event_type
+                        existing.action = "reopened"
+                        existing.repository_name = signal["repository_name"]
+                        existing.workflow_name = signal["workflow_name"]
+                        existing.conclusion = signal["conclusion"]
+                        existing.branch = signal["branch"]
+                        existing.details_url = signal["details_url"]
+                        existing.status = "pending"
                     duplicates += 1
                     events.append((tenant_id, existing))
                     continue
