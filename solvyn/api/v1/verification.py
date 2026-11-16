@@ -908,7 +908,7 @@ async def create_task_workspace(
 
     expected_plan_repository_id: str | None = None
     expected_plan_revision: str | None = None
-    if task.parent_task_id is not None and task.execution_id is not None:
+    if getattr(task, "parent_task_id", None) is not None and getattr(task, "execution_id", None) is not None:
         graph = (
             await db.execute(select(ExecutionGraph).where(ExecutionGraph.id == task.execution_id))
         ).scalar_one_or_none()

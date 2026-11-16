@@ -56,14 +56,14 @@ def test_conversation_task_plan_payload_requires_pinned_commit_provenance() -> N
             description="Implement it",
             acceptance_criteria=["Feature works"],
             repository_id=uuid.uuid4(),
-            repository_revision="latest",
+            repository_revision="z" * 40,
         )
 
 
 @pytest.mark.asyncio
 async def test_tech_lead_plan_endpoint_returns_only_validated_structured_output() -> None:
     tenant_id, teammate_id, conversation_id = (uuid.uuid4() for _ in range(3))
-    teammate = SimpleNamespace(id=teammate_id, organization_id=uuid.uuid4(), role="Tech Lead")
+    teammate = SimpleNamespace(id=teammate_id, organization_id=uuid.uuid4(), role="Tech Lead", name="Tech Lead")
     conversation = SimpleNamespace(id=conversation_id, session_id=uuid.uuid4(), project_id=uuid.uuid4(), root_task_id=None)
     db = AsyncMock()
     transcript_result = MagicMock()
@@ -109,7 +109,7 @@ async def test_repository_backed_tech_lead_plan_uses_inspected_revision() -> Non
     tenant_id, teammate_id, conversation_id, repository_id = (uuid.uuid4() for _ in range(4))
     project_id = uuid.uuid4()
     revision = "a" * 40
-    teammate = SimpleNamespace(id=teammate_id, organization_id=uuid.uuid4(), role="Tech Lead")
+    teammate = SimpleNamespace(id=teammate_id, organization_id=uuid.uuid4(), role="Tech Lead", name="Tech Lead")
     conversation = SimpleNamespace(id=conversation_id, session_id=uuid.uuid4(), project_id=project_id, root_task_id=None)
     repository = SimpleNamespace(id=repository_id, provider="github", full_name="org/repo")
     project = SimpleNamespace(id=project_id, organization_id=teammate.organization_id)
