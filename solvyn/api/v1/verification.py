@@ -908,10 +908,7 @@ async def get_task_workspace_context(
     if handoff is not None:
         approval = (
             await db.execute(
-                select(Approval).where(
-                    Approval.tenant_id == task.tenant_id,
-                    Approval.task_handoff_id == handoff.id,
-                )
+                select(Approval).where(Approval.task_handoff_id == handoff.id)
             )
         ).scalar_one_or_none()
 
