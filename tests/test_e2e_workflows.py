@@ -230,6 +230,7 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
     from solvyn.api.v1 import verification as verification_api
     from solvyn.config import settings
     from solvyn.db.models import (
+        ExecutionGraph,
         Organization,
         OrganizationMembership,
         Project,
@@ -316,6 +317,13 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
         )
         task = (await db.execute(select(Task).where(Task.id == task_id))).scalar_one()
         task.parent_task_id = parent_id
+        graph = (await db.execute(select(ExecutionGraph).where(ExecutionGraph.id == task.execution_id))).scalar_one()
+        graph_data = json.loads(graph.graph_data)
+        graph_inputs = graph_data.setdefault("inputs", {})
+        graph_inputs["plan_repository_id"] = str(repository_id)
+        graph_inputs["plan_repository_revision"] = source_sha
+        graph_inputs["plan_repository_paths"] = ["src/health.py"]
+        graph.graph_data = json.dumps(graph_data)
         handoff_id = uuid.uuid4()
         db.add(
             TaskHandoff(
@@ -349,6 +357,7 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
             return {"default_branch": "main", "private": False}
 
         async def branch_commit(self, _full_name: str, _branch: str) -> str:
+            pytest.fail("workspace creation must honor the requested source commit pin")
             return source_sha
 
         async def commit_tree_sha(self, _full_name: str, revision: str) -> str:
@@ -371,9 +380,23 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
         "get_authorized_repository_provider",
         AsyncMock(return_value=FakeRepositoryProvider()),
     )
+    mismatched_workspace = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/workspace",
+        json={
+            "repository_id": str(repository_id),
+            "repository_paths": ["src/health.py"],
+            "source_commit_sha": "c" * 40,
+        },
+    )
+    assert mismatched_workspace.status_code == 409
+    assert "confirmed Tech Lead plan" in mismatched_workspace.json()["detail"]
     workspace_response = await client.post(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/workspace",
-        json={"repository_id": str(repository_id), "repository_paths": ["src/health.py"]},
+        json={
+            "repository_id": str(repository_id),
+            "repository_paths": ["src/health.py"],
+            "source_commit_sha": source_sha,
+        },
     )
     assert workspace_response.status_code == 201, workspace_response.text
     assert workspace_response.json()["source_commit_sha"] == source_sha

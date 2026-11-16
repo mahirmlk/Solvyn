@@ -8,12 +8,14 @@ import {
   TeammateConversationMessage,
   TeammateConversationTaskState,
   TeammateInfo,
+  RepositoryInfo,
+  TeammatePlanDraft,
 } from "@/lib/api";
 import styles from "@/components/WorkspacePages.module.css";
 
-type Props = { teammate: TeammateInfo; projectId: string };
+type Props = { teammate: TeammateInfo; projectId: string; assignedTeammates: TeammateInfo[] };
 
-export default function TeammateConversation({ teammate, projectId }: Props) {
+export default function TeammateConversation({ teammate, projectId, assignedTeammates }: Props) {
   const [conversations, setConversations] = useState<TeammateConversationInfo[]>([]);
   const [conversationId, setConversationId] = useState("");
   const [messages, setMessages] = useState<TeammateConversationMessage[]>([]);
@@ -22,10 +24,17 @@ export default function TeammateConversation({ teammate, projectId }: Props) {
   const [taskTitle, setTaskTitle] = useState("");
   const [taskDescription, setTaskDescription] = useState("");
   const [acceptanceCriteria, setAcceptanceCriteria] = useState("");
+  const [implementerId, setImplementerId] = useState("");
+  const [repositories, setRepositories] = useState<RepositoryInfo[]>([]);
+  const [repositoryId, setRepositoryId] = useState("");
+  const [repositoryPaths, setRepositoryPaths] = useState("");
+  const [planDraft, setPlanDraft] = useState<TeammatePlanDraft | null>(null);
+  const [plannedSource, setPlannedSource] = useState<{ repository_id: string | null; repository_revision: string | null; repository_paths: string[] } | null>(null);
   const [conversionConfirmed, setConversionConfirmed] = useState(false);
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
   const [converting, setConverting] = useState(false);
+  const [planning, setPlanning] = useState(false);
   const [startingHandoff, setStartingHandoff] = useState(false);
   const [error, setError] = useState("");
   const historyRequest = useRef(0);
@@ -33,6 +42,19 @@ export default function TeammateConversation({ teammate, projectId }: Props) {
   const activeScopeRef = useRef("");
   const scopeKey = `${teammate.id}:${projectId}`;
   activeScopeRef.current = scopeKey;
+  const availableImplementers = assignedTeammates.filter((candidate) =>
+    candidate.id !== teammate.id && candidate.is_enabled && ["Software Engineer", "QA Engineer", "Security Engineer"].includes(candidate.role),
+  );
+
+  useEffect(() => {
+    let current = true;
+    void api.listProjectRepositories(projectId).then(({ repositories: rows }) => {
+      if (current) setRepositories(rows.filter((repository) => repository.is_active));
+    }).catch(() => {
+      if (current) setRepositories([]);
+    });
+    return () => { current = false; };
+  }, [projectId]);
 
   useEffect(() => {
     let current = true;
@@ -48,9 +70,13 @@ export default function TeammateConversation({ teammate, projectId }: Props) {
     setTaskTitle("");
     setTaskDescription("");
     setAcceptanceCriteria("");
+    setImplementerId("");
+    setPlanDraft(null);
+    setPlannedSource(null);
     setConversionConfirmed(false);
     setSending(false);
     setConverting(false);
+    setPlanning(false);
     setStartingHandoff(false);
     void api.listTeammateConversations(teammate.id, projectId).then(async ({ conversations: rows }) => {
       if (!current || activeScopeRef.current !== scopeKey) return;
@@ -88,6 +114,9 @@ export default function TeammateConversation({ teammate, projectId }: Props) {
     setTaskTitle("");
     setTaskDescription("");
     setAcceptanceCriteria("");
+    setImplementerId("");
+    setPlanDraft(null);
+    setPlannedSource(null);
     setConversionConfirmed(false);
     setDraft("");
     setError("");
@@ -127,6 +156,9 @@ export default function TeammateConversation({ teammate, projectId }: Props) {
       setTaskTitle("");
       setTaskDescription("");
       setAcceptanceCriteria("");
+      setImplementerId("");
+      setPlanDraft(null);
+      setPlannedSource(null);
       setConversionConfirmed(false);
     } catch (reason) {
       if (activeScopeRef.current === requestScope) setError(reason instanceof Error ? reason.message : "Could not start a conversation.");
@@ -164,6 +196,12 @@ export default function TeammateConversation({ teammate, projectId }: Props) {
     const targetConversationId = conversationId;
     const requestScope = scopeKey;
     const criteria = acceptanceCriteria.split("\n").map((item) => item.trim()).filter(Boolean);
+    const confirmedPlan = planDraft ? {
+      ...planDraft,
+      title: taskTitle.trim(),
+      description: taskDescription.trim(),
+      acceptance_criteria: criteria,
+    } : undefined;
     setConverting(true);
     setError("");
     try {
@@ -172,6 +210,13 @@ export default function TeammateConversation({ teammate, projectId }: Props) {
         title: taskTitle.trim(),
         description: taskDescription.trim(),
         acceptance_criteria: criteria,
+        ...(implementerId ? { target_teammate_id: implementerId } : {}),
+        ...(plannedSource?.repository_id && plannedSource.repository_revision ? {
+          repository_id: plannedSource.repository_id,
+          repository_revision: plannedSource.repository_revision,
+          repository_paths: plannedSource.repository_paths,
+        } : {}),
+        ...(confirmedPlan ? { plan: confirmedPlan } : {}),
       });
       if (activeScopeRef.current !== requestScope || activeConversationRef.current !== targetConversationId) return;
       setTaskState(result.task);
@@ -182,6 +227,37 @@ export default function TeammateConversation({ teammate, projectId }: Props) {
       }
     } finally {
       if (activeScopeRef.current === requestScope) setConverting(false);
+    }
+  }
+
+  async function draftPlan() {
+    if (!conversationId || planning || converting || startingHandoff) return;
+    const requestScope = scopeKey;
+    const targetConversationId = conversationId;
+    const paths = repositoryPaths.split("\n").map((path) => path.trim()).filter(Boolean);
+    setPlanning(true);
+    setError("");
+    try {
+      const result = await api.planTeammateConversationTask(teammate.id, targetConversationId, {
+        ...(repositoryId ? { repository_id: repositoryId, repository_paths: paths } : {}),
+      });
+      if (activeScopeRef.current !== requestScope || activeConversationRef.current !== targetConversationId) return;
+      setPlanDraft(result.plan);
+      setPlannedSource({
+        repository_id: result.repository_id,
+        repository_revision: result.repository_revision,
+        repository_paths: result.repository_paths,
+      });
+      setTaskTitle(result.plan.title);
+      setTaskDescription(result.plan.description);
+      setAcceptanceCriteria(result.plan.acceptance_criteria.join("\n"));
+      setImplementerId(availableImplementers[0]?.id || "");
+    } catch (reason) {
+      if (activeScopeRef.current === requestScope && activeConversationRef.current === targetConversationId) {
+        setError(reason instanceof Error ? reason.message : "Could not draft a Tech Lead plan.");
+      }
+    } finally {
+      if (activeScopeRef.current === requestScope) setPlanning(false);
     }
   }
 
@@ -203,7 +279,7 @@ export default function TeammateConversation({ teammate, projectId }: Props) {
     try {
       await api.createTaskHandoff(currentTaskState.execution_id, currentTaskState.root_task_id, {
         idempotency_key: currentTaskState.idempotency_key!,
-        target_teammate_id: teammate.id,
+        target_teammate_id: currentTaskState.confirmed_details?.target_teammate_id || teammate.id,
         project_id: projectId,
         reason: currentTaskState.reason!,
         input_data: currentTaskState.input_data!,
@@ -223,6 +299,13 @@ export default function TeammateConversation({ teammate, projectId }: Props) {
             title: details.title,
             description: details.description,
             acceptance_criteria: details.acceptance_criteria,
+            ...(details.target_teammate_id ? { target_teammate_id: details.target_teammate_id } : {}),
+            ...(details.repository_id && details.repository_revision ? {
+              repository_id: details.repository_id,
+              repository_revision: details.repository_revision,
+              repository_paths: details.repository_paths || [],
+            } : {}),
+            ...(details.plan ? { plan: details.plan } : {}),
           });
         } catch {
           // Refresh below still gives the user the latest durable task state.
@@ -239,7 +322,7 @@ export default function TeammateConversation({ teammate, projectId }: Props) {
     }
   }
 
-  const navigationBusy = loading || sending || converting || startingHandoff;
+  const navigationBusy = loading || sending || planning || converting || startingHandoff;
   const activeConversation = conversations.find((row) => row.id === conversationId);
   const canStartApprovedHandoff = Boolean(
     activeConversation &&
@@ -289,8 +372,49 @@ export default function TeammateConversation({ teammate, projectId }: Props) {
       </form>
       {messages.some((message) => message.role === "user") && !taskState && (
         <form className={styles.form} onSubmit={convertConversation}>
-          <h3>Turn this conversation into a task</h3>
-          <p className="copy-muted">This creates a durable task using the saved chat as bounded context. A project owner or admin must approve before the teammate receives permission-bound workspace tools.</p>
+          <h3>{teammate.role === "Tech Lead" ? "Plan and assign this work" : "Turn this conversation into a task"}</h3>
+          <p className="copy-muted">{teammate.role === "Tech Lead"
+            ? "The Tech Lead can draft a plan with bounded repository context. Review the plan and choose an assigned teammate before creating the approval-gated handoff."
+            : "This creates a durable task using the saved chat as bounded context. A project owner or admin must approve before the teammate receives permission-bound workspace tools."}</p>
+          {teammate.role === "Tech Lead" && (
+            <div className={styles.formGrid}>
+              <label className="field">
+                <span className="field-label">Repository context (optional)</span>
+                <select className="editorial-input" disabled={navigationBusy} onChange={(event) => {
+                  setRepositoryId(event.target.value);
+                  setPlanDraft(null);
+                  setPlannedSource(null);
+                }} value={repositoryId}>
+                  <option value="">Plan from conversation only</option>
+                  {repositories.map((repository) => <option key={repository.id} value={repository.id}>{repository.full_name}</option>)}
+                </select>
+              </label>
+              {repositoryId && (
+                <label className="field">
+                  <span className="field-label">Relevant paths to inspect (up to 4, one per line)</span>
+                  <textarea className="editorial-input" disabled={navigationBusy} onChange={(event) => {
+                    setRepositoryPaths(event.target.value);
+                    setPlanDraft(null);
+                    setPlannedSource(null);
+                  }} rows={2} value={repositoryPaths} />
+                </label>
+              )}
+              <div className={styles.formFooter}>
+                <span className="copy-muted">Planning is read-only and pinned to the inspected commit.</span>
+                <button className="action-button secondary" disabled={navigationBusy} onClick={(event) => { event.preventDefault(); void draftPlan(); }} type="button">{planning ? "Drafting plan…" : planDraft ? "Refresh plan" : "Draft plan"}</button>
+              </div>
+            </div>
+          )}
+          {planDraft && (
+            <section aria-label="Tech Lead plan preview" className={styles.form}>
+              <h4>Plan draft</h4>
+              <p className="copy-muted">Implementation steps: {planDraft.implementation_steps.join(" · ")}</p>
+              {planDraft.relevant_files.length > 0 && <p className="copy-muted">Relevant files: {planDraft.relevant_files.join(", ")}</p>}
+              <p className="copy-muted">Verification: {planDraft.verification_strategy.join(" · ")}</p>
+              {planDraft.risks.length > 0 && <p className="copy-muted">Risks: {planDraft.risks.join(" · ")}</p>}
+              {plannedSource?.repository_revision && <p className="copy-muted">Pinned source: <code>{plannedSource.repository_revision}</code></p>}
+            </section>
+          )}
           <label className="field">
             <span className="field-label">Task title</span>
             <input className="editorial-input" disabled={navigationBusy} maxLength={255} onChange={(event) => setTaskTitle(event.target.value)} required value={taskTitle} />
@@ -303,6 +427,18 @@ export default function TeammateConversation({ teammate, projectId }: Props) {
             <span className="field-label">Acceptance criteria (one per line)</span>
             <textarea className="editorial-input" disabled={navigationBusy} maxLength={10_000} onChange={(event) => setAcceptanceCriteria(event.target.value)} placeholder="The requested behavior works\nChanges are verified" required rows={3} value={acceptanceCriteria} />
           </label>
+          {availableImplementers.length > 0 && (
+            <label className="field">
+              <span className="field-label">Assigned teammate</span>
+              <select className="editorial-input" disabled={navigationBusy} onChange={(event) => setImplementerId(event.target.value)} required={teammate.role === "Tech Lead"} value={implementerId}>
+                <option value="">Choose an assigned teammate</option>
+                {availableImplementers.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name} · {candidate.role}</option>)}
+              </select>
+            </label>
+          )}
+          {teammate.role === "Tech Lead" && availableImplementers.length === 0 && (
+            <p className="copy-muted">Assign an enabled Software Engineer, QA Engineer, or Security Engineer to this project before creating a handoff.</p>
+          )}
           <label className="field">
             <span className="field-label">
               <input checked={conversionConfirmed} disabled={navigationBusy} onChange={(event) => setConversionConfirmed(event.target.checked)} type="checkbox" /> I confirm these details should become a task and be sent for owner/admin approval.
@@ -310,7 +446,7 @@ export default function TeammateConversation({ teammate, projectId }: Props) {
           </label>
           <div className={styles.formFooter}>
             <span className="copy-muted">No workspace tools are granted until approval.</span>
-            <button className="action-button" disabled={!conversionConfirmed || navigationBusy || !taskTitle.trim() || !taskDescription.trim() || !acceptanceCriteria.trim()} type="submit">{converting ? "Creating task…" : "Create task for approval"}</button>
+            <button className="action-button" disabled={!conversionConfirmed || navigationBusy || !taskTitle.trim() || !taskDescription.trim() || !acceptanceCriteria.trim() || (teammate.role === "Tech Lead" && (!planDraft || !implementerId))} type="submit">{converting ? "Creating task…" : "Create task for approval"}</button>
           </div>
         </form>
       )}

@@ -278,6 +278,16 @@ export interface TeammateInfo {
   updated_at: string;
 }
 
+export interface TeammatePlanDraft {
+  title: string;
+  description: string;
+  acceptance_criteria: string[];
+  implementation_steps: string[];
+  relevant_files: string[];
+  verification_strategy: string[];
+  risks: string[];
+}
+
 export interface TeammateConversationInfo {
   id: string;
   teammate_id: string;
@@ -300,7 +310,16 @@ export interface TeammateConversationTaskState {
   idempotency_key?: string;
   reason?: string;
   input_data?: Record<string, unknown>;
-  confirmed_details?: { title: string; description: string; acceptance_criteria: string[] };
+  confirmed_details?: {
+    title: string;
+    description: string;
+    acceptance_criteria: string[];
+    target_teammate_id?: string | null;
+    repository_id?: string | null;
+    repository_revision?: string | null;
+    repository_paths?: string[];
+    plan?: TeammatePlanDraft | null;
+  };
 }
 
 export interface TeammateConversationMessage {
@@ -724,10 +743,33 @@ export const api = {
       `/teammates/${teammateId}/conversations/${conversationId}/messages`,
     ),
 
+  planTeammateConversationTask: (teammateId: string, conversationId: string, input: { repository_id?: string; repository_paths?: string[] }) =>
+    request<{
+      plan: TeammatePlanDraft;
+      repository_id: string | null;
+      repository_revision: string | null;
+      repository_paths: string[];
+      provider: string | null;
+      model: string | null;
+    }>(`/teammates/${teammateId}/conversations/${conversationId}/plan`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+
   convertTeammateConversationToTask: (
     teammateId: string,
     conversationId: string,
-    input: { confirmed: true; title: string; description: string; acceptance_criteria: string[] },
+    input: {
+      confirmed: true;
+      title: string;
+      description: string;
+      acceptance_criteria: string[];
+      target_teammate_id?: string;
+      repository_id?: string;
+      repository_revision?: string;
+      repository_paths?: string[];
+      plan?: TeammatePlanDraft;
+    },
   ) => request<{ conversation: TeammateConversationInfo; task: TeammateConversationTaskState | null }>(
     `/teammates/${teammateId}/conversations/${conversationId}/task`,
     { method: "POST", body: JSON.stringify(input) },
