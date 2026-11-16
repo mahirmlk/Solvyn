@@ -6,6 +6,7 @@ import asyncio
 import difflib
 import hashlib
 import json
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -22,6 +23,7 @@ from solvyn.api.v1.repositories import _load_authorized_repository
 from solvyn.config import settings
 from solvyn.db.models import (
     Approval,
+    ExecutionGraph,
     OrchestrationEvent,
     Organization,
     OrganizationMembership,
@@ -83,6 +85,7 @@ class TaskWorkspaceCreate(BaseModel):
     repository_id: uuid.UUID | None = None
     repository_paths: list[str] | None = Field(default=None, max_length=_MAX_REPOSITORY_PATHS)
     full_repository: bool = False
+    source_commit_sha: str | None = Field(default=None, min_length=40, max_length=64)
 
 
 class VerificationRequest(BaseModel):
@@ -900,6 +903,26 @@ async def create_task_workspace(
         raise HTTPException(status_code=422, detail="Select repository paths or request full_repository, not both")
     if payload.repository_id is not None and not payload.full_repository and payload.repository_paths is None:
         raise HTTPException(status_code=422, detail="Select repository paths or request full_repository")
+    if payload.source_commit_sha is not None and payload.repository_id is None:
+        raise HTTPException(status_code=422, detail="source_commit_sha requires a repository_id")
+
+    expected_plan_repository_id: str | None = None
+    expected_plan_revision: str | None = None
+    if task.parent_task_id is not None and task.execution_id is not None:
+        graph = (
+            await db.execute(select(ExecutionGraph).where(ExecutionGraph.id == task.execution_id))
+        ).scalar_one_or_none()
+        if graph is not None:
+            try:
+                graph_inputs = json.loads(graph.graph_data).get("inputs", {})
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise HTTPException(status_code=409, detail="Confirmed task plan provenance is invalid") from exc
+            raw_repository_id = graph_inputs.get("plan_repository_id")
+            raw_revision = graph_inputs.get("plan_repository_revision")
+            expected_plan_repository_id = raw_repository_id if isinstance(raw_repository_id, str) else None
+            expected_plan_revision = raw_revision if isinstance(raw_revision, str) else None
+    if expected_plan_repository_id and payload.repository_id is None:
+        raise HTTPException(status_code=422, detail="Repository-backed Tech Lead plans require a repository workspace")
 
     initial_files = dict(payload.files)
     source_commit_sha: str | None = None
@@ -928,6 +951,14 @@ async def create_task_workspace(
             raise HTTPException(status_code=403, detail="Repository is outside the task's assigned project")
         if repository.provider != "github":
             raise HTTPException(status_code=422, detail="Only GitHub repository workspaces are supported")
+        if expected_plan_repository_id and expected_plan_repository_id != str(repository.id):
+            raise HTTPException(status_code=409, detail="Workspace repository differs from the confirmed Tech Lead plan")
+        if expected_plan_revision and payload.source_commit_sha != expected_plan_revision:
+            raise HTTPException(status_code=409, detail="Workspace source revision must match the confirmed Tech Lead plan")
+        if expected_plan_revision and not payload.source_commit_sha:
+            raise HTTPException(status_code=422, detail="Pass the confirmed Tech Lead plan revision when creating this workspace")
+        if payload.source_commit_sha is not None and not re.fullmatch(r"[a-fA-F0-9]{40,64}", payload.source_commit_sha):
+            raise HTTPException(status_code=422, detail="source_commit_sha must be a Git commit SHA")
         selected_repository_paths: list[str] = []
         for path in payload.repository_paths or []:
             try:
@@ -959,7 +990,11 @@ async def create_task_workspace(
             async with github_provider as github:
                 metadata = await github.repository_metadata(repository.full_name)
                 repository_branch = str(metadata["default_branch"])
-                source_commit_sha = await github.branch_commit(repository.full_name, repository_branch)
+                source_commit_sha = (
+                    payload.source_commit_sha.lower()
+                    if payload.source_commit_sha is not None
+                    else await github.branch_commit(repository.full_name, repository_branch)
+                )
                 source_tree_sha = await github.commit_tree_sha(repository.full_name, source_commit_sha)
                 repository_tree_sha, tree = await github.repository_tree(repository.full_name, source_tree_sha)
                 tree_entries = {entry["path"]: entry for entry in tree}

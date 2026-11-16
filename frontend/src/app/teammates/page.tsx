@@ -229,7 +229,7 @@ export default function TeammatesPage() {
                                 </select>
                               </label>
                               {selectedProjectId
-                                ? <TeammateConversation key={`${teammate.id}:${selectedProjectId}`} teammate={teammate} projectId={selectedProjectId} />
+                                ? <TeammateConversation key={`${teammate.id}:${selectedProjectId}`} teammate={teammate} projectId={selectedProjectId} assignedTeammates={selectedOrganization?.teammates.filter((candidate) => candidate.project_ids.includes(selectedProjectId)) || []} />
                                 : <p className="copy-muted">{assignedProjects.length ? "Choose an assigned project to open or start a saved conversation." : "Assign a project to this teammate to start a conversation."}</p>}
                             </div>
                           </details>
