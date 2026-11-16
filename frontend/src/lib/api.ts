@@ -190,6 +190,37 @@ export interface RepositoryInfo {
   created_at: string;
 }
 
+export interface TaskWorkspaceContext {
+  workspace: {
+    workspace_id: string;
+    repository_id: string | null;
+    source_commit_sha: string | null;
+    source_paths: string[] | null;
+    workspace_mode: "manual" | "selected_files" | "full_repository";
+  } | null;
+  handoff: {
+    project_id: string;
+    status: string;
+    requires_approval: boolean;
+    approval_status: string | null;
+  } | null;
+  plan: {
+    repository_id: string;
+    source_commit_sha: string;
+    repository_paths: string[];
+  } | null;
+}
+
+export interface TaskWorkspaceCreated {
+  workspace_id: string;
+  task_id: string;
+  status: string;
+  repository_id: string | null;
+  source_commit_sha: string | null;
+  source_paths: string[] | null;
+  workspace_mode: "manual" | "selected_files" | "full_repository";
+}
+
 export interface GitHubIntegrationInfo {
   connected: boolean;
   integration_id: string | null;
@@ -875,6 +906,23 @@ export const api = {
     }>(
       `/workflows/executions/${executionId}/tasks/${taskId}/acceptance-criteria`,
     ),
+
+  getTaskWorkspaceContext: (executionId: string, taskId: string) =>
+    request<TaskWorkspaceContext>(`/workflows/executions/${executionId}/tasks/${taskId}/workspace`),
+
+  createTaskWorkspace: (
+    executionId: string,
+    taskId: string,
+    input: {
+      repository_id: string;
+      repository_paths?: string[];
+      full_repository?: boolean;
+      source_commit_sha?: string;
+    },
+  ) => request<TaskWorkspaceCreated>(
+    `/workflows/executions/${executionId}/tasks/${taskId}/workspace`,
+    { method: "POST", body: JSON.stringify(input) },
+  ),
 
   createTaskAcceptanceCriteria: (executionId: string, taskId: string, criteria: string[]) =>
     request<{ task_id: string; acceptance_criteria: WorkflowExecutionTask["acceptance_criteria"] }>(

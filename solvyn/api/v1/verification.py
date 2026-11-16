@@ -881,6 +881,101 @@ async def _finish_run(
     return next(item for item in evidence if item["id"] == str(run.id))
 
 
+@router.get("/workspace", summary="Inspect task workspace setup context")
+async def get_task_workspace_context(
+    execution_id: uuid.UUID,
+    task_id: uuid.UUID,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    task = await _owned_task(execution_id, task_id, db)
+    workspace = (
+        await db.execute(
+            select(TaskWorkspace).where(
+                TaskWorkspace.tenant_id == task.tenant_id,
+                TaskWorkspace.task_id == task.id,
+            )
+        )
+    ).scalar_one_or_none()
+    handoff = (
+        await db.execute(
+            select(TaskHandoff).where(
+                TaskHandoff.tenant_id == task.tenant_id,
+                TaskHandoff.child_task_id == task.id,
+            )
+        )
+    ).scalar_one_or_none()
+    approval = None
+    if handoff is not None:
+        approval = (
+            await db.execute(
+                select(Approval).where(
+                    Approval.tenant_id == task.tenant_id,
+                    Approval.task_handoff_id == handoff.id,
+                )
+            )
+        ).scalar_one_or_none()
+
+    plan: dict[str, Any] | None = None
+    if task.parent_task_id is not None:
+        graph = (
+            await db.execute(
+                select(ExecutionGraph).where(ExecutionGraph.id == execution_id)
+            )
+        ).scalar_one_or_none()
+        if graph is not None:
+            try:
+                graph_data = json.loads(graph.graph_data)
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise HTTPException(status_code=409, detail="Confirmed task plan provenance is invalid") from exc
+            graph_inputs = graph_data.get("inputs", {}) if isinstance(graph_data, dict) else None
+            if not isinstance(graph_inputs, dict):
+                raise HTTPException(status_code=409, detail="Confirmed task plan provenance is invalid")
+            repository_id = graph_inputs.get("plan_repository_id")
+            revision = graph_inputs.get("plan_repository_revision")
+            paths = graph_inputs.get("plan_repository_paths")
+            if isinstance(repository_id, str) and isinstance(revision, str):
+                plan = {
+                    "repository_id": repository_id,
+                    "source_commit_sha": revision,
+                    "repository_paths": (
+                        [path for path in paths if isinstance(path, str)] if isinstance(paths, list) else []
+                    ),
+                }
+
+    source_paths: list[str] | None = None
+    if workspace is not None and workspace.source_paths is not None:
+        try:
+            decoded_paths = json.loads(workspace.source_paths)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=409, detail="Task workspace source provenance is invalid") from exc
+        if not isinstance(decoded_paths, list) or any(not isinstance(path, str) for path in decoded_paths):
+            raise HTTPException(status_code=409, detail="Task workspace source provenance is invalid")
+        source_paths = decoded_paths
+
+    return {
+        "workspace": {
+            "workspace_id": str(workspace.id),
+            "repository_id": str(workspace.repository_id) if workspace.repository_id else None,
+            "source_commit_sha": workspace.source_commit_sha,
+            "source_paths": source_paths,
+            "workspace_mode": (
+                "full_repository"
+                if workspace.repository_id and source_paths is None
+                else "selected_files"
+                if workspace.repository_id
+                else "manual"
+            ),
+        } if workspace is not None else None,
+        "handoff": {
+            "project_id": str(handoff.project_id),
+            "status": handoff.status,
+            "requires_approval": handoff.requires_approval,
+            "approval_status": approval.status if approval is not None else None,
+        } if handoff is not None else None,
+        "plan": plan,
+    }
+
+
 @router.post("/workspace", status_code=201, summary="Create a managed task workspace")
 async def create_task_workspace(
     execution_id: uuid.UUID,
