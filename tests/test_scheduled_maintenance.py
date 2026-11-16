@@ -297,6 +297,375 @@ async def test_due_maintenance_schedule_adds_one_human_triage_event_and_advances
 
 
 @pytest.mark.asyncio
+async def test_dependency_schedule_records_open_alerts_and_marks_partial_scan_incomplete() -> None:
+    now = datetime.now(UTC)
+    tenant_id, organization_id, project_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    schedule = MaintenanceSchedule(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        organization_id=organization_id,
+        project_id=project_id,
+        maintenance_type="dependency_review",
+        title="Weekly dependency review",
+        interval_days=7,
+        next_run_at=now - timedelta(days=1),
+        enabled=True,
+    )
+    repository = SimpleNamespace(provider="github", full_name="octo/repo")
+    alert = {
+        "number": 73,
+        "state": "open",
+        "security_advisory": {
+            "summary": "Prototype pollution in widget",
+            "severity": "high",
+        },
+        "html_url": "https://github.com/octo/repo/security/dependabot/73",
+    }
+
+    class Results:
+        def __init__(self, values: list[object]) -> None:
+            self.values = values
+
+        def scalars(self) -> Results:
+            return self
+
+        def all(self) -> list[object]:
+            return self.values
+
+    class StubDB:
+        def __init__(self) -> None:
+            self.execute_count = 0
+            self.added: list[ProactiveEvent] = []
+            self.commits = 0
+
+        async def execute(self, _query: object) -> Results:
+            self.execute_count += 1
+            if self.execute_count == 1:
+                return Results([tenant_id])
+            if self.execute_count == 2:
+                return Results([schedule])
+            if self.execute_count == 3:
+                return Results([repository])
+            return Results([])
+
+        def add(self, event: ProactiveEvent) -> None:
+            self.added.append(event)
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+    class Provider:
+        async def __aenter__(self) -> Provider:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def list_dependabot_alerts(self, _full_name: str) -> tuple[list[dict[str, object]], bool]:
+            return [alert], False
+
+    db = StubDB()
+    with (
+        patch("solvyn.workflows.scheduler.bind_tenant_scope", new_callable=AsyncMock),
+        patch(
+            "solvyn.workflows.scheduler.get_authorized_repository_provider",
+            new_callable=AsyncMock,
+            return_value=Provider(),
+        ) as provider_factory,
+    ):
+        count = await _queue_due_maintenance_events(cast(AsyncSession, db))
+
+    provider_factory.assert_awaited_once()
+    assert count == 1
+    assert db.commits == 1
+    alert_events = [event for event in db.added if event.event_type == "dependabot_alert"]
+    summaries = [event for event in db.added if event.event_type == "dependency_review"]
+    assert len(alert_events) == len(summaries) == 1
+    assert alert_events[0].source_event_id == "dependabot_alert:octo/repo:73:created"
+    assert alert_events[0].action == "created"
+    assert alert_events[0].conclusion == "high"
+    assert summaries[0].action == "incomplete"
+    assert summaries[0].conclusion == "alert_page_limit_reached"
+    assert summaries[0].conclusion != "open_alerts:0"
+    assert schedule.next_run_at > now
+
+
+@pytest.mark.asyncio
+async def test_dependency_schedule_permission_denial_is_not_reported_as_zero_alerts() -> None:
+    now = datetime.now(UTC)
+    tenant_id, organization_id, project_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    schedule = MaintenanceSchedule(
+        id=uuid.uuid4(), tenant_id=tenant_id, organization_id=organization_id,
+        project_id=project_id, maintenance_type="dependency_review", title="Dependabot",
+        interval_days=7, next_run_at=now - timedelta(days=1), enabled=True,
+    )
+    repository = SimpleNamespace(provider="github", full_name="octo/private")
+
+    class Results:
+        def __init__(self, values: list[object]) -> None:
+            self.values = values
+
+        def scalars(self) -> Results:
+            return self
+
+        def all(self) -> list[object]:
+            return self.values
+
+    class StubDB:
+        def __init__(self) -> None:
+            self.execute_count = 0
+            self.added: list[ProactiveEvent] = []
+
+        async def execute(self, _query: object) -> Results:
+            self.execute_count += 1
+            return Results(
+                [tenant_id] if self.execute_count == 1 else
+                [schedule] if self.execute_count == 2 else
+                [repository]
+            )
+
+        def add(self, event: ProactiveEvent) -> None:
+            self.added.append(event)
+
+        async def commit(self) -> None:
+            return None
+
+    class Provider:
+        async def __aenter__(self) -> Provider:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def list_dependabot_alerts(self, _full_name: str) -> tuple[list[dict[str, object]], bool]:
+            from solvyn.repositories.github import GitHubRepositoryError
+
+            raise GitHubRepositoryError(403, "GitHub denied access to Dependabot alerts")
+
+    db = StubDB()
+    with (
+        patch("solvyn.workflows.scheduler.bind_tenant_scope", new_callable=AsyncMock),
+        patch(
+            "solvyn.workflows.scheduler.get_authorized_repository_provider",
+            new_callable=AsyncMock,
+            return_value=Provider(),
+        ),
+    ):
+        await _queue_due_maintenance_events(cast(AsyncSession, db))
+
+    alert_events = [event for event in db.added if event.event_type == "dependabot_alert"]
+    summaries = [event for event in db.added if event.event_type == "dependency_review"]
+    assert alert_events == []
+    assert len(summaries) == 1
+    assert summaries[0].action == "blocked"
+    assert summaries[0].status == "blocked"
+    assert summaries[0].conclusion == "permission_required"
+
+
+@pytest.mark.asyncio
+async def test_dependency_schedule_empty_success_reports_zero_only_after_complete_scan() -> None:
+    now = datetime.now(UTC)
+    tenant_id, organization_id, project_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    schedule = MaintenanceSchedule(
+        id=uuid.uuid4(), tenant_id=tenant_id, organization_id=organization_id,
+        project_id=project_id, maintenance_type="dependency_review", title="Dependabot",
+        interval_days=7, next_run_at=now - timedelta(days=1), enabled=True,
+    )
+    repository = SimpleNamespace(provider="github", full_name="octo/empty")
+
+    class Results:
+        def __init__(self, values: list[object]) -> None:
+            self.values = values
+
+        def scalars(self) -> Results:
+            return self
+
+        def all(self) -> list[object]:
+            return self.values
+
+    class StubDB:
+        def __init__(self) -> None:
+            self.execute_count = 0
+            self.added: list[ProactiveEvent] = []
+            self.repository_query = ""
+
+        async def execute(self, query: object) -> Results:
+            self.execute_count += 1
+            if self.execute_count == 1:
+                return Results([tenant_id])
+            if self.execute_count == 2:
+                return Results([schedule])
+            if self.execute_count == 3:
+                self.repository_query = str(query)
+                return Results([repository])
+            return Results([])
+
+        def add(self, event: ProactiveEvent) -> None:
+            self.added.append(event)
+
+        async def commit(self) -> None:
+            return None
+
+    class Provider:
+        async def __aenter__(self) -> Provider:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def list_dependabot_alerts(self, _full_name: str) -> tuple[list[dict[str, object]], bool]:
+            return [], True
+
+    db = StubDB()
+    with (
+        patch("solvyn.workflows.scheduler.bind_tenant_scope", new_callable=AsyncMock),
+        patch(
+            "solvyn.workflows.scheduler.get_authorized_repository_provider",
+            new_callable=AsyncMock,
+            return_value=Provider(),
+        ),
+    ):
+        await _queue_due_maintenance_events(cast(AsyncSession, db))
+
+    summary = next(event for event in db.added if event.event_type == "dependency_review")
+    assert summary.action == "completed"
+    assert summary.conclusion == "open_alerts:0"
+    assert schedule.next_run_at > now
+    assert "repositories.project_id" in db.repository_query
+    assert "repositories.is_active" in db.repository_query
+
+
+@pytest.mark.asyncio
+async def test_dependency_schedule_deduplicates_alert_already_recorded_by_webhook() -> None:
+    now = datetime.now(UTC)
+    tenant_id, organization_id, project_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    schedule = MaintenanceSchedule(
+        id=uuid.uuid4(), tenant_id=tenant_id, organization_id=organization_id,
+        project_id=project_id, maintenance_type="dependency_review", title="Dependabot",
+        interval_days=7, next_run_at=now - timedelta(days=1), enabled=True,
+    )
+    repository = SimpleNamespace(provider="github", full_name="octo/repo")
+    alert = {"number": 73, "state": "open", "security_advisory": {"severity": "high"}}
+    webhook_source_id = "dependabot_alert:octo/repo:73:created"
+
+    class Results:
+        def __init__(self, values: list[object]) -> None:
+            self.values = values
+
+        def scalars(self) -> Results:
+            return self
+
+        def all(self) -> list[object]:
+            return self.values
+
+    class StubDB:
+        def __init__(self) -> None:
+            self.execute_count = 0
+            self.added: list[ProactiveEvent] = []
+
+        async def execute(self, _query: object) -> Results:
+            self.execute_count += 1
+            if self.execute_count == 1:
+                return Results([tenant_id])
+            if self.execute_count == 2:
+                return Results([schedule])
+            if self.execute_count == 3:
+                return Results([repository])
+            return Results([webhook_source_id])
+
+        def add(self, event: ProactiveEvent) -> None:
+            self.added.append(event)
+
+        async def commit(self) -> None:
+            return None
+
+    class Provider:
+        async def __aenter__(self) -> Provider:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def list_dependabot_alerts(self, _full_name: str) -> tuple[list[dict[str, object]], bool]:
+            return [alert], True
+
+    db = StubDB()
+    with (
+        patch("solvyn.workflows.scheduler.bind_tenant_scope", new_callable=AsyncMock),
+        patch(
+            "solvyn.workflows.scheduler.get_authorized_repository_provider",
+            new_callable=AsyncMock,
+            return_value=Provider(),
+        ),
+    ):
+        await _queue_due_maintenance_events(cast(AsyncSession, db))
+
+    assert [event for event in db.added if event.event_type == "dependabot_alert"] == []
+    summary = next(event for event in db.added if event.event_type == "dependency_review")
+    assert summary.conclusion == "open_alerts:1"
+    assert schedule.next_run_at > now
+
+
+@pytest.mark.asyncio
+async def test_dependency_schedule_repository_cap_is_incomplete_and_skips_partial_scan() -> None:
+    now = datetime.now(UTC)
+    tenant_id, organization_id, project_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    schedule = MaintenanceSchedule(
+        id=uuid.uuid4(), tenant_id=tenant_id, organization_id=organization_id,
+        project_id=project_id, maintenance_type="dependency_review", title="Dependabot",
+        interval_days=7, next_run_at=now - timedelta(days=1), enabled=True,
+    )
+    repositories = [SimpleNamespace(provider="github", full_name=f"octo/repo-{index}") for index in range(11)]
+
+    class Results:
+        def __init__(self, values: list[object]) -> None:
+            self.values = values
+
+        def scalars(self) -> Results:
+            return self
+
+        def all(self) -> list[object]:
+            return self.values
+
+    class StubDB:
+        def __init__(self) -> None:
+            self.execute_count = 0
+            self.added: list[ProactiveEvent] = []
+
+        async def execute(self, _query: object) -> Results:
+            self.execute_count += 1
+            if self.execute_count == 1:
+                return Results([tenant_id])
+            if self.execute_count == 2:
+                return Results([schedule])
+            return Results(repositories)
+
+        def add(self, event: ProactiveEvent) -> None:
+            self.added.append(event)
+
+        async def commit(self) -> None:
+            return None
+
+    db = StubDB()
+    with (
+        patch("solvyn.workflows.scheduler.bind_tenant_scope", new_callable=AsyncMock),
+        patch(
+            "solvyn.workflows.scheduler.get_authorized_repository_provider",
+            new_callable=AsyncMock,
+        ) as provider_factory,
+    ):
+        await _queue_due_maintenance_events(cast(AsyncSession, db))
+
+    provider_factory.assert_not_awaited()
+    assert [event for event in db.added if event.event_type == "dependabot_alert"] == []
+    summary = next(event for event in db.added if event.event_type == "dependency_review")
+    assert summary.action == "incomplete"
+    assert summary.status == "blocked"
+    assert summary.conclusion == "repository_limit_reached"
+    assert schedule.next_run_at > now
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("maintenance_type", "verification_kind", "command"),
     [

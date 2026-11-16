@@ -897,3 +897,75 @@ async def test_accessible_repositories_reports_no_next_page_without_github_link(
 
     assert repositories == []
     assert has_next is False
+
+
+@pytest.mark.asyncio
+async def test_dependabot_alert_listing_is_bounded_and_reports_partial_results() -> None:
+    requested_pages: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested_pages.append(request.url.params["page"])
+        return httpx.Response(
+            200,
+            json=[{"number": int(request.url.params["page"]), "state": "open"}],
+            headers={
+                "Link": '<https://api.github.com/repos/acme/app/dependabot/alerts?page=2>; rel="next"'
+                if request.url.params["page"] == "1"
+                else ""
+            },
+        )
+
+    http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    async with GitHubClient(http, token="ghp-alerts") as github:
+        alerts, complete = await github.list_dependabot_alerts("acme/app", max_pages=1)
+    await http.aclose()
+
+    assert requested_pages == ["1"]
+    assert alerts == [{"number": 1, "state": "open"}]
+    assert complete is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "expected_status"),
+    [(401, 401), (403, 403), (404, 404), (429, 429), (503, 502)],
+)
+async def test_dependabot_alert_listing_preserves_permission_and_provider_outcomes(
+    status_code: int, expected_status: int
+) -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, json={"message": "sensitive provider detail"})
+
+    http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    async with GitHubClient(http, token="ghp-alerts") as github:
+        with pytest.raises(GitHubRepositoryError) as failure:
+            await github.list_dependabot_alerts("acme/app")
+    await http.aclose()
+
+    assert failure.value.status_code == expected_status
+    assert "sensitive provider detail" not in failure.value.message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("headers", "message", "expected_status"),
+    [
+        ({"Retry-After": "30"}, "forbidden", 429),
+        ({"X-RateLimit-Remaining": "0"}, "forbidden", 429),
+        ({}, "forbidden", 403),
+        ({}, "You have exceeded a secondary rate limit", 429),
+    ],
+)
+async def test_dependabot_alert_403_uses_rate_limit_headers_to_classify_outcome(
+    headers: dict[str, str], message: str, expected_status: int
+) -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"message": message}, headers=headers)
+
+    http = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    async with GitHubClient(http, token="ghp-alerts") as github:
+        with pytest.raises(GitHubRepositoryError) as failure:
+            await github.list_dependabot_alerts("acme/app")
+    await http.aclose()
+
+    assert failure.value.status_code == expected_status

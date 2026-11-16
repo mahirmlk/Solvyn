@@ -72,6 +72,8 @@ _MAX_COMMIT_BYTES = 500_000
 _BRANCH_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,239}$")
 _MAX_REVIEW_PAGES = 10
 _REVIEWS_PER_PAGE = 100
+_MAX_DEPENDABOT_PAGES = 5
+_DEPENDABOT_ALERTS_PER_PAGE = 100
 _MAX_MANIFEST_DEPTH = 1
 _MAX_DISCOVERY_PAGE = 20
 _DISCOVERY_PAGE_SIZE = 50
@@ -162,7 +164,12 @@ class GitHubClient(RepositoryProvider):
             await self.http.aclose()
 
     async def _get_json_payload(
-        self, path: str, *, params: dict[str, str] | None = None, include_link: bool = False
+        self,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+        include_link: bool = False,
+        preserve_forbidden: bool = False,
     ) -> Any:
         try:
             response = await self.http.get(path, params=params, headers=self._request_headers)
@@ -176,6 +183,24 @@ class GitHubClient(RepositoryProvider):
         if response.status_code == 429:
             raise GitHubRepositoryError(429, "GitHub rate limit reached")
         if response.status_code == 403:
+            if preserve_forbidden:
+                rate_limited = (
+                    response.headers.get("retry-after") is not None
+                    or response.headers.get("x-ratelimit-remaining") == "0"
+                )
+                if not rate_limited:
+                    try:
+                        error_payload = response.json()
+                    except ValueError:
+                        error_payload = None
+                    message = error_payload.get("message") if isinstance(error_payload, dict) else None
+                    rate_limited = (
+                        isinstance(message, str)
+                        and "secondary rate limit" in message[:512].casefold()
+                    )
+                if rate_limited:
+                    raise GitHubRepositoryError(429, "GitHub rate limit reached")
+                raise GitHubRepositoryError(403, "GitHub denied access to Dependabot alerts")
             raise GitHubRepositoryError(429, "GitHub rate limit or access restriction reached")
         if response.status_code == 401:
             raise GitHubRepositoryError(401, "GitHub rejected the credential")
@@ -188,6 +213,41 @@ class GitHubClient(RepositoryProvider):
         except ValueError as exc:
             raise GitHubRepositoryError(502, "GitHub returned invalid JSON") from exc
         return (payload, response.headers.get("link", "")) if include_link else payload
+
+    async def list_dependabot_alerts(
+        self, full_name: str, *, max_pages: int = _MAX_DEPENDABOT_PAGES
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Return open Dependabot alerts and whether the bounded result is complete.
+
+        The GitHub alerts endpoint is paginated. A visible ``next`` link after
+        the page cap means the result is partial and must not be presented as a
+        clean scan. Provider status codes are preserved so callers can report
+        missing permissions separately from rate limits.
+        """
+        owner, repo = validate_full_name(full_name)
+        page_limit = max(1, min(int(max_pages), _MAX_DEPENDABOT_PAGES))
+        path = f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/dependabot/alerts"
+        alerts: list[dict[str, Any]] = []
+        for page in range(1, page_limit + 1):
+            result = await self._get_json_payload(
+                path,
+                params={"state": "open", "per_page": str(_DEPENDABOT_ALERTS_PER_PAGE), "page": str(page)},
+                include_link=True,
+                preserve_forbidden=True,
+            )
+            payload, link_header = result
+            if not isinstance(payload, list) or any(not isinstance(item, dict) for item in payload):
+                raise GitHubRepositoryError(502, "GitHub returned an invalid Dependabot alerts response")
+            alerts.extend(payload)
+            has_next = any(
+                part.strip().endswith('rel="next"')
+                for part in str(link_header).split(",")
+            )
+            if not has_next:
+                return alerts, True
+            if page == page_limit:
+                return alerts, False
+        return alerts, True
 
     async def _get_json(self, path: str, *, params: dict[str, str] | None = None) -> dict[str, Any]:
         payload = await self._get_json_payload(path, params=params)
