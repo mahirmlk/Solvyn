@@ -22,12 +22,25 @@ def test_packaged_dataset_is_versioned_and_covers_initial_roles() -> None:
 
     assert dataset["id"] == DATASET_ID
     assert dataset["version"] == DATASET_VERSION
-    assert {case["agent_type"] for case in dataset["cases"]} == {
+    expected_roles = {
         "system-designer",
         "backend-engineer",
         "qa-engineer",
         "security-auditor",
     }
+    assert len(dataset["cases"]) == 12
+    assert {case["agent_type"] for case in dataset["cases"]} == expected_roles
+    assert len({case["id"] for case in dataset["cases"]}) == len(dataset["cases"])
+
+    cases_by_role = {
+        role: [case for case in dataset["cases"] if case["agent_type"] == role]
+        for role in expected_roles
+    }
+    assert all(len(cases) == 3 for cases in cases_by_role.values())
+    for cases in cases_by_role.values():
+        tags = {tag for case in cases for tag in case.get("tags", [])}
+        assert "boundary" in tags
+        assert "adversarial" in tags
 
 
 def test_scoring_reports_case_and_role_reliability_without_raw_outputs() -> None:
@@ -90,24 +103,27 @@ def test_agent_execution_failure_is_not_counted_as_a_quality_failure() -> None:
     assert report.summary["evaluated_cases"] == len(cases) - 1
     assert report.summary["failed"] == 0
     assert report.summary["pass_rate"] == 1.0
-    assert report.summary["execution_success_rate"] == (len(cases) - 1) / len(cases)
+    assert report.summary["execution_success_rate"] == pytest.approx((len(cases) - 1) / len(cases), abs=0.0001)
 
 
 @pytest.mark.asyncio
 async def test_run_agents_persists_provider_failure_separately(monkeypatch: pytest.MonkeyPatch) -> None:
     dataset = load_dataset()
-    cases_by_agent = {case["agent_type"]: case for case in dataset["cases"]}
-
     class FakeAgent:
         def __init__(self, agent_type: str) -> None:
             self.agent_type = agent_type
             self._llm_provider: str | None = None
             self._llm_model: str | None = None
 
-        async def run(self, _input_data: dict[str, Any]) -> dict[str, Any]:
-            if self.agent_type == dataset["cases"][0]["agent_type"]:
+        async def run(self, input_data: dict[str, Any]) -> dict[str, Any]:
+            if input_data == dataset["cases"][0]["input"]:
                 raise TimeoutError("sensitive provider request details")
-            result: dict[str, Any] = _passing_output(cases_by_agent[self.agent_type])
+            matching_case = next(
+                case
+                for case in dataset["cases"]
+                if case["agent_type"] == self.agent_type and case["input"] == input_data
+            )
+            result: dict[str, Any] = _passing_output(matching_case)
             result.update({"provider": "fake-provider", "model": "fake-model"})
             return result
 

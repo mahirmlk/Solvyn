@@ -21,7 +21,7 @@ from solvyn.agents.registry import agent_registry
 logger = logging.getLogger(__name__)
 
 DATASET_ID = "solvyn-engineering-teammates"
-DATASET_VERSION = "1.0.0"
+DATASET_VERSION = "1.1.0"
 
 
 @dataclass(frozen=True)
