@@ -69,9 +69,15 @@ def dependabot_alert_signal(
         or _bounded_text(dependency_package.get("name"), limit=255)
         or f"Dependabot Alert #{alert_id}"
     )
-    details_url = alert.get("html_url")
-    parsed_url = urlparse(details_url) if isinstance(details_url, str) else None
-    if parsed_url is None or parsed_url.scheme != "https" or parsed_url.hostname != "github.com":
+    details_url_value = alert.get("html_url")
+    if isinstance(details_url_value, str):
+        parsed_url = urlparse(details_url_value)
+        details_url = (
+            details_url_value[:512]
+            if parsed_url.scheme == "https" and parsed_url.hostname == "github.com"
+            else ""
+        )
+    else:
         details_url = ""
     branch = _bounded_text(alert.get("ref"), limit=255)
     if branch.startswith("refs/heads/"):
@@ -84,6 +90,6 @@ def dependabot_alert_signal(
         "workflow_name": summary,
         "conclusion": severity[:50],
         "branch": branch,
-        "details_url": details_url[:512],
+        "details_url": details_url,
         "action": action[:100],
     }
