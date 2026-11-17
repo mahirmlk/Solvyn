@@ -588,8 +588,8 @@ async def _owned_task(
     return task
 
 
-async def _lock_task_for_gate_mutation(db: AsyncSession, task: Task) -> Task:
-    """Serialize verification/review changes with the start of task delivery."""
+async def _lock_task_row(db: AsyncSession, task: Task) -> Task:
+    """Lock and refresh a task row before mutating delivery gates or starting delivery."""
     locked_task = (
         await db.execute(
             select(Task)
@@ -600,6 +600,12 @@ async def _lock_task_for_gate_mutation(db: AsyncSession, task: Task) -> Task:
     ).scalar_one_or_none()
     if locked_task is None:
         raise HTTPException(status_code=404, detail="Workflow task not found")
+    return locked_task
+
+
+async def _lock_task_for_gate_mutation(db: AsyncSession, task: Task) -> Task:
+    """Serialize verification/review changes with the start of task delivery."""
+    locked_task = await _lock_task_row(db, task)
     delivery_id = (
         await db.execute(
             select(TaskDelivery.id)
@@ -2444,6 +2450,10 @@ async def deliver_task_workspace(
                     status_code=409,
                     detail="Delivery requires at least one supported change and no unsupported missing source files",
                 )
+            # Gate mutations acquire this same task-row lock before changing criteria or verification.
+            # Keep it until the starting delivery row is committed so a concurrent mutation
+            # cannot slip between the gate check and recording the delivery attempt.
+            task = await _lock_task_row(db, task)
             completion_status = await _refresh_task_delivery_completion(
                 db,
                 task,
