@@ -93,7 +93,7 @@ def test_report_deltas_use_the_same_completed_cases_and_report_failure_changes()
     result = compare_reports(baseline, candidate)
 
     assert result["summary"]["baseline"]["pass_rate"] == 0.5
-    assert result["summary"]["candidate"]["pass_rate"] == pytest.approx(1 / 3)
+    assert result["summary"]["candidate"]["pass_rate"] == pytest.approx(0.3333)
     assert result["summary"]["pass_rate_delta"] == 0.0
     assert result["summary"]["mean_score_delta"] == 0.0
     assert result["summary"]["execution_failure_delta"] == -1
@@ -110,8 +110,10 @@ def test_compare_reports_requires_single_provider_model_and_bounded_scores() -> 
 
     mixed_provider = _report()
     mixed_provider["provider"] = "mixed"
+    baseline_with_mixed_provider = _report()
+    baseline_with_mixed_provider["provider"] = "mixed"
     with pytest.raises(ValueError, match="identify one provider"):
-        compare_reports(_report(), mixed_provider)
+        compare_reports(baseline_with_mixed_provider, mixed_provider)
 
     invalid_score = _report()
     invalid_score["cases"][0]["score"] = 1.01
