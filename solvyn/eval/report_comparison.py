@@ -3,7 +3,16 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, TypedDict
+
+
+class EvaluationMetrics(TypedDict):
+    total_cases: int
+    evaluated_cases: int
+    execution_failures: int
+    passed: int
+    pass_rate: float | None
+    mean_score: float | None
 
 
 def _report_cases(report: dict[str, Any], label: str) -> dict[str, dict[str, Any]]:
@@ -45,7 +54,7 @@ def _report_cases(report: dict[str, Any], label: str) -> dict[str, dict[str, Any
     return cases
 
 
-def _metrics(cases: list[dict[str, Any]]) -> dict[str, float | int | None]:
+def _metrics(cases: list[dict[str, Any]]) -> EvaluationMetrics:
     evaluated = [case for case in cases if case["execution_status"] == "completed"]
     passed = sum(case["passed"] is True for case in evaluated)
     return {
