@@ -141,6 +141,68 @@ def test_tracing_get_session_traces() -> None:
     assert len(traces) == 2
 
 
+@pytest.mark.asyncio
+async def test_trace_endpoints_only_return_the_authenticated_tenant() -> None:
+    from solvyn.multi_tenant.middleware import tenant_context
+    from solvyn.observability.analytics_api import get_trace, list_traces
+
+    tenant_a = uuid.uuid4()
+    tenant_b = uuid.uuid4()
+    tracing_manager._traces.clear()
+    trace_a = tracing_manager.create_trace("tenant-a", "qa", session_id="shared-session", tenant_id=str(tenant_a))
+    trace_b = tracing_manager.create_trace("tenant-b", "qa", session_id="shared-session", tenant_id=str(tenant_b))
+    tenant_context.clear()
+    tenant_context.authenticate(tenant_a, "tenant-a", "user")
+
+    try:
+        listed = await list_traces()
+        session_listed = await list_traces(session_id="shared-session")
+        own_trace = await get_trace(trace_a)
+
+        assert [trace["id"] for trace in listed["traces"]] == [trace_a]
+        assert [trace["id"] for trace in session_listed["traces"]] == [trace_a]
+        assert own_trace["trace"]["tenant_id"] == str(tenant_a)
+        with pytest.raises(HTTPException) as error:
+            await get_trace(trace_b)
+        assert error.value.status_code == 404
+    finally:
+        tenant_context.clear()
+        tracing_manager._traces.clear()
+
+
+@pytest.mark.asyncio
+async def test_shared_secret_trace_access_is_limited_to_default_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
+    from solvyn.config import settings
+    from solvyn.multi_tenant.middleware import tenant_context
+    from solvyn.observability.analytics_api import list_traces
+
+    monkeypatch.setattr(settings, "default_tenant_id", "default")
+    tracing_manager._traces.clear()
+    default_trace = tracing_manager.create_trace("default", "qa", tenant_id="default")
+    other_trace = tracing_manager.create_trace("other", "qa", tenant_id="other-tenant")
+    tenant_context.clear()
+    tenant_context.authenticate_shared_secret("user")
+
+    try:
+        listed = await list_traces()
+        assert [trace["id"] for trace in listed["traces"]] == [default_trace]
+        assert other_trace not in {trace["id"] for trace in listed["traces"]}
+    finally:
+        tenant_context.clear()
+        tracing_manager._traces.clear()
+
+
+@pytest.mark.asyncio
+async def test_trace_endpoints_require_authenticated_tenant_context() -> None:
+    from solvyn.multi_tenant.middleware import tenant_context
+    from solvyn.observability.analytics_api import list_traces
+
+    tenant_context.clear()
+    with pytest.raises(HTTPException) as error:
+        await list_traces()
+    assert error.value.status_code == 401
+
+
 # ─── WebSocket Manager ──────────────────────────────────────
 @pytest.mark.asyncio
 async def test_websocket_handle_graph_update() -> None:

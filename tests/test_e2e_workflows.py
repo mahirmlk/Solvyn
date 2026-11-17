@@ -2628,12 +2628,27 @@ async def test_rate_limit_response_payload_shape(
 # ─── WebSocket connection ──────────────────────────────────────────────
 
 
+class _WebSocketStub:
+    def __init__(self, api_key: str) -> None:
+        self.query_params = {"api_key": api_key}
+        self.headers: dict[str, str] = {}
+        self.closed: tuple[int, str] | None = None
+
+    async def close(self, code: int, reason: str) -> None:
+        self.closed = (code, reason)
+
+    async def receive_text(self) -> str:
+        from fastapi import WebSocketDisconnect
+
+        raise WebSocketDisconnect()
+
+
 def test_websocket_connects_with_valid_api_key() -> None:
     """A WebSocket connection with a valid API key receives broadcast events.
 
-    The WebSocket endpoint short-circuits to ``verify_api_key`` when no
-    tenant is in context, so we stub that helper directly.  The broadcast
-    is driven by the in-process :class:`WebSocketManager`.
+    The configured shared secret is allowed on the configured default tenant
+    channel. The broadcast is driven by the in-process
+    :class:`WebSocketManager`.
     """
     from solvyn.main import create_app
     from solvyn.observability.websocket import ws_manager
@@ -2665,6 +2680,67 @@ def test_websocket_connects_with_valid_api_key() -> None:
     assert "running" in message
 
 
+def test_websocket_rejects_shared_secret_for_non_default_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The platform compatibility secret cannot choose a tenant channel."""
+    from solvyn.config import settings
+    from solvyn.observability import analytics_api
+
+    monkeypatch.setattr(settings, "default_tenant_id", "default")
+    websocket = _WebSocketStub("platform-secret")
+    connect = AsyncMock()
+    monkeypatch.setattr(analytics_api, "verify_api_key", lambda *_args: True)
+    monkeypatch.setattr(analytics_api.ws_manager.connections, "connect", connect)
+
+    asyncio.run(analytics_api.websocket_endpoint(websocket, str(uuid.uuid4())))
+
+    assert websocket.closed == (4001, "Unauthorized")
+    connect.assert_not_awaited()
+
+
+def test_websocket_shared_secret_connects_to_configured_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Single-tenant compatibility keeps the configured default stream usable."""
+    from solvyn.config import settings
+    from solvyn.observability import analytics_api
+
+    monkeypatch.setattr(settings, "default_tenant_id", "default")
+    websocket = _WebSocketStub("platform-secret")
+    connect = AsyncMock()
+    disconnect = MagicMock()
+    monkeypatch.setattr(analytics_api, "verify_api_key", lambda *_args: True)
+    monkeypatch.setattr(analytics_api.ws_manager.connections, "connect", connect)
+    monkeypatch.setattr(analytics_api.ws_manager.connections, "disconnect", disconnect)
+
+    asyncio.run(analytics_api.websocket_endpoint(websocket, "default", "sess-default"))
+
+    connect.assert_awaited_once_with(websocket, "default", "sess-default")
+    disconnect.assert_called_once_with(websocket, "default", "sess-default")
+
+
+def test_websocket_tenant_key_only_connects_to_its_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tenant API key channels are keyed to the tenant returned by auth."""
+    from types import SimpleNamespace
+
+    from solvyn.observability import analytics_api
+
+    tenant_id = uuid.uuid4()
+    tenant = SimpleNamespace(id=tenant_id, slug="tenant-a")
+    api_key = "tenant-a-api-key"
+    websocket = _WebSocketStub(api_key)
+    connect = AsyncMock()
+    disconnect = MagicMock()
+    validate_tenant_key = AsyncMock(return_value=tenant)
+    monkeypatch.setattr(analytics_api, "verify_api_key", lambda *_args: False)
+    monkeypatch.setattr(analytics_api.ws_manager.connections, "connect", connect)
+    monkeypatch.setattr(analytics_api.ws_manager.connections, "disconnect", disconnect)
+    monkeypatch.setattr("solvyn.multi_tenant.auth._validate_tenant_api_key", validate_tenant_key)
+
+    asyncio.run(analytics_api.websocket_endpoint(websocket, tenant.slug, "sess-tenant"))
+
+    validate_tenant_key.assert_awaited_once_with(api_key, expected_tenant_id=None)
+    connect.assert_awaited_once_with(websocket, str(tenant_id), "sess-tenant")
+    disconnect.assert_called_once_with(websocket, str(tenant_id), "sess-tenant")
+
+
 def test_websocket_rejects_unauthorized_connection() -> None:
     """A WebSocket without an API key is closed by the server (4001)."""
     from fastapi.websockets import WebSocketDisconnect
@@ -2687,7 +2763,14 @@ def test_websocket_rejects_invalid_api_key() -> None:
     from solvyn.main import create_app
 
     app = create_app()
-    with patch("solvyn.observability.analytics_api.verify_api_key", return_value=False):
+    with (
+        patch("solvyn.observability.analytics_api.verify_api_key", return_value=False),
+        patch(
+            "solvyn.multi_tenant.auth._validate_tenant_api_key",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
         with TestClient(app) as test_client:
             with pytest.raises(WebSocketDisconnect) as exc_info:
                 with test_client.websocket_connect(

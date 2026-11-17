@@ -43,6 +43,28 @@ metrics_handler = Metrics()
 metrics_middleware = MetricsMiddleware()
 
 
+def _authenticated_trace_tenant_id() -> str:
+    """Resolve the tenant whose in-memory traces the caller may inspect."""
+    if not tenant_context.is_authenticated:
+        raise HTTPException(status_code=401, detail="Authenticated tenant context required")
+
+    current_tenant_id = tenant_context.tenant_id
+    if current_tenant_id is not None:
+        if tenant_context.authenticated_tenant_id != current_tenant_id:
+            raise HTTPException(status_code=401, detail="Authenticated tenant context required")
+        return str(current_tenant_id)
+
+    if (
+        tenant_context.authenticated_tenant_id == SHARED_SECRET_PRINCIPAL_ID
+        and tenant_context.user_id is None
+    ):
+        # The platform-wide compatibility key represents only the configured
+        # default tenant. It must not expose traces belonging to other tenants.
+        return settings.default_tenant_id
+
+    raise HTTPException(status_code=401, detail="Authenticated tenant context required")
+
+
 async def _resolve_active_tenant(db: AsyncSession, tenant_ref: str) -> Tenant | None:
     try:
         tenant_uuid = uuid.UUID(tenant_ref)
@@ -89,10 +111,17 @@ async def get_metrics() -> Response:
 )
 async def list_traces(session_id: str | None = None, limit: int = 20) -> dict[str, Any]:
     """List recent traces, optionally scoped to a single session."""
+    tenant_id = _authenticated_trace_tenant_id()
     if session_id:
         traces = tracing_manager.get_session_traces(session_id)
     else:
-        traces = tracing_manager.list_traces(limit)
+        # The in-memory manager is capped at 10,000 entries. Filter before
+        # applying the caller's limit so activity in another tenant cannot
+        # crowd this tenant's recent traces out of the response.
+        traces = tracing_manager.list_traces(10_000)
+    traces = [trace for trace in traces if str(trace.get("tenant_id", "default")) == tenant_id]
+    if not session_id:
+        traces = traces[-limit:] if limit > 0 else []
     return {"traces": traces, "count": len(traces)}
 
 
@@ -116,8 +145,9 @@ async def list_traces(session_id: str | None = None, limit: int = 20) -> dict[st
 )
 async def get_trace(trace_id: str) -> dict[str, Any]:
     """Return the full span tree for a single trace id."""
+    tenant_id = _authenticated_trace_tenant_id()
     trace = tracing_manager.get_trace(trace_id)
-    if trace is None:
+    if trace is None or str(trace.get("tenant_id", "default")) != tenant_id:
         raise HTTPException(status_code=404, detail="Trace not found")
     return {"trace": trace}
 
@@ -292,20 +322,26 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, session_id: s
         await websocket.close(code=4001, reason="Unauthorized")
         return
 
-    # Validate API key and tenant ownership (key must belong to the URL tenant)
-    from solvyn.multi_tenant.auth import _validate_tenant_api_key
-    if tenant_context.tenant_id is not None:
-        tenant = await _validate_tenant_api_key(api_key, expected_tenant_id=tenant_context.tenant_id)
-        if tenant is None or str(tenant.id) != tenant_id:
+    # A WebSocket does not pass through the HTTP tenant middleware, so the
+    # tenant in the URL is untrusted until it is tied to the supplied key.
+    # The platform shared secret is a single-tenant compatibility credential;
+    # it must never authorize a caller-selected tenant channel.
+    if verify_api_key(api_key, settings.api_key_secret):
+        if tenant_context.tenant_id is not None or tenant_id != settings.default_tenant_id:
             await websocket.close(code=4001, reason="Unauthorized")
             return
+        channel_tenant_id = tenant_id
     else:
-        # Shared-secret mode
-        if not verify_api_key(api_key, settings.api_key_secret):
+        from solvyn.multi_tenant.auth import _validate_tenant_api_key
+
+        expected_tenant_id = tenant_context.tenant_id
+        tenant = await _validate_tenant_api_key(api_key, expected_tenant_id=expected_tenant_id)
+        if tenant is None or tenant_id not in {str(tenant.id), tenant.slug}:
             await websocket.close(code=4001, reason="Unauthorized")
             return
+        channel_tenant_id = str(tenant.id)
 
-    await ws_manager.connections.connect(websocket, tenant_id, session_id)
+    await ws_manager.connections.connect(websocket, channel_tenant_id, session_id)
     try:
         while True:
             await websocket.receive_text()
@@ -314,4 +350,4 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, session_id: s
     except Exception:
         logger.exception("WebSocket error")
     finally:
-        ws_manager.connections.disconnect(websocket, tenant_id, session_id)
+        ws_manager.connections.disconnect(websocket, channel_tenant_id, session_id)
