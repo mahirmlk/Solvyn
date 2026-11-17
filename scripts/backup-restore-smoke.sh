@@ -24,6 +24,7 @@ CREATE DATABASE solvyn_restore_smoke OWNER solvyn_migrator;
 GRANT CONNECT ON DATABASE solvyn_restore_smoke TO solvyn_restore_smoke;
 GRANT CONNECT ON DATABASE solvyn_restore_smoke TO solvyn_runtime;
 CREATE TABLE backup_restore_smoke_text (value text);
+ALTER TABLE backup_restore_smoke_text OWNER TO solvyn_migrator;
 INSERT INTO backup_restore_smoke_text (value) VALUES ('SET transaction_timeout = 0;');
 GRANT SELECT ON backup_restore_smoke_text TO solvyn_backup_smoke;
 SQL
