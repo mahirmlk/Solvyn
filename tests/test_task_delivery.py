@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import uuid
@@ -21,6 +22,10 @@ def _verification_api() -> Any:
     from solvyn.api.v1 import verification
 
     return verification
+
+
+def _mock_task_row_lock(monkeypatch: pytest.MonkeyPatch, verification_api: Any, task: Any) -> None:
+    monkeypatch.setattr(verification_api, "_lock_task_row", AsyncMock(return_value=task))
 
 
 class FakeGitHub:
@@ -447,6 +452,7 @@ async def test_delivery_requires_completion_gate_before_remote_writes(
 ) -> None:
     verification_api = _verification_api()
     context = _delivery_fixture(tmp_path)
+    _mock_task_row_lock(monkeypatch, verification_api, context[0])
     github = FakeDeliveryGitHub()
     db = FakeDeliverySession()
     preview = await verification_api._build_delivery_preview(
@@ -506,11 +512,163 @@ async def test_gate_mutation_is_rejected_while_delivery_needs_recovery() -> None
 
 
 @pytest.mark.asyncio
+async def test_delivery_serializes_gate_mutation_before_recording_starting_delivery(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from solvyn.db.models import Task, TaskDelivery
+
+    verification_api = _verification_api()
+    context = _delivery_fixture(tmp_path)
+    task = context[0]
+
+    class Result:
+        def __init__(self, value: Any) -> None:
+            self.value = value
+
+        def scalar_one_or_none(self) -> Any:
+            return self.value
+
+    class InterleavingDeliverySession:
+        def __init__(self) -> None:
+            self.records: list[Any] = []
+            self.row_lock = asyncio.Lock()
+            self.row_lock_owner: asyncio.Task[Any] | None = None
+            self.delivery_task: asyncio.Task[Any] | None = None
+            self.row_lock_acquired = asyncio.Event()
+            self.mutation_waiting_for_lock = asyncio.Event()
+            self.commits = 0
+
+        async def execute(self, statement: Any) -> Result:
+            description = statement.column_descriptions[0]
+            entity = description["entity"]
+            if entity is Task and statement._for_update_arg is not None:
+                if self.row_lock.locked():
+                    self.mutation_waiting_for_lock.set()
+                await self.row_lock.acquire()
+                self.row_lock_owner = asyncio.current_task()
+                if self.row_lock_owner is self.delivery_task:
+                    self.row_lock_acquired.set()
+                return Result(task)
+            if entity is TaskDelivery and description["name"] == "id":
+                active = next(
+                    (
+                        record
+                        for record in self.records
+                        if record.status in verification_api._DELIVERY_IN_PROGRESS_STATUSES
+                    ),
+                    None,
+                )
+                return Result(active.id if active is not None else None)
+            if entity is TaskDelivery:
+                return Result(next(iter(self.records), None))
+            raise AssertionError(f"Unexpected delivery query: {statement}")
+
+        def add(self, record: Any) -> None:
+            if record.id is None:
+                record.id = uuid.uuid4()
+            self.records.append(record)
+
+        async def commit(self) -> None:
+            self.commits += 1
+            if self.row_lock_owner is asyncio.current_task():
+                self.row_lock_owner = None
+                self.row_lock.release()
+
+        async def refresh(self, _record: Any) -> None:
+            return None
+
+        async def rollback(self) -> None:
+            if self.row_lock_owner is asyncio.current_task():
+                self.row_lock_owner = None
+                self.row_lock.release()
+
+    class PausedDeliveryGitHub(FakeDeliveryGitHub):
+        def __init__(self) -> None:
+            super().__init__()
+            self.branch_started = asyncio.Event()
+            self.allow_branch_write = asyncio.Event()
+
+        async def create_branch_at_commit(self, _repo: str, branch: str, sha: str) -> dict[str, str]:
+            self.writes.append("branch")
+            self.branch_started.set()
+            await self.allow_branch_write.wait()
+            return {"name": branch, "sha": sha}
+
+    db = InterleavingDeliverySession()
+    github = PausedDeliveryGitHub()
+    preview = await verification_api._build_delivery_preview(
+        context[2], context[1], context[4], context[5], context[6], FakeGitHub()  # type: ignore[arg-type]
+    )
+
+    async def load_context(*_args: Any) -> tuple[Any, ...]:
+        return context
+
+    mutation_task: asyncio.Task[Any] | None = None
+    mutation_finished = asyncio.Event()
+    mutation_result: HTTPException | None = None
+
+    async def attempt_gate_mutation() -> None:
+        nonlocal mutation_result
+        try:
+            await verification_api._lock_task_for_gate_mutation(db, task)  # type: ignore[arg-type]
+        except HTTPException as exc:
+            mutation_result = exc
+        finally:
+            if db.row_lock_owner is asyncio.current_task():
+                db.row_lock_owner = None
+                db.row_lock.release()
+            mutation_finished.set()
+
+    async def refresh_completion(*_args: Any, **_kwargs: Any) -> str:
+        nonlocal mutation_task
+        mutation_task = asyncio.create_task(attempt_gate_mutation())
+        waiting = asyncio.create_task(db.mutation_waiting_for_lock.wait())
+        finished = asyncio.create_task(mutation_finished.wait())
+        done, pending = await asyncio.wait({waiting, finished}, return_when=asyncio.FIRST_COMPLETED)
+        for pending_task in pending:
+            pending_task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        assert done
+        return "completed"
+
+    monkeypatch.setattr(verification_api, "_task_delivery_context", load_context)
+    monkeypatch.setattr(verification_api, "_refresh_task_delivery_completion", refresh_completion)
+    monkeypatch.setattr(verification_api, "GitHubClient", lambda **_kwargs: github)
+    delivery_task = asyncio.create_task(
+        verification_api.deliver_task_workspace(
+            execution_id=uuid.uuid4(),
+            task_id=task.id,
+            payload=verification_api.TaskDeliveryRequest(
+                expected_diff_digest=preview["diff_digest"],
+                branch_name="solvyn/task-12",
+                commit_message="Update source",
+                pull_request_title="Update source",
+            ),
+            db=db,  # type: ignore[arg-type]
+        )
+    )
+    db.delivery_task = delivery_task
+
+    await asyncio.wait_for(github.branch_started.wait(), timeout=1)
+    assert mutation_task is not None
+    await asyncio.wait_for(mutation_finished.wait(), timeout=1)
+    assert mutation_result is not None
+    assert mutation_result.status_code == 409
+    assert len(db.records) == 1
+    assert db.records[0].status == "starting"
+
+    github.allow_branch_write.set()
+    result = await delivery_task
+    assert result["pull_request"]["draft"] is True
+
+
+@pytest.mark.asyncio
 async def test_delivery_creates_pinned_branch_commit_and_draft_pr(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     verification_api = _verification_api()
     context = _delivery_fixture(tmp_path)
+    _mock_task_row_lock(monkeypatch, verification_api, context[0])
     monkeypatch.setattr(verification_api, "_refresh_task_delivery_completion", AsyncMock(return_value="completed"))
     github = FakeDeliveryGitHub()
     db = FakeDeliverySession()
@@ -574,6 +732,7 @@ async def test_full_repository_delivery_records_reviewable_file_and_deletion_evi
     )
     github = FullRepositoryDeliveryGitHub()
     db = FakeDeliverySession()
+    _mock_task_row_lock(monkeypatch, verification_api, context[0])
     github.delivery_session = db
     preview = await verification_api._build_delivery_preview(
         context[2], context[1], None, manager, workspace, github  # type: ignore[arg-type]
@@ -613,6 +772,7 @@ async def test_deletion_only_delivery_creates_a_reviewable_draft_pr(
 ) -> None:
     verification_api = _verification_api()
     context = _delivery_fixture(tmp_path)
+    _mock_task_row_lock(monkeypatch, verification_api, context[0])
     monkeypatch.setattr(verification_api, "_refresh_task_delivery_completion", AsyncMock(return_value="completed"))
     context[5].delete_file(context[6], "src/main.py")
     github = DeletionOnlyDeliveryGitHub()
@@ -650,6 +810,7 @@ async def test_ambiguous_pull_request_failure_reports_unknown_outcome(
 ) -> None:
     verification_api = _verification_api()
     context = _delivery_fixture(tmp_path)
+    _mock_task_row_lock(monkeypatch, verification_api, context[0])
     monkeypatch.setattr(verification_api, "_refresh_task_delivery_completion", AsyncMock(return_value="completed"))
     github = AmbiguousPullRequestGitHub()
     db = FakeDeliverySession()
@@ -691,6 +852,7 @@ async def test_delivery_replays_persisted_pull_request_without_github_writes(
 ) -> None:
     verification_api = _verification_api()
     context = _delivery_fixture(tmp_path)
+    _mock_task_row_lock(monkeypatch, verification_api, context[0])
     monkeypatch.setattr(verification_api, "_refresh_task_delivery_completion", AsyncMock(return_value="completed"))
     github = FakeDeliveryGitHub()
     preview = await verification_api._build_delivery_preview(
@@ -740,6 +902,7 @@ async def test_delivery_blocks_retry_for_unresolved_persisted_attempt(
 ) -> None:
     verification_api = _verification_api()
     context = _delivery_fixture(tmp_path)
+    _mock_task_row_lock(monkeypatch, verification_api, context[0])
     monkeypatch.setattr(verification_api, "_refresh_task_delivery_completion", AsyncMock(return_value="completed"))
     github = FakeDeliveryGitHub()
     preview = await verification_api._build_delivery_preview(
