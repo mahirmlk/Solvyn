@@ -98,7 +98,10 @@ def compare_reports(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict
 
     comparisons: list[dict[str, Any]] = []
     grouped: dict[str, list[dict[str, Any]]] = {}
-    for case_id in sorted(baseline_cases):
+    # Keep the baseline report's case order so the comparison is easy to line
+    # up with the original artifact. The candidate is keyed by ID above, so
+    # its input order does not affect matching.
+    for case_id in baseline_cases:
         before = baseline_cases[case_id]
         after = candidate_cases[case_id]
         if before["agent_type"] != after["agent_type"]:
