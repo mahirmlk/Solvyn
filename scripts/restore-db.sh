@@ -75,7 +75,11 @@ if [ "$typed_database" != "$CONFIRMED_DATABASE" ]; then
   exit 1
 fi
 
-gzip -dc -- "$BACKUP_FILE" | psql --host "${DB_PARTS[0]}" --port "${DB_PARTS[1]}" \
+# PostgreSQL 17+ clients add this setting to dumps, but PostgreSQL 16 targets
+# do not recognize it. It only disables a timeout during restore, so omit it
+# when restoring across those client/server versions.
+gzip -dc -- "$BACKUP_FILE" | sed '/^SET transaction_timeout = 0;$/d' | psql \
+  --host "${DB_PARTS[0]}" --port "${DB_PARTS[1]}" \
   --username "${DB_PARTS[2]}" --dbname "${DB_PARTS[4]}" --no-password \
   --single-transaction --set ON_ERROR_STOP=1
 echo "Restore complete."
