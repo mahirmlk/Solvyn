@@ -1110,6 +1110,81 @@ async def test_task_verification_is_sandboxed_and_durable(
     assert attempt_output.status_code == 200
     assert attempt_output.json()["attempts"][-1]["stdout"] == "1 passed"
 
+    crashed_worker_calls = 0
+
+    async def repeatedly_lost_worker(
+        self: DockerSandboxRunner,
+        managed_workspace: Any,
+        command: list[str],
+    ) -> SandboxResult:
+        nonlocal crashed_worker_calls
+        from sqlalchemy import select
+
+        from solvyn.db.models import VerificationRun
+        from solvyn.db.session import async_session_factory
+
+        crashed_worker_calls += 1
+        async with async_session_factory() as db:
+            run = (
+                await db.execute(
+                    select(VerificationRun)
+                    .where(
+                        VerificationRun.task_id == uuid.UUID(task_id),
+                        VerificationRun.status == "running",
+                    )
+                    .order_by(VerificationRun.started_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one()
+            run.attempt_started_at = datetime.now(UTC) - timedelta(minutes=20)
+            run.lease_expires_at = datetime.now(UTC) - timedelta(minutes=10)
+            await db.commit()
+
+        await scheduler._interrupt_stale_verification_runs()
+        return SandboxResult(uuid.uuid4(), tuple(command), 0, False, "late success", "", False, 0.05)
+
+    monkeypatch.setattr(DockerSandboxRunner, "run", repeatedly_lost_worker)
+    exhausted = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs",
+        json={"kind": "test", "command": ["pytest", "-q"]},
+    )
+    assert exhausted.status_code == 202
+    exhausted_result = await approve_and_execute(exhausted)
+    assert exhausted_result.status_code == 200
+    exhausted_run_id = uuid.UUID(exhausted_result.json()["id"])
+    assert exhausted_result.json()["status"] == "interrupted"
+
+    for attempt_number, expected_status in ((2, "interrupted"), (3, "dead_letter")):
+        async with async_session_factory() as db:
+            due_runs = await scheduler._fetch_due_verification_runs(db)
+        assert (exhausted_run_id, tenant.id) in due_runs
+        await scheduler._execute_due_verification(exhausted_run_id, tenant.id)
+        async with async_session_factory() as db:
+            await bind_tenant_scope(db, tenant.id)
+            exhausted_run = await db.get(VerificationRun, exhausted_run_id)
+        assert exhausted_run is not None
+        assert exhausted_run.attempt_count == attempt_number
+        assert exhausted_run.status == expected_status
+
+    async with async_session_factory() as db:
+        due_runs = await scheduler._fetch_due_verification_runs(db)
+    assert (exhausted_run_id, tenant.id) not in due_runs
+    exhausted_attempt_output = await client.get(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs/{exhausted_run_id}/attempts"
+    )
+    assert exhausted_attempt_output.status_code == 200
+    assert [attempt["event_type"] for attempt in exhausted_attempt_output.json()["attempts"]] == [
+        "started", "finished", "started", "finished", "started", "finished",
+    ]
+    assert [attempt["status"] for attempt in exhausted_attempt_output.json()["attempts"]] == [
+        "running", "interrupted", "running", "interrupted", "running", "dead_letter",
+    ]
+    blocked_dead_letter_replay = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs/{exhausted_run_id}/execute"
+    )
+    assert blocked_dead_letter_replay.status_code == 409
+    assert crashed_worker_calls == 3
+
     rejected_request = await client.post(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs",
         json={"kind": "test", "command": ["pytest", "--version"]},

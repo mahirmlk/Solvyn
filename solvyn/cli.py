@@ -34,6 +34,7 @@ from rich.text import Text
 from solvyn.agents.registry import agent_registry
 from solvyn.config import settings
 from solvyn.eval.benchmark import load_dataset, run_agents
+from solvyn.eval.report_comparison import compare_reports
 from solvyn.workflows.task_generator import TaskGenerator
 from solvyn.workflows.templates import WORKFLOW_TEMPLATES
 
@@ -432,6 +433,29 @@ def eval_history(limit: int = typer.Option(25, min=1, max=100, help="Number of r
     console.print(table)
     if not runs:
         console.print("[dim]No persisted evaluation runs for this tenant.[/]")
+
+
+@eval_app.command("compare")
+def eval_compare(
+    baseline_path: Path = typer.Option(..., "--baseline", exists=True, dir_okay=False, readable=True),
+    candidate_path: Path = typer.Option(..., "--candidate", exists=True, dir_okay=False, readable=True),
+    output_path: Path | None = typer.Option(None, "--output", dir_okay=False, help="Optional path for the comparison JSON."),
+) -> None:
+    """Compare two saved reports without contacting a provider or database."""
+    try:
+        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+        candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+        comparison = compare_reports(baseline, candidate)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        console.print(f"[red]Could not compare evaluation reports: {exc}[/]")
+        raise typer.Exit(1) from exc
+
+    rendered = json.dumps(comparison, indent=2, ensure_ascii=False)
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(rendered + "\n", encoding="utf-8")
+        console.print(f"[dim]Comparison saved to {output_path}[/]")
+    console.print_json(rendered)
 
 
 # ---------------------------------------------------------------------------
