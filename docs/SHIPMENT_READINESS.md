@@ -4,6 +4,8 @@ This status compares the repository with `UPDATE.md`, including its primary engi
 
 ## Latest CI verification
 
+PR #123 added a frontend dependency audit using the checked-in lockfile and made it a required image-build gate. Its exact-head CI run passed at `af7a6c1006ee251cc554aa9a549cb482d6d17198c`: 720 tests passed, 1 skipped, the backup/restore smoke test passed, `pip-audit` reported no known vulnerabilities, the frontend audit reported 0 vulnerabilities, and both images built. The lockfile now resolves Next.js 15.5.29 and PostCSS 8.5.33. Deployment jobs were skipped.
+
 PR #122 added a provider-free `solvyn eval compare` command for saved reports and regression coverage for worker retry exhaustion. Its merged head passed Ruff, MyPy, 720 tests (1 skipped), the database backup/restore smoke test, `pip-audit` with no known vulnerabilities, and API/frontend image builds. The restore smoke test also checks tenant visibility, forced RLS after restore, and preservation of a COPY value that matches PostgreSQL 17's `transaction_timeout` setting. Deployment jobs were skipped, so this does not count as a staging deployment or deployment-specific restore drill.
 
 ## Phase 10: self-hosted deployment
