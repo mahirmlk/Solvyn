@@ -640,7 +640,7 @@ async def test_delivery_serializes_gate_mutation_before_recording_starting_deliv
             task_id=task.id,
             payload=verification_api.TaskDeliveryRequest(
                 expected_diff_digest=preview["diff_digest"],
-                branch_name="solvyn/task-race",
+                branch_name="solvyn/task-12",
                 commit_message="Update source",
                 pull_request_title="Update source",
             ),
