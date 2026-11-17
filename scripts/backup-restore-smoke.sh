@@ -23,6 +23,9 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO solvyn_backup_smoke;
 CREATE DATABASE solvyn_restore_smoke OWNER solvyn_migrator;
 GRANT CONNECT ON DATABASE solvyn_restore_smoke TO solvyn_restore_smoke;
 GRANT CONNECT ON DATABASE solvyn_restore_smoke TO solvyn_runtime;
+CREATE TABLE backup_restore_smoke_text (value text);
+INSERT INTO backup_restore_smoke_text (value) VALUES ('SET transaction_timeout = 0;');
+GRANT SELECT ON backup_restore_smoke_text TO solvyn_backup_smoke;
 SQL
 
 TENANT_A_ID="$(psql --host localhost --port 5432 --username solvyn --dbname solvyn --no-password \
@@ -50,6 +53,8 @@ export PGPASSWORD=solvyn
 SOURCE_VERSION="$(psql --host localhost --port 5432 --username solvyn --dbname solvyn --no-password --tuples-only --no-align --command 'SELECT version_num FROM alembic_version')"
 RESTORED_VERSION="$(psql --host localhost --port 5432 --username solvyn --dbname "$RESTORE_DATABASE" --no-password --tuples-only --no-align --command 'SELECT version_num FROM alembic_version')"
 test "$SOURCE_VERSION" = "$RESTORED_VERSION"
+RESTORED_SETTING_TEXT_COUNT="$(psql --host localhost --port 5432 --username solvyn --dbname "$RESTORE_DATABASE" --no-password --tuples-only --no-align --command "SELECT count(*) FROM backup_restore_smoke_text WHERE value = 'SET transaction_timeout = 0;'")"
+test "$RESTORED_SETTING_TEXT_COUNT" = "1"
 
 for table_name in tenants tasks task_events task_deliveries; do
   SOURCE_COUNT="$(psql --host localhost --port 5432 --username solvyn --dbname solvyn --no-password --tuples-only --no-align --command "SELECT count(*) FROM ${table_name}")"

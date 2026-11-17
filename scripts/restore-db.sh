@@ -77,8 +77,16 @@ fi
 
 # PostgreSQL 17+ clients add this setting to dumps, but PostgreSQL 16 targets
 # do not recognize it. It only disables a timeout during restore, so omit it
-# when restoring across those client/server versions.
-gzip -dc -- "$BACKUP_FILE" | sed '/^SET transaction_timeout = 0;$/d' | psql \
+# when restoring across those client/server versions. Limit the filter to the
+# dump preamble so matching COPY data and function bodies remain untouched.
+gzip -dc -- "$BACKUP_FILE" | awk '
+  BEGIN { in_preamble = 1 }
+  in_preamble && (/^--/ || /^[[:space:]]*$/ || /^\\/ || /^SET / || /^SELECT pg_catalog\.set_config/) {
+    if ($0 != "SET transaction_timeout = 0;") print
+    next
+  }
+  { in_preamble = 0; print }
+' | psql \
   --host "${DB_PARTS[0]}" --port "${DB_PARTS[1]}" \
   --username "${DB_PARTS[2]}" --dbname "${DB_PARTS[4]}" --no-password \
   --single-transaction --set ON_ERROR_STOP=1
