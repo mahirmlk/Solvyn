@@ -8,6 +8,7 @@ import logging
 from solvyn.config import enforce_prod_secrets, settings
 from solvyn.logging_config import setup_logging
 from solvyn.message_bus.redis import message_bus
+from solvyn.observability.opentelemetry import init_opentelemetry, shutdown_opentelemetry
 from solvyn.workflows.scheduler import run_scheduled_workflows
 
 
@@ -31,10 +32,17 @@ async def run_worker() -> None:
 
 def main() -> None:
     setup_logging(settings.log_level, settings.json_logging)
+    init_opentelemetry(
+        service_name="solvyn-worker",
+        otlp_endpoint=settings.otlp_endpoint,
+        enabled=settings.otel_enabled,
+    )
     try:
         asyncio.run(run_worker())
     except KeyboardInterrupt:
         pass
+    finally:
+        shutdown_opentelemetry()
 
 
 if __name__ == "__main__":

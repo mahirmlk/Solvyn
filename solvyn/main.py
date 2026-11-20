@@ -38,7 +38,7 @@ from solvyn.multi_tenant.auth import RateLimitMiddleware, auth_middleware
 from solvyn.multi_tenant.middleware import tenant_middleware
 from solvyn.observability.analytics_api import router as observability_router
 from solvyn.observability.metrics import MetricsMiddleware
-from solvyn.observability.opentelemetry import init_opentelemetry
+from solvyn.observability.opentelemetry import PrivacySafeTracingMiddleware, init_opentelemetry, shutdown_opentelemetry
 from solvyn.workflows.scheduler import run_scheduled_workflows
 
 setup_logging(settings.log_level, settings.json_logging)
@@ -67,18 +67,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Solvyn started")
     yield
     # Shutdown
-    logger.info("Shutting down — draining connections...")
-    if scheduler_task is not None:
-        scheduler_task.cancel()
-        await asyncio.gather(scheduler_task, return_exceptions=True)
-    await message_bus.disconnect()
-    from solvyn.llm.router import llm_router
+    try:
+        logger.info("Shutting down — draining connections...")
+        if scheduler_task is not None:
+            scheduler_task.cancel()
+            await asyncio.gather(scheduler_task, return_exceptions=True)
+        await message_bus.disconnect()
+        from solvyn.llm.router import llm_router
 
-    await llm_router.close()
-    from solvyn.db.session import engine
+        await llm_router.close()
+        from solvyn.db.session import engine
 
-    await engine.dispose()
-    logger.info("Connections drained. Solvyn stopped.")
+        await engine.dispose()
+        logger.info("Connections drained. Solvyn stopped.")
+    finally:
+        shutdown_opentelemetry()
 
 
 def create_app() -> FastAPI:
@@ -206,6 +209,10 @@ def create_app() -> FastAPI:
         if request.url.scheme == "https":
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response
+
+    # Capture only request method and response status. The middleware never
+    # reads URLs, headers, bodies, prompts, or exception messages.
+    solvyn_app.add_middleware(PrivacySafeTracingMiddleware, enabled=settings.otel_enabled)
 
     return solvyn_app
 
