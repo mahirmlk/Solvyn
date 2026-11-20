@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import stat
 import tarfile
 import tempfile
 import time
@@ -131,12 +132,7 @@ class DockerSandboxRunner:
             if started_container.returncode != 0:
                 raise SandboxRuntimeError("Docker failed to start the sandbox container")
 
-            copied_in = await self._cli(
-                ["cp", f"{workspace.path}{os.sep}.", f"{container_id}:/workspace"],
-                timeout=self.cli_timeout_seconds,
-            )
-            if copied_in.returncode != 0:
-                raise SandboxRuntimeError("Docker failed to stage the workspace")
+            await self._stage_workspace(container_id, workspace)
 
             permissions_set = await self._cli(
                 ["exec", "--user", "0", container_id, "chmod", "-R", "a+rwX", "/workspace"],
@@ -233,6 +229,116 @@ class DockerSandboxRunner:
             raise ValueError("Command arguments must be non-empty strings of at most 4096 characters")
         return argv
 
+    @staticmethod
+    def _docker_error_detail(stderr: bytes, *, sensitive_paths: Sequence[str] = ()) -> str:
+        """Return short, printable Docker diagnostics without local workspace paths."""
+        detail = stderr.decode("utf-8", errors="replace")
+        detail = "".join(character if character.isprintable() or character.isspace() else " " for character in detail)
+        detail = " ".join(detail.split())
+        for path in sensitive_paths:
+            if path:
+                detail = detail.replace(path, "<workspace>")
+        return detail[:300]
+
+    def _create_workspace_archive(self, workspace: ManagedWorkspace, archive: BinaryIO) -> int:
+        """Build a bounded tar containing only validated regular workspace files."""
+        with tarfile.open(fileobj=archive, mode="w") as tar:
+            for path in sorted(workspace.path.rglob("*")):
+                metadata = path.lstat()
+                if stat.S_ISLNK(metadata.st_mode):
+                    raise SandboxRuntimeError("Workspace contains an unsupported filesystem entry")
+                if stat.S_ISDIR(metadata.st_mode):
+                    continue
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise SandboxRuntimeError("Workspace contains an unsupported filesystem entry")
+                relative = path.relative_to(workspace.path).as_posix()
+                safe_relative_path(relative)
+                flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+                descriptor = os.open(path, flags)
+                try:
+                    opened = os.fstat(descriptor)
+                    if (
+                        not stat.S_ISREG(opened.st_mode)
+                        or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+                    ):
+                        raise SandboxRuntimeError("Workspace changed while it was being staged")
+                    member = tarfile.TarInfo(relative)
+                    member.type = tarfile.REGTYPE
+                    member.mode = stat.S_IMODE(opened.st_mode)
+                    member.size = opened.st_size
+                    member.mtime = opened.st_mtime
+                    member.uid = member.gid = 0
+                    member.uname = member.gname = ""
+                    with os.fdopen(descriptor, "rb", closefd=False) as source:
+                        tar.addfile(member, source)
+                finally:
+                    os.close(descriptor)
+        size = archive.tell()
+        if size > self.limits.workspace_bytes + 2_000_000:
+            raise SandboxRuntimeError("Workspace archive exceeded its size limit")
+        archive.seek(0)
+        return size
+
+    async def _stage_workspace(self, container_id: str, workspace: ManagedWorkspace) -> None:
+        """Stream workspace bytes to tar in the container without using docker cp."""
+        with tempfile.TemporaryFile() as archive:
+            self._create_workspace_archive(workspace, cast(BinaryIO, archive))
+            proc = await asyncio.create_subprocess_exec(
+                *self.docker_command,
+                "exec",
+                "--user",
+                "0",
+                "-i",
+                container_id,
+                "tar",
+                "-x",
+                "--no-same-owner",
+                "--no-same-permissions",
+                "-C",
+                "/workspace",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env={"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "")},
+            )
+            assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+            stdout_task = asyncio.create_task(self._read_bounded(proc.stdout, 16 * 1024))
+            stderr_task = asyncio.create_task(self._read_bounded(proc.stderr, 16 * 1024))
+            copy_task = asyncio.create_task(self._copy_archive(archive, proc.stdin))
+            try:
+                try:
+                    await asyncio.wait_for(copy_task, timeout=self.cli_timeout_seconds)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                proc.stdin.close()
+                try:
+                    await proc.stdin.wait_closed()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                await asyncio.wait_for(proc.wait(), timeout=self.cli_timeout_seconds)
+            except TimeoutError as exc:
+                proc.kill()
+                await proc.wait()
+                await asyncio.gather(copy_task, stdout_task, stderr_task, return_exceptions=True)
+                raise SandboxRuntimeError("Docker workspace staging timed out") from exc
+            except asyncio.CancelledError:
+                proc.kill()
+                await proc.wait()
+                await asyncio.gather(copy_task, stdout_task, stderr_task, return_exceptions=True)
+                raise
+            _, _ = await stdout_task
+            _, stderr = await stderr_task
+            if proc.returncode != 0:
+                detail = self._docker_error_detail(stderr, sensitive_paths=(str(workspace.path),))
+                suffix = f": {detail}" if detail else ""
+                raise SandboxRuntimeError(f"Docker failed to stage the workspace{suffix}")
+
+    @staticmethod
+    async def _copy_archive(archive: BinaryIO, stdin: asyncio.StreamWriter) -> None:
+        while chunk := archive.read(64 * 1024):
+            stdin.write(chunk)
+            await stdin.drain()
+
     async def _cli(
         self,
         args: Sequence[str],
@@ -291,9 +397,14 @@ class DockerSandboxRunner:
     async def _export_workspace(self, container_id: str, workspace: ManagedWorkspace) -> None:
         proc = await asyncio.create_subprocess_exec(
             *self.docker_command,
-            "cp",
-            f"{container_id}:/workspace/.",
-            "-",
+            "exec",
+            "-i",
+            container_id,
+            "tar",
+            "-c",
+            "-C",
+            "/workspace",
+            ".",
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -311,6 +422,7 @@ class DockerSandboxRunner:
                 await proc.wait()
                 stdout_task.cancel()
                 stderr_task.cancel()
+                await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
                 raise SandboxRuntimeError("Docker workspace export timed out") from exc
             except asyncio.CancelledError:
                 proc.kill()
@@ -320,9 +432,11 @@ class DockerSandboxRunner:
                 await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
                 raise
             archive_size, exceeded = await stdout_task
-            await stderr_task  # Drain Docker diagnostics without exposing them as job output.
+            stderr, _ = await stderr_task
             if proc.returncode != 0 or exceeded:
-                raise SandboxRuntimeError("Docker failed to export the sandbox workspace")
+                detail = self._docker_error_detail(stderr)
+                suffix = f": {detail}" if detail else ""
+                raise SandboxRuntimeError(f"Docker failed to export the sandbox workspace{suffix}")
             archive_stream.seek(0)
             self._extract_workspace_archive(archive_stream, workspace, archive_size)
 
@@ -415,3 +529,4 @@ class DockerSandboxRunner:
             if "no such container" in message or "no such object" in message:
                 return
             raise SandboxRuntimeError("Docker failed to clean up the sandbox container")
+
