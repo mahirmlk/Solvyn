@@ -75,9 +75,9 @@ class AgentGraph:
             # Current level: all nodes whose in-degree (among remaining) is 0
             current_level = [nid for nid in remaining if in_degree[nid] == 0]
             if not current_level:
-                # Circular dependency – break it by picking one node
-                logger.warning("Circular dependency detected; breaking cycle")
-                current_level = [next(iter(remaining))]
+                # Every remaining node depends on a node that is still
+                # unresolved, which means the graph contains a cycle.
+                raise ValueError("Execution graph contains a cycle")
 
             levels.append(current_level)
             for nid in current_level:
