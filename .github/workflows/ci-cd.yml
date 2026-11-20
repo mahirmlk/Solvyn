@@ -109,9 +109,24 @@ jobs:
       - name: Check for dependency vulnerabilities
         run: pip install pip-audit && pip-audit
 
+  tracing-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start Collector and Tempo
+        run: docker compose -f ops/otel-smoke.compose.yml up -d
+      - name: Verify OTLP ingestion and Tempo query
+        run: python ops/otel_smoke.py
+      - name: Collect trace service logs on failure
+        if: failure()
+        run: docker compose -f ops/otel-smoke.compose.yml logs
+      - name: Stop trace services
+        if: always()
+        run: docker compose -f ops/otel-smoke.compose.yml down --volumes --remove-orphans
+
   build:
     runs-on: ubuntu-latest
-    needs: [lint, test, frontend-audit]
+    needs: [lint, test, frontend-audit, tracing-smoke]
     permissions:
       contents: read
       packages: write
