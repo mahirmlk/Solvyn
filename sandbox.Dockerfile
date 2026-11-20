@@ -26,7 +26,8 @@ COPY --from=gitleaks-build /usr/local/bin/gitleaks /usr/local/bin/gitleaks
 COPY scripts/gitleaks.toml /opt/solvyn/gitleaks.toml
 COPY scripts/gitleaks.ignore /opt/solvyn/gitleaks.ignore
 COPY scripts/verify_markdown.py /opt/solvyn/verify_markdown.py
-RUN chmod 0444 /opt/solvyn/verify_markdown.py
+COPY scripts/scan_secrets.py /opt/solvyn/scan_secrets.py
+RUN chmod 0444 /opt/solvyn/verify_markdown.py /opt/solvyn/scan_secrets.py
 RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin sandbox
 WORKDIR /workspace
 USER 10001:10001
