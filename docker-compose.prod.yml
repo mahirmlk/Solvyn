@@ -147,12 +147,21 @@ services:
     env_file: ${SOLVYN_APP_ENV_FILE:-.env.application}
     environment:
       ENABLE_WORKFLOW_SCHEDULER: "true"
-      SANDBOX_RUNTIME_TOKEN: ""
+      SANDBOX_WORKSPACE_ROOT: /app/.solvyn/workspaces
+      SANDBOX_RUNTIME_URL: http://sandbox:8001
+      SANDBOX_RUNTIME_TOKEN: ${SANDBOX_RUNTIME_TOKEN:?Set SANDBOX_RUNTIME_TOKEN in .env.production}
+    volumes:
+      - sandbox_workspaces:/app/.solvyn/workspaces
+    networks:
+      - default
+      - sandbox-control
     command: ["python", "-m", "solvyn.worker"]
     depends_on:
       migrate:
         condition: service_completed_successfully
       redis:
+        condition: service_healthy
+      sandbox:
         condition: service_healthy
       otel-collector:
         condition: service_started
