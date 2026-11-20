@@ -163,6 +163,8 @@ export interface ProactiveEventInfo {
   branch: string;
   details_url: string;
   status: string;
+  provider_state: "open" | "closed" | "merged" | null;
+  provider_updated_at: string | null;
   created_at: string | null;
 }
 
