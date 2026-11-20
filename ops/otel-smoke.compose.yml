@@ -8,7 +8,7 @@ services:
       - "127.0.0.1:3200:3200"
 
   otel-collector:
-    image: otel/opentelemetry-collector:0.165.1
+    image: otel/opentelemetry-collector:0.165.0
     command: ["--config=/etc/otelcol/config.yaml"]
     volumes:
       - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
