@@ -11,6 +11,22 @@ from solvyn.agents.schema import ExecutionGraph
 
 
 @pytest.mark.asyncio
+async def test_scheduler_finalizes_stale_cancellation_without_resuming_graph(monkeypatch: pytest.MonkeyPatch) -> None:
+    from solvyn.workflows import scheduler
+
+    execution_id, tenant_id = uuid.uuid4(), uuid.uuid4()
+    cancel = AsyncMock(return_value={"execution_id": str(execution_id), "status": "cancelled"})
+    resume = AsyncMock()
+    monkeypatch.setattr(scheduler.workflow_executor, "cancel", cancel)
+    monkeypatch.setattr(scheduler.workflow_executor, "resume", resume)
+
+    await scheduler._finalize_stale_workflow_cancellation(execution_id, tenant_id)
+
+    cancel.assert_awaited_once_with(execution_id, str(tenant_id))
+    resume.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_lost_lease_cancels_graph_execution(monkeypatch: pytest.MonkeyPatch) -> None:
     from solvyn.workflows.executor import WorkflowExecutor
 
