@@ -7,17 +7,26 @@ import hmac
 import json
 import unicodedata
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import func, select
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.api.v1._rbac import ANY_ROLE, OWNER_ADMIN, require_org_membership
 from solvyn.config import settings
-from solvyn.db.models import Organization, ProactiveEvent, Project, Repository, Tenant
+from solvyn.db.models import (
+    GitHubWorkItemState,
+    Organization,
+    ProactiveEvent,
+    ProactiveEventTransition,
+    Project,
+    Repository,
+    Tenant,
+)
 from solvyn.db.session import bind_tenant_scope, get_session
 from solvyn.proactive_dependabot import dependabot_alert_signal
 from solvyn.repositories.github import GitHubRepositoryError, validate_full_name
@@ -64,12 +73,15 @@ def _parse_workflow_failure(payload: Any) -> dict[str, str] | None:
     }
 
 
-def _parse_github_work_item(event_type: str, payload: Any) -> dict[str, str] | None:
-    """Turn an opened GitHub issue or pull request into bounded triage metadata."""
+def _parse_github_work_item(event_type: str, payload: Any) -> dict[str, Any] | None:
+    """Parse bounded lifecycle metadata from a signed issue/PR webhook."""
     if event_type not in {"issues", "pull_request"} or not isinstance(payload, dict):
         return None
     action = payload.get("action")
-    if not isinstance(action, str) or action not in {"opened", "reopened"}:
+    allowed_actions = {"opened", "edited", "closed", "reopened"}
+    if event_type == "pull_request":
+        allowed_actions.add("synchronize")
+    if not isinstance(action, str) or action not in allowed_actions:
         return None
     item_key = "issue" if event_type == "issues" else "pull_request"
     item_value = payload.get(item_key)
@@ -84,10 +96,25 @@ def _parse_github_work_item(event_type: str, payload: Any) -> dict[str, str] | N
         or isinstance(number, bool)
         or not isinstance(number, int)
         or number < 1
-        or (state is not None and state != "open")
+        or state not in {"open", "closed"}
         or (event_type == "issues" and "pull_request" in item)
     ):
         return None
+    if action in {"opened", "reopened", "synchronize"} and state != "open":
+        return None
+    if action == "closed" and state != "closed":
+        return None
+
+    updated_at_value = item.get("updated_at")
+    if not isinstance(updated_at_value, str):
+        return None
+    try:
+        provider_updated_at = datetime.fromisoformat(updated_at_value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if provider_updated_at.tzinfo is None or provider_updated_at.utcoffset() is None:
+        return None
+    provider_updated_at = provider_updated_at.astimezone(UTC)
 
     owner, repo = validate_full_name(full_name)
     owner_repo = f"{owner}/{repo}"
@@ -111,11 +138,23 @@ def _parse_github_work_item(event_type: str, payload: Any) -> dict[str, str] | N
         head = head_value if isinstance(head_value, dict) else {}
         branch = _bounded_text(head.get("ref"), limit=255)
 
+    merged = event_type == "pull_request" and item.get("merged") is True and state == "closed"
+    lifecycle_state = "merged" if merged else state
+    source_type = event_type
+    source_event_id = (
+        f"{signal_type}:{owner_repo.lower()}:{number}:{action}:"
+        f"{provider_updated_at.strftime('%Y%m%dT%H%M%S%fZ')}"
+    )
     return {
         "repository_name": owner_repo[:255],
-        "source_event_id": f"{signal_type}:{owner_repo.lower()}:{number}:{action}"[:320],
+        "repository_key": owner_repo.lower()[:255],
+        "source_event_id": source_event_id[:320],
+        "item_number": number,
+        "item_event_type": source_type,
+        "provider_updated_at": provider_updated_at,
+        "lifecycle_state": lifecycle_state,
         "workflow_name": title,
-        "conclusion": "open",
+        "conclusion": lifecycle_state,
         "branch": branch,
         "details_url": details_url[:512],
         "action": action,
@@ -130,324 +169,881 @@ def _bounded_text(value: Any, *, limit: int, fallback: str = "") -> str:
     return cleaned[:limit] if cleaned else fallback
 
 
-def _parse_security_alert(event_type: str, payload: Any) -> dict[str, str] | None:
-    if event_type not in {"dependabot_alert", "code_scanning_alert", "secret_scanning_alert"}:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    action = _bounded_text(payload.get("action"), limit=100)
-    alert_value = payload.get("alert")
-    alert = alert_value if isinstance(alert_value, dict) else {}
-    if not action or not alert:
-        return None
-    if event_type == "dependabot_alert":
-        repository_value = payload.get("repository")
-        repository = repository_value if isinstance(repository_value, dict) else {}
-        full_name = repository.get("full_name")
-        return dependabot_alert_signal(full_name, alert, action=action) if isinstance(full_name, str) else None
-    # Resolved alerts are not new work for the human triage inbox.
-    if action.lower() in {"fixed", "closed_by_user", "dismissed", "resolved", "resolved_by_user", "auto_dismissed"}:
-        return None
-    state = alert.get("state")
-    if isinstance(state, str) and state.lower() not in {"open", "reopened"}:
-        return None
-
-    repository_value = payload.get("repository")
-    repository = repository_value if isinstance(repository_value, dict) else {}
-    full_name = repository.get("full_name")
-    if not isinstance(full_name, str):
-        return None
-    owner, repo = validate_full_name(full_name)
-    owner_repo = f"{owner}/{repo}"
-
-    alert_id = alert.get("number", alert.get("id"))
-    if isinstance(alert_id, bool) or not isinstance(alert_id, int) or alert_id < 1:
-        return None
-
-    rule_value = alert.get("rule")
-    rule = rule_value if isinstance(rule_value, dict) else {}
-    advisory_value = alert.get("security_advisory")
-    advisory = advisory_value if isinstance(advisory_value, dict) else {}
-    vulnerability_value = advisory.get("vulnerabilities")
-    vulnerability = vulnerability_value[0] if isinstance(vulnerability_value, list) and vulnerability_value and isinstance(vulnerability_value[0], dict) else {}
-    package_value = vulnerability.get("package")
-    package = package_value if isinstance(package_value, dict) else {}
-    dependency_value = alert.get("dependency")
-    dependency = dependency_value if isinstance(dependency_value, dict) else {}
-    dependency_package_value = dependency.get("package")
-    dependency_package = dependency_package_value if isinstance(dependency_package_value, dict) else {}
-    security_vulnerability_value = advisory.get("severity")
-    severity = security_vulnerability_value if isinstance(security_vulnerability_value, str) else ""
-    if not severity:
-        severity = _bounded_text(alert.get("security_severity_level"), limit=50) or _bounded_text(rule.get("security_severity_level"), limit=50)
-    if not severity:
-        severity = _bounded_text(vulnerability.get("severity"), limit=50, fallback="unknown")
-
-    summary = (
-        _bounded_text(advisory.get("summary"), limit=255)
-        or _bounded_text(rule.get("description"), limit=255)
-        or _bounded_text(rule.get("name"), limit=255)
-        or _bounded_text(alert.get("secret_type_display_name"), limit=255)
-        or _bounded_text(package.get("name"), limit=255)
-        or _bounded_text(dependency_package.get("name"), limit=255)
-        or f"{event_type.replace('_', ' ').title()} #{alert_id}"
+def _parse_security_alert(eve…9761 tokens truncated…ctor_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    payload: Mapped[dict[str, object] | None] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"), nullable=True
     )
-    details_url = alert.get("html_url")
-    if not isinstance(details_url, str) or urlparse(details_url).hostname != "github.com" or urlparse(details_url).scheme != "https":
-        details_url = ""
-    branch = _bounded_text(alert.get("ref"), limit=255)
-    if branch.startswith("refs/heads/"):
-        branch = branch[len("refs/heads/") :]
-    return {
-        "repository_name": owner_repo[:255],
-        "source_event_id": f"{event_type}:{owner_repo.lower()}:{alert_id}:{action}"[:320],
-        "workflow_name": summary,
-        "conclusion": severity[:50],
-        "branch": branch,
-        "details_url": details_url[:512],
-        "action": action,
-    }
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
-def _event_dict(event: ProactiveEvent) -> dict[str, object]:
-    return {
-        "id": str(event.id),
-        "project_id": str(event.project_id),
-        "delivery_id": event.delivery_id,
-        "source_event_id": event.source_event_id,
-        "event_type": event.event_type,
-        "action": event.action,
-        "repository_name": event.repository_name,
-        "workflow_name": event.workflow_name,
-        "summary": event.workflow_name,
-        "conclusion": event.conclusion,
-        "severity": event.conclusion,
-        "branch": event.branch,
-        "details_url": event.details_url,
-        "status": event.status,
-        "created_at": event.created_at.isoformat() if event.created_at else None,
-    }
+class TaskWorkspace(Base):
+    """Server-managed isolated source tree owned by one tenant task."""
+
+    __tablename__ = "task_workspaces"
+    __table_args__ = (UniqueConstraint("tenant_id", "task_id", name="uq_task_workspace_owner"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    repository_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="SET NULL"), nullable=True, index=True)
+    source_commit_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_paths: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-@router.post("/webhooks/github", status_code=202, summary="Receive a signed GitHub CI failure event")
-async def receive_github_webhook(request: Request, db: AsyncSession = Depends(get_session)) -> dict[str, object]:
-    content_length = request.headers.get("content-length")
-    if content_length:
-        try:
-            if int(content_length) > _MAX_WEBHOOK_BYTES:
-                raise HTTPException(status_code=413, detail="GitHub webhook payload is too large")
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail="Invalid content length") from exc
-    body_buffer = bytearray()
-    async for chunk in request.stream():
-        if len(body_buffer) + len(chunk) > _MAX_WEBHOOK_BYTES:
-            raise HTTPException(status_code=413, detail="GitHub webhook payload is too large")
-        body_buffer.extend(chunk)
-    body = bytes(body_buffer)
-    if not _valid_signature(settings.github_webhook_secret, body, request.headers.get("x-hub-signature-256")):
-        raise HTTPException(status_code=401, detail="Invalid GitHub webhook signature")
+class TaskDelivery(Base):
+    """Durable state for one digest-approved GitHub delivery attempt."""
 
-    delivery_id = request.headers.get("x-github-delivery", "")
-    try:
-        normalized_delivery_id = str(uuid.UUID(delivery_id))
-    except (ValueError, AttributeError) as exc:
-        raise HTTPException(status_code=400, detail="Invalid GitHub delivery identifier") from exc
-
-    event_type = request.headers.get("x-github-event", "")
-    supported_event_types = {
-        "workflow_run",
-        "dependabot_alert",
-        "code_scanning_alert",
-        "secret_scanning_alert",
-        "issues",
-        "pull_request",
-    }
-    if event_type not in supported_event_types:
-        return {"accepted": True, "ignored": True, "reason": "unsupported_event"}
-    try:
-        payload = json.loads(body)
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise HTTPException(status_code=400, detail="Invalid GitHub webhook JSON") from exc
-    try:
-        if event_type == "workflow_run":
-            signal = _parse_workflow_failure(payload)
-        elif event_type in {"issues", "pull_request"}:
-            signal = _parse_github_work_item(event_type, payload)
-        else:
-            signal = _parse_security_alert(event_type, payload)
-    except GitHubRepositoryError as exc:
-        raise HTTPException(status_code=400, detail=exc.message) from exc
-    if signal is None:
-        if event_type == "workflow_run":
-            reason = "not_a_failed_workflow_run"
-        elif event_type in {"issues", "pull_request"}:
-            reason = "not_an_open_github_work_item"
-        else:
-            reason = "not_an_open_security_alert"
-        return {"accepted": True, "ignored": True, "reason": reason}
-
-    active_tenants = (
-        await db.execute(select(Tenant.id).where(Tenant.is_active == True).order_by(Tenant.id))  # noqa: E712
-    ).scalars().all()
-    project_matches: list[tuple[uuid.UUID, uuid.UUID, uuid.UUID]] = []
-    for tenant_id in active_tenants:
-        await bind_tenant_scope(db, tenant_id)
-        tenant_matches = (
-            await db.execute(
-                select(Project.id, Project.organization_id, Organization.tenant_id)
-                .join(Repository, Repository.project_id == Project.id)
-                .join(Organization, Organization.id == Project.organization_id)
-                .where(
-                    Repository.provider == "github",
-                    Repository.is_active == True,  # noqa: E712
-                    Project.is_active == True,  # noqa: E712
-                    Organization.is_active == True,  # noqa: E712
-                    Project.tenant_id == tenant_id,
-                    # GitHub full names are case-insensitive; equality avoids LIKE wildcards.
-                    func.lower(Repository.full_name) == signal["repository_name"].lower(),
-                )
-                .limit(_MAX_PROJECT_MATCHES + 1)
-            )
-        ).all()
-        project_matches.extend((match[0], match[1], match[2]) for match in tenant_matches)
-        if len(project_matches) > _MAX_PROJECT_MATCHES:
-            raise HTTPException(status_code=413, detail="Repository is connected to too many projects for webhook fan-out")
-    if not project_matches:
-        return {"accepted": True, "ignored": True, "reason": "repository_not_connected"}
-
-    matches_by_tenant: dict[uuid.UUID, list[tuple[uuid.UUID, uuid.UUID]]] = {}
-    for project_id, organization_id, tenant_id in project_matches:
-        matches_by_tenant.setdefault(tenant_id, []).append((project_id, organization_id))
-
-    async def _record_events() -> tuple[list[tuple[uuid.UUID, ProactiveEvent]], int]:
-        events: list[tuple[uuid.UUID, ProactiveEvent]] = []
-        duplicates = 0
-        for tenant_id, matches in matches_by_tenant.items():
-            await bind_tenant_scope(db, tenant_id)
-            for project_id, organization_id in matches:
-                existing = (
-                    await db.execute(
-                        select(ProactiveEvent).where(
-                            ProactiveEvent.organization_id == organization_id,
-                            ProactiveEvent.project_id == project_id,
-                            (ProactiveEvent.delivery_id == normalized_delivery_id)
-                            | (ProactiveEvent.source_event_id == signal["source_event_id"]),
-                        )
-                    )
-                ).scalar_one_or_none()
-                if existing is not None:
-                    if (
-                        event_type == "dependabot_alert"
-                        and signal.get("action") == "reopened"
-                        and existing.status == "acknowledged"
-                        and existing.delivery_id != normalized_delivery_id
-                    ):
-                        # Reuse the stable alert row, but reopen human triage
-                        # once per distinct GitHub delivery. Recording that
-                        # delivery makes a replay idempotent even after a user
-                        # acknowledges the reopened alert.
-                        existing.delivery_id = normalized_delivery_id
-                        existing.event_type = event_type
-                        existing.action = "reopened"
-                        existing.repository_name = signal["repository_name"]
-                        existing.workflow_name = signal["workflow_name"]
-                        existing.conclusion = signal["conclusion"]
-                        existing.branch = signal["branch"]
-                        existing.details_url = signal["details_url"]
-                        existing.status = "pending"
-                    duplicates += 1
-                    events.append((tenant_id, existing))
-                    continue
-                event = ProactiveEvent(
-                    organization_id=organization_id,
-                    project_id=project_id,
-                    delivery_id=normalized_delivery_id,
-                    source_event_id=signal["source_event_id"],
-                    event_type=signal.get("event_type", event_type),
-                    action=signal.get("action", "completed"),
-                    repository_name=signal["repository_name"],
-                    workflow_name=signal["workflow_name"],
-                    conclusion=signal["conclusion"],
-                    branch=signal["branch"],
-                    details_url=signal["details_url"],
-                    status="pending",
-                )
-                db.add(event)
-                events.append((tenant_id, event))
-            # Flush each tenant's inserts while its transaction-local RLS scope is active.
-            await db.flush()
-        return events, duplicates
-
-    try:
-        events, duplicate_count = await _record_events()
-        await db.commit()
-    except IntegrityError:
-        await db.rollback()
-        # Rebuild the fan-out after a unique-key race. The failed transaction
-        # may have rolled back other projects' rows, so retry every missing one.
-        for attempt in range(3):
-            try:
-                events, duplicate_count = await _record_events()
-                await db.commit()
-                break
-            except IntegrityError:
-                await db.rollback()
-        else:
-            raise HTTPException(status_code=503, detail="GitHub delivery could not be recorded; retry the webhook")
-    for event in events:
-        await bind_tenant_scope(db, event[0])
-        await db.refresh(event[1])
-    return {
-        "accepted": True,
-        "ignored": False,
-        "created_count": max(0, len(events) - duplicate_count),
-        "duplicate_count": duplicate_count,
-        "event_ids": [str(event.id) for _, event in events],
-    }
-
-
-@router.get("/organizations/{organization_id}/proactive-events", summary="List verified proactive events")
-async def list_proactive_events(
-    organization_id: uuid.UUID,
-    limit: int = 50,
-    db: AsyncSession = Depends(get_session),
-) -> dict[str, object]:
-    membership = await require_org_membership(db, organization_id, roles=ANY_ROLE)
-    if not 1 <= limit <= 100:
-        raise HTTPException(status_code=422, detail="Limit must be between 1 and 100")
-    result = await db.execute(
-        select(ProactiveEvent)
-        .where(ProactiveEvent.organization_id == organization_id)
-        .order_by(ProactiveEvent.created_at.desc())
-        .limit(limit)
+    __tablename__ = "task_deliveries"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "task_id", "diff_digest", name="uq_task_delivery_digest"),
+        CheckConstraint(
+            "status IN ('starting', 'branch_created', 'committed', 'pull_request_open', 'unknown')",
+            name="ck_task_deliveries_status",
+        ),
     )
-    items = [_event_dict(event) for event in result.scalars().all()]
-    return {
-        "events": items,
-        "count": len(items),
-        "content_trust": "untrusted_github_event",
-        "can_manage": membership.role in OWNER_ADMIN,
-    }
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("task_workspaces.id", ondelete="CASCADE"), nullable=False, index=True)
+    repository_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_commit_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    base_branch: Mapped[str] = mapped_column(String(255), nullable=False)
+    diff_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
+    branch_name: Mapped[str] = mapped_column(String(240), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="starting", server_default="starting")
+    branch_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    commit_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    pull_request_title: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    pull_request_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pull_request_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
-@router.post("/organizations/{organization_id}/proactive-events/{event_id}/acknowledge")
-async def acknowledge_proactive_event(
-    organization_id: uuid.UUID,
-    event_id: uuid.UUID,
-    db: AsyncSession = Depends(get_session),
-) -> dict[str, object]:
-    await require_org_membership(db, organization_id, roles=OWNER_ADMIN)
-    event = (
-        await db.execute(
-            select(ProactiveEvent).where(
-                ProactiveEvent.id == event_id,
-                ProactiveEvent.organization_id == organization_id,
-            )
-        )
-    ).scalar_one_or_none()
-    if event is None:
-        raise HTTPException(status_code=404, detail="Proactive event not found")
-    event.status = "acknowledged"
-    await db.commit()
-    await db.refresh(event)
-    return _event_dict(event)
+class TeammateToolInvocation(Base):
+    """Durable metadata for one model-requested workspace tool call."""
+
+    __tablename__ = "teammate_tool_invocations"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running', 'succeeded', 'failed', 'denied')",
+            name="ck_teammate_tool_invocations_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("task_workspaces.id", ondelete="CASCADE"), nullable=False, index=True)
+    teammate_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("teammate_profiles.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    tool_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="running", server_default="running")
+    input_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    output_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class VerificationRun(Base):
+    """Durable, bounded output from a deterministic sandbox verification command."""
+
+    __tablename__ = "verification_runs"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_verification_runs_tenant_id_id"),
+        UniqueConstraint("tenant_id", "redriven_from_run_id", name="uq_verification_runs_redrive_source"),
+        UniqueConstraint(
+            "tenant_id",
+            "maintenance_schedule_id",
+            "maintenance_scheduled_for",
+            name="uq_verification_runs_maintenance_occurrence",
+        ),
+        ForeignKeyConstraint(
+            ("tenant_id", "redriven_from_run_id"),
+            ("verification_runs.tenant_id", "verification_runs.id"),
+            name="fk_verification_runs_redrive_same_tenant",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ("tenant_id", "maintenance_schedule_id"),
+            ("maintenance_schedules.tenant_id", "maintenance_schedules.id"),
+            name="fk_verification_runs_maintenance_same_tenant",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "(maintenance_schedule_id IS NULL) = (maintenance_scheduled_for IS NULL)",
+            name="ck_verification_runs_maintenance_occurrence_pair",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    execution_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("execution_graphs.id", ondelete="CASCADE"), nullable=True, index=True)
+    redriven_from_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    maintenance_schedule_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    maintenance_scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("task_workspaces.id", ondelete="CASCADE"), nullable=False)
+    kind: Mapped[str] = mapped_column(String(30), nullable=False)
+    command: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="running", server_default="running")
+    required_for_completion: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    timed_out: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    output_truncated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    stdout: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default=text("''"))
+    stderr: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default=text("''"))
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_seconds: Mapped[float | None] = mapped_column(Numeric(10, 3), nullable=True)
+    runner_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    attempt_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_owner: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class VerificationAttemptEvent(Base):
+    """Append-only start and outcome evidence for one verification attempt."""
+
+    __tablename__ = "verification_attempt_events"
+    __table_args__ = (
+        CheckConstraint("attempt_number >= 0", name="ck_verification_attempt_events_attempt_number"),
+        CheckConstraint(
+            "event_type IN ('started', 'finished', 'snapshot')",
+            name="ck_verification_attempt_events_type",
+        ),
+        Index(
+            "ix_verification_attempt_events_tenant_task_time",
+            "tenant_id",
+            "task_id",
+            "occurred_at",
+            "id",
+        ),
+        Index(
+            "ix_verification_attempt_events_run_attempt",
+            "verification_run_id",
+            "attempt_number",
+            "occurred_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    verification_run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    verification_kind: Mapped[str] = mapped_column(String(30), nullable=False)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    timed_out: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    output_truncated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    stdout: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default=text("''"))
+    stderr: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default=text("''"))
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_seconds: Mapped[float | None] = mapped_column(Numeric(10, 3), nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class TaskAcceptanceCriterion(Base):
+    """Human-reviewable acceptance criterion for one tenant-scoped task."""
+
+    __tablename__ = "task_acceptance_criteria"
+    __table_args__ = (
+        CheckConstraint("status IN ('pending', 'accepted', 'rejected')", name="ck_task_acceptance_criteria_status"),
+        ForeignKeyConstraint(
+            ("tenant_id", "task_id"),
+            ("tasks.tenant_id", "tasks.id"),
+            name="fk_tac_same_tenant_task",
+            ondelete="CASCADE",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", server_default="pending")
+    reviewer_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    reviewer_organization_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True
+    )
+    decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    decision_workspace_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class TaskDependency(Base):
+    """Durable dependency edge between task records."""
+
+    __tablename__ = "task_dependencies"
+    __table_args__ = (UniqueConstraint("task_id", "depends_on_task_id", name="uq_task_dependency_edge"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
+    task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    depends_on_task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class TaskHandoff(Base):
+    """Auditable request/result record for a teammate delegation."""
+
+    __tablename__ = "task_handoffs"
+    __table_args__ = (
+        UniqueConstraint("child_task_id", name="uq_task_handoff_child"),
+        UniqueConstraint("tenant_id", "parent_task_id", "idempotency_key", name="uq_task_handoff_idempotency"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
+    parent_task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    child_task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False)
+    idempotency_key: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    requires_approval: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    teammate_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("teammate_profiles.id"), nullable=False, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False, index=True)
+    delegated_from: Mapped[str] = mapped_column(String(100), nullable=False)
+    delegated_to: Mapped[str] = mapped_column(String(100), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    input_data: Mapped[str] = mapped_column(Text, nullable=False)
+    output_data: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(50), default="pending")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lease_owner: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ExecutionGraph(Base):
+    __tablename__ = "execution_graphs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("sessions.id"), nullable=False, index=True)
+    graph_data: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(50), default="running")
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    lease_owner: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    session: Mapped["Session"] = relationship(back_populates="execution_graphs")
+
+
+class TokenUsage(Base):
+    __tablename__ = "token_usage"
+    __table_args__ = (
+        Index("ix_token_usage_tenant_task_created_at", "tenant_id", "task_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
+    session_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("sessions.id"), nullable=True)
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=True
+    )
+    agent_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    model: Mapped[str] = mapped_column(String(100), nullable=False)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cost: Mapped[float] = mapped_column(Numeric(12, 6), default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ApiKey(Base):
+    """Per-tenant API key.
+
+    Only the SHA-256 hash of the key is stored. The plaintext key is shown to
+    the user exactly once at creation time. A short prefix (first 12 chars)
+    is kept for display/identification in the admin UI. Revoked keys are
+    kept (soft revoke) so audit trails remain intact.
+    """
+
+    __tablename__ = "api_keys"
+    # P0-003 (now db-enforced): key lookups hit the unique index instead of a full-table scan.
+    __table_args__ = (UniqueConstraint("key_hash", name="uq_api_keys_key_hash"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    key_hash: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    key_prefix: Mapped[str] = mapped_column(String(12), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 — Product foundation (feature/product-foundation)
+#
+# Identity chain: User → Organization → Membership → Workspace/Project.
+# Tenant remains the isolation boundary for all existing tables; new tables
+# are additionally scoped by organization_id / project_id.
+#
+# Permission levels (enforced by the tool gateway, never by prompts):
+#   READ_ONLY → PROPOSE_CHANGES → MODIFY_FILES → EXECUTE_COMMANDS →
+#   CREATE_BRANCH → CREATE_PULL_REQUEST → MERGE_PULL_REQUEST → DEPLOY
+# ---------------------------------------------------------------------------
+
+
+class PermissionLevel(StrEnum):
+    READ_ONLY = "READ_ONLY"
+    PROPOSE_CHANGES = "PROPOSE_CHANGES"
+    MODIFY_FILES = "MODIFY_FILES"
+    EXECUTE_COMMANDS = "EXECUTE_COMMANDS"
+    CREATE_BRANCH = "CREATE_BRANCH"
+    CREATE_PULL_REQUEST = "CREATE_PULL_REQUEST"
+    MERGE_PULL_REQUEST = "MERGE_PULL_REQUEST"
+    DEPLOY = "DEPLOY"
+
+
+class OrgRole(StrEnum):
+    OWNER = "owner"
+    ADMIN = "admin"
+    MEMBER = "member"
+    VIEWER = "viewer"
+
+
+class TeammateRole(StrEnum):
+    TECH_LEAD = "Tech Lead"
+    SOFTWARE_ENGINEER = "Software Engineer"
+    QA_ENGINEER = "QA Engineer"
+    SECURITY_ENGINEER = "Security Engineer"
+
+
+class TeammateStatus(StrEnum):
+    ACTIVE = "active"
+    IDLE = "idle"
+    BUSY = "busy"
+    PAUSED = "paused"
+    DISABLED = "disabled"
+
+
+class KnowledgeCategory(StrEnum):
+    ARCHITECTURE = "architecture"
+    CONVENTION = "convention"
+    API_STANDARD = "api_standard"
+    DB_CONVENTION = "db_convention"
+    TECH_CHOICE = "tech_choice"
+    TECHNICAL_DEBT = "technical_debt"
+    PROJECT_INSTRUCTION = "project_instruction"
+    DEPENDENCY = "dependency"
+    DECISION = "decision"
+
+
+class ApprovalStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+    CONSUMED = "consumed"
+    STALE = "stale"
+
+
+class ApprovalKind(StrEnum):
+    PLAN = "plan"
+    COMMAND = "command"
+    FILE_CHANGE = "file_change"
+    PULL_REQUEST = "pull_request"
+    MERGE = "merge"
+    DEPLOY = "deploy"
+    VERIFICATION_RUN = "verification_run"
+
+
+class User(Base):
+    """A human account. Passwords are Argon2id hashes (pwdlib)."""
+
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), default="")
+    is_active: Mapped[bool] = mapped_column(default=True)
+    is_superuser: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    memberships: Mapped[list["OrganizationMembership"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+
+
+class RefreshToken(Base):
+    """Hashed refresh tokens. Rotated on every use; plaintext never stored."""
+
+    __tablename__ = "refresh_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    token_hash: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    replaced_by_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("refresh_tokens.id"), nullable=True)
+
+    user: Mapped["User"] = relationship()
+
+
+class Organization(Base):
+    """Billing/isolation unit above projects. Maps onto Tenant during migration."""
+
+    __tablename__ = "organizations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    slug: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True
+    )
+    is_active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    memberships: Mapped[list["OrganizationMembership"]] = relationship(back_populates="organization", cascade="all, delete-orphan")
+    workspaces: Mapped[list["Workspace"]] = relationship(back_populates="organization", cascade="all, delete-orphan")
+    projects: Mapped[list["Project"]] = relationship(back_populates="organization", cascade="all, delete-orphan")
+
+
+class OrganizationMembership(Base):
+    __tablename__ = "organization_memberships"
+    __table_args__ = (UniqueConstraint("user_id", "organization_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(50), default=OrgRole.MEMBER)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    user: Mapped["User"] = relationship(back_populates="memberships")
+    organization: Mapped["Organization"] = relationship(back_populates="memberships")
+
+
+class Workspace(Base):
+    """A grouping of projects owned by an organization."""
+
+    __tablename__ = "workspaces"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    slug: Mapped[str] = mapped_column(String(100), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    organization: Mapped["Organization"] = relationship(back_populates="workspaces")
+    projects: Mapped[list["Project"]] = relationship(back_populates="workspace", cascade="all, delete-orphan")
+
+
+class Project(Base):
+    """A software project. Connects to one or more repositories (Phase 2)."""
+
+    __tablename__ = "projects"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True)
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("workspaces.id"), nullable=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    slug: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="")
+    instructions: Mapped[str] = mapped_column(Text, default="")
+    is_active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (UniqueConstraint("organization_id", "slug"),)
+
+    organization: Mapped["Organization"] = relationship(back_populates="projects")
+    workspace: Mapped["Workspace | None"] = relationship(back_populates="projects")
+
+
+class ProjectMembership(Base):
+    """Per-project access; complements org membership for scoped projects."""
+
+    __tablename__ = "project_memberships"
+    __table_args__ = (UniqueConstraint("user_id", "project_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(50), default=OrgRole.MEMBER)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Integration(Base):
+    """External integration connection; sensitive credentials live separately."""
+
+    __tablename__ = "integrations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)  # github, gitlab, ...
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)  # device id / app id
+    name: Mapped[str] = mapped_column(String(255), default="")
+    is_active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (UniqueConstraint("organization_id", "provider", "external_id"),)
+
+
+class IntegrationCredential(Base):
+    """Encrypted integration credentials; plaintext is only present in process memory."""
+
+    __tablename__ = "integration_credentials"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    integration_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("integrations.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    account_login: Mapped[str] = mapped_column(String(255), nullable=False)
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class ProactiveEvent(Base):
+    """Verified external engineering signals queued for human triage."""
+
+    __tablename__ = "proactive_events"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "project_id", "delivery_id", name="uq_proactive_events_project_delivery"),
+        UniqueConstraint("organization_id", "project_id", "source_event_id", name="uq_proactive_events_project_source_event"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False, index=True)
+    delivery_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_event_id: Mapped[str] = mapped_column(String(320), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    action: Mapped[str] = mapped_column(String(100), nullable=False)
+    repository_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    workflow_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    conclusion: Mapped[str] = mapped_column(String(50), nullable=False)
+    branch: Mapped[str] = mapped_column(String(255), default="")
+    details_url: Mapped[str] = mapped_column(String(512), default="")
+    status: Mapped[str] = mapped_column(String(50), default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GitHubWorkItemState(Base):
+    """Latest sanitized GitHub lifecycle state for a connected issue or PR."""
+
+    __tablename__ = "github_work_item_states"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id", "project_id", "event_type", "repository_key", "item_number",
+            name="uq_github_work_item_states_identity",
+        ),
+        CheckConstraint("event_type IN ('issues', 'pull_request')", name="ck_github_work_item_states_type"),
+        CheckConstraint("lifecycle_state IN ('open', 'closed', 'merged')", name="ck_github_work_item_states_state"),
+        CheckConstraint("item_number > 0", name="ck_github_work_item_states_number"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    repository_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    repository_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    item_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    lifecycle_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    branch: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    details_url: Mapped[str] = mapped_column(String(512), default="", nullable=False)
+    provider_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_delivery_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class ProactiveEventTransition(Base):
+    """Sanitized immutable webhook history for GitHub issue/PR lifecycle changes."""
+
+    __tablename__ = "proactive_event_transitions"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "project_id", "delivery_id", name="uq_proactive_event_transitions_delivery"),
+        CheckConstraint("event_type IN ('issues', 'pull_request')", name="ck_proactive_event_transitions_type"),
+        CheckConstraint("lifecycle_state IN ('open', 'closed', 'merged')", name="ck_proactive_event_transitions_state"),
+        CheckConstraint("item_number > 0", name="ck_proactive_event_transitions_number"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False)
+    delivery_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    action: Mapped[str] = mapped_column(String(20), nullable=False)
+    repository_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    repository_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    item_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    lifecycle_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    branch: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    details_url: Mapped[str] = mapped_column(String(512), default="", nullable=False)
+    provider_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    applied_to_current: Mapped[bool] = mapped_column(default=False, nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class MaintenanceSchedule(Base):
+    """Bounded recurring maintenance triggers that queue human-review events."""
+
+    __tablename__ = "maintenance_schedules"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_maintenance_schedules_tenant_id_id"),
+        ForeignKeyConstraint(
+            ("tenant_id", "task_id"),
+            ("tasks.tenant_id", "tasks.id"),
+            name="fk_maintenance_schedules_task_same_tenant",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "maintenance_type IN ('code_quality', 'dependency_review', 'documentation_review')",
+            name="ck_maintenance_schedules_type",
+        ),
+        CheckConstraint(
+            "verification_kind IN ('test', 'build', 'lint', 'typecheck', 'security', 'documentation')",
+            name="ck_maintenance_schedules_verification_kind",
+        ),
+        CheckConstraint("interval_days BETWEEN 1 AND 30", name="ck_maintenance_schedules_interval"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False, index=True)
+    task_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    maintenance_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    verification_kind: Mapped[str] = mapped_column(String(32), default="lint", server_default="lint", nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    interval_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    next_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class VerificationQueueControl(Base):
+    """Persistent organization-level pause state for new verification claims."""
+
+    __tablename__ = "verification_queue_controls"
+    __table_args__ = (
+        CheckConstraint("max_concurrent_runs BETWEEN 1 AND 5", name="ck_verification_queue_controls_concurrency"),
+        CheckConstraint("max_runs_per_hour BETWEEN 1 AND 120", name="ck_verification_queue_controls_hourly_rate"),
+    )
+
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), primary_key=True
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    paused: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
+    max_concurrent_runs: Mapped[int] = mapped_column(Integer, default=2, server_default=text("2"), nullable=False)
+    max_runs_per_hour: Mapped[int] = mapped_column(Integer, default=30, server_default=text("30"), nullable=False)
+    updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class WorkflowWorkerHeartbeat(Base):
+    """Latest liveness record for one scheduler worker process."""
+
+    __tablename__ = "workflow_worker_heartbeats"
+
+    worker_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    worker_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    host_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+
+class Repository(Base):
+    """A connected git repository; tokens live in encrypted integration storage."""
+
+    __tablename__ = "repositories"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False, index=True)
+    integration_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("integrations.id"), nullable=True)
+    full_name: Mapped[str] = mapped_column(String(255), nullable=False)  # owner/repo
+    provider: Mapped[str] = mapped_column(String(50), default="github")
+    default_branch: Mapped[str] = mapped_column(String(255), default="main")
+    url: Mapped[str] = mapped_column(String(512), default="")
+    is_active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (UniqueConstraint("project_id", "full_name"),)
+
+
+class TeammateProfile(Base):
+    """Persistent AI teammate. Replaces ephemeral AgentInstance for new code."""
+
+    __tablename__ = "teammate_profiles"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(100), nullable=False)  # TeammateRole value
+    description: Mapped[str] = mapped_column(Text, default="")
+    responsibilities: Mapped[str] = mapped_column(Text, default="")
+    system_instructions: Mapped[str] = mapped_column(Text, default="")
+    agent_type: Mapped[str] = mapped_column(String(100), nullable=False)  # registry key
+    is_enabled: Mapped[bool] = mapped_column(default=True)
+    status: Mapped[str] = mapped_column(String(50), default=TeammateStatus.IDLE)
+    model_provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    max_tokens_per_run: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_run_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    permissions: Mapped[list["TeammatePermission"]] = relationship(back_populates="teammate", cascade="all, delete-orphan")
+    project_assignments: Mapped[list["TeammateProjectAssignment"]] = relationship(back_populates="teammate", cascade="all, delete-orphan")
+
+
+class TeammatePermission(Base):
+    """Least-privilege grants. Checked by the tool gateway, not by prompts."""
+
+    __tablename__ = "teammate_permissions"
+    __table_args__ = (UniqueConstraint("teammate_id", "permission"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    teammate_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("teammate_profiles.id"), nullable=False, index=True)
+    permission: Mapped[str] = mapped_column(String(50), nullable=False)  # PermissionLevel value
+    granted: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    teammate: Mapped["TeammateProfile"] = relationship(back_populates="permissions")
+
+
+class TeammateProjectAssignment(Base):
+    __tablename__ = "teammate_project_assignments"
+    __table_args__ = (UniqueConstraint("teammate_id", "project_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    teammate_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("teammate_profiles.id"), nullable=False, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    teammate: Mapped["TeammateProfile"] = relationship(back_populates="project_assignments")
+
+
+class TeammateConversation(Base):
+    """Durable conversation bound to one teammate and assigned project."""
+
+    __tablename__ = "teammate_conversations"
+    __table_args__ = (
+        UniqueConstraint("session_id"),
+        UniqueConstraint("tenant_id", "root_task_id", name="uq_teammate_conversations_root_task"),
+        ForeignKeyConstraint(
+            ("tenant_id", "root_task_id"),
+            ("tasks.tenant_id", "tasks.id"),
+            name="fk_teammate_conversations_root_task_same_tenant",
+        ),
+        Index("ix_teammate_conversations_scope", "tenant_id", "teammate_id", "project_id", "updated_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True)
+    teammate_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("teammate_profiles.id"), nullable=False, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False, index=True)
+    session_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("sessions.id"), nullable=False, index=True)
+    root_task_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False, default="New conversation")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class TeammateMemory(Base):
+    """Durable notes scoped to one teammate and one assigned project."""
+
+    __tablename__ = "teammate_memory"
+    __table_args__ = (
+        UniqueConstraint("teammate_id", "project_id", "key", name="uq_teammate_memory_scope_key"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    teammate_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("teammate_profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    key: Mapped[str] = mapped_column(String(255), nullable=False)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class ProjectKnowledge(Base):
+    """Validated, scoped engineering knowledge. Never stores secrets.
+
+    Writes must pass schema validation + secret screening at the service layer.
+    """
+
+    __tablename__ = "project_knowledge"
+    __table_args__ = (UniqueConstraint("project_id", "category", "key"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False, index=True)
+    category: Mapped[str] = mapped_column(String(50), nullable=False)
+    key: Mapped[str] = mapped_column(String(255), nullable=False)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class Approval(Base):
+    """Human checkpoint: plan, command, file change, PR, merge, or deploy."""
+
+    __tablename__ = "approvals"
+    __table_args__ = (
+        UniqueConstraint("task_handoff_id", name="uq_approvals_task_handoff"),
+        UniqueConstraint("verification_run_id", name="uq_approvals_verification_run"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True)
+    project_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=True)
+    teammate_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("teammate_profiles.id"), nullable=True)
+    task_handoff_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("task_handoffs.id", ondelete="SET NULL"), nullable=True
+    )
+    verification_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("verification_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    kind: Mapped[str] = mapped_column(String(50), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON
+    status: Mapped[str] = mapped_column(String(50), default=ApprovalStatus.PENDING)
+    requested_by: Mapped[str] = mapped_column(String(255), default="")  # teammate name / user display
+    decided_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decision_note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
