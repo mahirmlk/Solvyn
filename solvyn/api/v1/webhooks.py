@@ -7,17 +7,26 @@ import hmac
 import json
 import unicodedata
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import func, select
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.api.v1._rbac import ANY_ROLE, OWNER_ADMIN, require_org_membership
 from solvyn.config import settings
-from solvyn.db.models import Organization, ProactiveEvent, Project, Repository, Tenant
+from solvyn.db.models import (
+    GitHubWorkItemState,
+    Organization,
+    ProactiveEvent,
+    ProactiveEventTransition,
+    Project,
+    Repository,
+    Tenant,
+)
 from solvyn.db.session import bind_tenant_scope, get_session
 from solvyn.proactive_dependabot import dependabot_alert_signal
 from solvyn.repositories.github import GitHubRepositoryError, validate_full_name
@@ -64,12 +73,15 @@ def _parse_workflow_failure(payload: Any) -> dict[str, str] | None:
     }
 
 
-def _parse_github_work_item(event_type: str, payload: Any) -> dict[str, str] | None:
-    """Turn an opened GitHub issue or pull request into bounded triage metadata."""
+def _parse_github_work_item(event_type: str, payload: Any) -> dict[str, Any] | None:
+    """Parse bounded lifecycle metadata from a signed issue/PR webhook."""
     if event_type not in {"issues", "pull_request"} or not isinstance(payload, dict):
         return None
     action = payload.get("action")
-    if not isinstance(action, str) or action not in {"opened", "reopened"}:
+    allowed_actions = {"opened", "edited", "closed", "reopened"}
+    if event_type == "pull_request":
+        allowed_actions.add("synchronize")
+    if not isinstance(action, str) or action not in allowed_actions:
         return None
     item_key = "issue" if event_type == "issues" else "pull_request"
     item_value = payload.get(item_key)
@@ -84,10 +96,25 @@ def _parse_github_work_item(event_type: str, payload: Any) -> dict[str, str] | N
         or isinstance(number, bool)
         or not isinstance(number, int)
         or number < 1
-        or (state is not None and state != "open")
+        or state not in {"open", "closed"}
         or (event_type == "issues" and "pull_request" in item)
     ):
         return None
+    if action in {"opened", "reopened", "synchronize"} and state != "open":
+        return None
+    if action == "closed" and state != "closed":
+        return None
+
+    updated_at_value = item.get("updated_at")
+    if not isinstance(updated_at_value, str):
+        return None
+    try:
+        provider_updated_at = datetime.fromisoformat(updated_at_value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if provider_updated_at.tzinfo is None or provider_updated_at.utcoffset() is None:
+        return None
+    provider_updated_at = provider_updated_at.astimezone(UTC)
 
     owner, repo = validate_full_name(full_name)
     owner_repo = f"{owner}/{repo}"
@@ -111,11 +138,23 @@ def _parse_github_work_item(event_type: str, payload: Any) -> dict[str, str] | N
         head = head_value if isinstance(head_value, dict) else {}
         branch = _bounded_text(head.get("ref"), limit=255)
 
+    merged = event_type == "pull_request" and item.get("merged") is True and state == "closed"
+    lifecycle_state = "merged" if merged else state
+    source_type = event_type
+    source_event_id = (
+        f"{signal_type}:{owner_repo.lower()}:{number}:{action}:"
+        f"{provider_updated_at.strftime('%Y%m%dT%H%M%S%fZ')}"
+    )
     return {
         "repository_name": owner_repo[:255],
-        "source_event_id": f"{signal_type}:{owner_repo.lower()}:{number}:{action}"[:320],
+        "repository_key": owner_repo.lower()[:255],
+        "source_event_id": source_event_id[:320],
+        "item_number": number,
+        "item_event_type": source_type,
+        "provider_updated_at": provider_updated_at,
+        "lifecycle_state": lifecycle_state,
         "workflow_name": title,
-        "conclusion": "open",
+        "conclusion": lifecycle_state,
         "branch": branch,
         "details_url": details_url[:512],
         "action": action,
@@ -225,8 +264,70 @@ def _event_dict(event: ProactiveEvent) -> dict[str, object]:
         "branch": event.branch,
         "details_url": event.details_url,
         "status": event.status,
+        "provider_state": None,
+        "provider_updated_at": None,
         "created_at": event.created_at.isoformat() if event.created_at else None,
     }
+
+
+def _work_item_identity(event: ProactiveEvent) -> tuple[uuid.UUID, str, str, int] | None:
+    """Recover the stable issue/PR identity from current and legacy signal IDs."""
+    parts = event.source_event_id.split(":")
+    if len(parts) < 4:
+        return None
+    event_type = "pull_request" if parts[0] == "dependabot_update" else parts[0]
+    if event_type not in {"issues", "pull_request"}:
+        return None
+    try:
+        item_number = int(parts[2])
+    except ValueError:
+        return None
+    if item_number < 1:
+        return None
+    return event.project_id, event_type, parts[1].lower(), item_number
+
+
+async def _work_item_state_for_events(
+    db: AsyncSession,
+    organization_id: uuid.UUID,
+    events: list[ProactiveEvent],
+) -> dict[tuple[uuid.UUID, str, str, int], GitHubWorkItemState]:
+    identities = {identity for event in events if (identity := _work_item_identity(event)) is not None}
+    if not identities:
+        return {}
+    result = await db.execute(
+        select(GitHubWorkItemState).where(
+            GitHubWorkItemState.organization_id == organization_id,
+            tuple_(
+                GitHubWorkItemState.project_id,
+                GitHubWorkItemState.event_type,
+                GitHubWorkItemState.repository_key,
+                GitHubWorkItemState.item_number,
+            ).in_(identities),
+        )
+    )
+    states = result.scalars().all()
+    return {
+        (state.project_id, state.event_type, state.repository_key, state.item_number): state
+        for state in states
+        if (state.project_id, state.event_type, state.repository_key, state.item_number) in identities
+    }
+
+
+def _event_dict_with_state(
+    event: ProactiveEvent,
+    states: dict[tuple[uuid.UUID, str, str, int], GitHubWorkItemState],
+) -> dict[str, object]:
+    result = _event_dict(event)
+    identity = _work_item_identity(event)
+    state = states.get(identity) if identity else None
+    if state is not None:
+        result["provider_state"] = state.lifecycle_state
+        result["provider_updated_at"] = state.provider_updated_at.isoformat()
+        result["summary"] = state.title
+        result["branch"] = state.branch
+        result["details_url"] = state.details_url
+    return result
 
 
 @router.post("/webhooks/github", status_code=202, summary="Receive a signed GitHub CI failure event")
@@ -319,12 +420,100 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
     for project_id, organization_id, tenant_id in project_matches:
         matches_by_tenant.setdefault(tenant_id, []).append((project_id, organization_id))
 
-    async def _record_events() -> tuple[list[tuple[uuid.UUID, ProactiveEvent]], int]:
+    async def _record_events() -> tuple[list[tuple[uuid.UUID, ProactiveEvent]], int, int]:
         events: list[tuple[uuid.UUID, ProactiveEvent]] = []
         duplicates = 0
+        processed_transitions = 0
         for tenant_id, matches in matches_by_tenant.items():
             await bind_tenant_scope(db, tenant_id)
             for project_id, organization_id in matches:
+                if event_type in {"issues", "pull_request"}:
+                    existing_transition = (
+                        await db.execute(
+                            select(ProactiveEventTransition.id).where(
+                                ProactiveEventTransition.organization_id == organization_id,
+                                ProactiveEventTransition.project_id == project_id,
+                                ProactiveEventTransition.delivery_id == normalized_delivery_id,
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if existing_transition is not None:
+                        duplicates += 1
+                        if signal["action"] in {"opened", "reopened"}:
+                            existing_signal = (
+                                await db.execute(
+                                    select(ProactiveEvent).where(
+                                        ProactiveEvent.organization_id == organization_id,
+                                        ProactiveEvent.project_id == project_id,
+                                        ProactiveEvent.delivery_id == normalized_delivery_id,
+                                    )
+                                )
+                            ).scalar_one_or_none()
+                            if existing_signal is not None:
+                                events.append((tenant_id, existing_signal))
+                        continue
+
+                    identity_filter = (
+                        GitHubWorkItemState.organization_id == organization_id,
+                        GitHubWorkItemState.project_id == project_id,
+                        GitHubWorkItemState.event_type == signal["item_event_type"],
+                        GitHubWorkItemState.repository_key == signal["repository_key"],
+                        GitHubWorkItemState.item_number == signal["item_number"],
+                    )
+                    state = (
+                        await db.execute(
+                            select(GitHubWorkItemState).where(*identity_filter).with_for_update()
+                        )
+                    ).scalar_one_or_none()
+                    applied_to_current = state is None
+                    if state is None:
+                        state = GitHubWorkItemState(
+                            organization_id=organization_id,
+                            project_id=project_id,
+                            event_type=signal["item_event_type"],
+                            repository_key=signal["repository_key"],
+                            repository_name=signal["repository_name"],
+                            item_number=signal["item_number"],
+                            title=signal["workflow_name"],
+                            lifecycle_state=signal["lifecycle_state"],
+                            branch=signal["branch"],
+                            details_url=signal["details_url"],
+                            provider_updated_at=signal["provider_updated_at"],
+                            last_delivery_id=normalized_delivery_id,
+                        )
+                        db.add(state)
+                    elif signal["provider_updated_at"] > state.provider_updated_at:
+                        state.repository_name = signal["repository_name"]
+                        state.title = signal["workflow_name"]
+                        state.lifecycle_state = signal["lifecycle_state"]
+                        state.branch = signal["branch"]
+                        state.details_url = signal["details_url"]
+                        state.provider_updated_at = signal["provider_updated_at"]
+                        state.last_delivery_id = normalized_delivery_id
+                        applied_to_current = True
+
+                    db.add(
+                        ProactiveEventTransition(
+                            organization_id=organization_id,
+                            project_id=project_id,
+                            delivery_id=normalized_delivery_id,
+                            event_type=signal["item_event_type"],
+                            action=signal["action"],
+                            repository_key=signal["repository_key"],
+                            repository_name=signal["repository_name"],
+                            item_number=signal["item_number"],
+                            title=signal["workflow_name"],
+                            lifecycle_state=signal["lifecycle_state"],
+                            branch=signal["branch"],
+                            details_url=signal["details_url"],
+                            provider_updated_at=signal["provider_updated_at"],
+                            applied_to_current=applied_to_current,
+                        )
+                    )
+                    processed_transitions += 1
+                    if signal["action"] not in {"opened", "reopened"} or not applied_to_current:
+                        continue
+
                 existing = (
                     await db.execute(
                         select(ProactiveEvent).where(
@@ -376,10 +565,10 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
                 events.append((tenant_id, event))
             # Flush each tenant's inserts while its transaction-local RLS scope is active.
             await db.flush()
-        return events, duplicates
+        return events, duplicates, processed_transitions
 
     try:
-        events, duplicate_count = await _record_events()
+        events, duplicate_count, processed_count = await _record_events()
         await db.commit()
     except IntegrityError:
         await db.rollback()
@@ -387,7 +576,7 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
         # may have rolled back other projects' rows, so retry every missing one.
         for attempt in range(3):
             try:
-                events, duplicate_count = await _record_events()
+                events, duplicate_count, processed_count = await _record_events()
                 await db.commit()
                 break
             except IntegrityError:
@@ -402,6 +591,7 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
         "ignored": False,
         "created_count": max(0, len(events) - duplicate_count),
         "duplicate_count": duplicate_count,
+        "processed_transition_count": processed_count,
         "event_ids": [str(event.id) for _, event in events],
     }
 
@@ -421,7 +611,9 @@ async def list_proactive_events(
         .order_by(ProactiveEvent.created_at.desc())
         .limit(limit)
     )
-    items = [_event_dict(event) for event in result.scalars().all()]
+    events = list(result.scalars().all())
+    states = await _work_item_state_for_events(db, organization_id, events)
+    items = [_event_dict_with_state(event, states) for event in events]
     return {
         "events": items,
         "count": len(items),
@@ -450,4 +642,5 @@ async def acknowledge_proactive_event(
     event.status = "acknowledged"
     await db.commit()
     await db.refresh(event)
-    return _event_dict(event)
+    states = await _work_item_state_for_events(db, organization_id, [event])
+    return _event_dict_with_state(event, states)
