@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.scan_secrets import _MAX_OUTPUT_BYTES, _bounded_chunk, _workspace_files
+from scripts.scan_secrets import _MAX_OUTPUT_BYTES, _bounded_chunk, _is_valid_command, _workspace_files
 
 
 def test_security_profile_is_a_fixed_redacted_gitleaks_command() -> None:
@@ -36,6 +36,20 @@ def test_security_profile_is_a_fixed_redacted_gitleaks_command() -> None:
 
     assert teammate_commands == api_commands
     assert teammate_commands["security"] == command
+
+
+def test_scanner_accepts_only_fixed_exit_code_arguments() -> None:
+    command = [
+        "gitleaks", "dir", "--config", "/opt/solvyn/gitleaks.toml",
+        "--gitleaks-ignore-path", "/opt/solvyn/gitleaks.ignore",
+        "--ignore-gitleaks-allow", "--redact=100", "--no-banner",
+        "--no-color", "--max-target-megabytes", "128", "--timeout", "90",
+        "--exit-code", "1", "/workspace",
+    ]
+
+    assert _is_valid_command(command)
+    command[-2] = "2"
+    assert not _is_valid_command(command)
 
 
 def test_scanner_fails_closed_on_file_over_size_limit(tmp_path: Path) -> None:
