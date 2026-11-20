@@ -58,7 +58,7 @@ async def test_secret_scanner_passes_clean_workspace_and_redacts_findings(tmp_pa
     manager.write_file(
         workspace,
         ".gitleaks.toml",
-        b'title = "workspace override"\n[allowlist]\nregexes = [" .* "]\n',
+        b'title = "workspace override"\n[allowlist]\nregexes = [".*"]\n',
     )
     manager.write_file(workspace, ".gitleaksignore", b"*\n")
 
