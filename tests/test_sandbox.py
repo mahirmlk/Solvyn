@@ -285,6 +285,7 @@ async def test_runner_applies_container_policy_and_returns_workspace_changes(tmp
     assert calls[3] == ["exec", "--user", "0", "a" * 64, "chmod", "-R", "a+rwX", "/workspace"]
     assert calls[4] == ["exec", "a" * 64, "python", "-c", "print('safe')"]
     assert calls[5] == ["exec", "-i", "a" * 64, "tar", "-c", "-C", "/workspace", "."]
+    assert not any(call[0] == "cp" for call in calls)
     assert calls[-1][:2] == ["rm", "--force"]
     assert calls[-1][2].startswith("solvyn-sandbox-")
 
@@ -402,27 +403,26 @@ def _fake_docker(
         "    print('a' * 64)\n"
         "elif args[0] == 'rm':\n"
         f"    {fail_rm}\n"
-        "elif args[0] == 'exec' and 'tar' in args:\n"
-        "    if '-x' in args:\n"
-        "        data = sys.stdin.buffer.read()\n"
-        "        with tarfile.open(fileobj=io.BytesIO(data), mode='r:') as archive:\n"
-        "            assert archive.getnames() == ['src/main.py']\n"
-        "            assert archive.extractfile('src/main.py').read() == b'before'\n"
-        "    else:\n"
-        "        data = io.BytesIO()\n"
-        "        with tarfile.open(fileobj=data, mode='w') as archive:\n"
-        "            payload = b'after'\n"
-        "            item = tarfile.TarInfo('./src/main.py')\n"
-        "            item.size = len(payload)\n"
-        "            archive.addfile(item, io.BytesIO(payload))\n"
-        "        sys.stdout.buffer.write(data.getvalue())\n"
-        "elif args[0] == 'exec' and 'chmod' in args:\n"
-        "    pass\n"
-        "elif args[0] == 'exec':\n"
-        "    if args[-1] == 'slow':\n"
-        f"        {slow}\n"
-        "    print('runner output')\n",
+        "elif args[0] == 'exec' and 'tar' in args:\\n"
+        "    if '-x' in args:\\n"
+        "        data = sys.stdin.buffer.read()\\n"
+        "        with tarfile.open(fileobj=io.BytesIO(data), mode='r:') as archive:\\n"
+        "            assert archive.getnames() == ['src/main.py']\\n"
+        "            assert archive.extractfile('src/main.py').read() == b'before'\\n"
+        "    else:\\n"
+        "        data = io.BytesIO()\\n"
+        "        with tarfile.open(fileobj=data, mode='w') as archive:\\n"
+        "            payload = b'after'\\n"
+        "            item = tarfile.TarInfo('./src/main.py')\\n"
+        "            item.size = len(payload)\\n"
+        "            archive.addfile(item, io.BytesIO(payload))\\n"
+        "        sys.stdout.buffer.write(data.getvalue())\\n"
+        "elif args[0] == 'exec' and 'chmod' in args:\\n"
+        "    pass\\n"
+        "elif args[0] == 'exec':\\n"
+        "    if args[-1] == 'slow':\\n"
+        f"        {slow}\\n"
+        "    print('runner output')\\n",
         encoding="utf-8",
     )
     return script_path, calls_file
-
