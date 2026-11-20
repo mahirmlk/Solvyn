@@ -12,6 +12,8 @@ PR #124 closes a race between handoff delivery and task completion/verification 
 
 PR #125 scopes observability trace APIs and WebSocket streams to the authenticated tenant. WebSocket setup resolves the URL tenant once and passes its canonical UUID into API-key validation, avoiding tenant-wide key lookup scans; the compatibility shared secret is restricted to the configured default tenant. Cross-tenant trace detail access returns 404. Independent security review found no actionable issue. Exact-head CI passed lint, backend tests, frontend dependency audit, and image build. Deployment jobs were skipped. CI emitted a non-failing notice that the workflow's Node.js 20 actions should be upgraded before GitHub removes the compatibility runtime.
 
+PR #126 adds PostgreSQL-backed HTTP onboarding coverage for registration/login, organization and workspace/project creation, teammate assignment, repository connection, and cross-tenant denial. The test uses the CI `solvyn_runtime` role and rolls back its outer transaction; only public GitHub repository metadata is mocked. Exact-head CI passed with 730 tests and 1 skipped, lint, frontend dependency audit, backup/restore smoke, and both image builds. Deployment jobs were skipped. This does not yet validate live GitHub access, model-driven task execution, sandbox isolation, or draft-PR delivery as one end-to-end journey.
+
 ## Phase 10: self-hosted deployment
 
 | Requirement | Status | Evidence / remaining work |
