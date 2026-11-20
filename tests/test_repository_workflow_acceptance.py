@@ -80,7 +80,7 @@ async def test_repository_task_runs_approved_tool_loop_in_docker_and_delivers_dr
     source_sha = "a" * 40
     tree_sha = "b" * 40
     original = "def health():\n    return {'status': 'ok'}\n"
-    test_source = "from src.health import health\n\n\ndef test_health_is_ok():\n    assert health() == {'status': 'ok'}\n"
+    test_source = "from src.health import health\n\n\ndef test_health_is_ready():\n    assert health() == {'status': 'ready'}\n"
     repository_files = {"src/health.py": original, "tests/test_health.py": test_source}
 
     async with async_session_factory() as db:
@@ -156,8 +156,25 @@ async def test_repository_task_runs_approved_tool_loop_in_docker_and_delivers_dr
         async def __aexit__(self, *_args: Any) -> None:
             return None
 
-        async def inspect(self, _full_name: str) -> dict[str, Any]:
-            return {"revision": source_sha, "default_branch": "main", "private": False}
+        async def inspect(self, _full_name: str, revision: str | None = None) -> dict[str, Any]:
+            assert revision in (None, source_sha)
+            return {
+                "revision": revision or source_sha,
+                "default_branch": "main",
+                "private": False,
+                "repository": {"description": "Acceptance fixture"},
+                "manifests": {},
+                "top_level_entries": ["src/", "tests/"],
+                "languages": {"Python": 100},
+            }
+
+        @staticmethod
+        def parse_dependencies(_manifests: dict[str, str]) -> dict[str, list[str]]:
+            return {}
+
+        @staticmethod
+        def detect_frameworks(_dependencies: dict[str, list[str]]) -> list[str]:
+            return []
 
         async def repository_metadata(self, _full_name: str) -> dict[str, Any]:
             return {"default_branch": "main", "private": False}
@@ -177,9 +194,11 @@ async def test_repository_task_runs_approved_tool_loop_in_docker_and_delivers_dr
                 for path, content in repository_files.items()
             ]
 
-        async def text_file(self, _full_name: str, _path: str, sha: str, *, max_bytes: int) -> str:
+        async def text_file(
+            self, _full_name: str, _path: str, sha: str, *, max_bytes: int | None = None
+        ) -> str:
             assert sha == source_sha
-            assert max_bytes > 0
+            assert max_bytes is None or max_bytes > 0
             return repository_files[_path]
 
     provider = FakeRepositoryProvider()
@@ -206,7 +225,7 @@ async def test_repository_task_runs_approved_tool_loop_in_docker_and_delivers_dr
             "workspace_write_file",
             {"path": "src/health.py", "content": "def health():\n    return {'status': 'ready'}\n"},
         ),
-        ("workspace_run_verification", {"kind": "lint"}),
+        ("workspace_run_verification", {"kind": "test"}),
     ]
     tool_cursor = 0
     generated: list[dict[str, Any]] = []
@@ -344,7 +363,9 @@ async def test_repository_task_runs_approved_tool_loop_in_docker_and_delivers_dr
         json={"note": "Owner approved the sandbox lint run."},
     )
     assert approved_verification.status_code == 200, approved_verification.text
-    due = await scheduler._fetch_due_verification_runs()
+    digest_before_test = workspace_manager.fingerprint(managed)
+    async with async_session_factory() as db:
+        due = await scheduler._fetch_due_verification_runs(db)
     assert (run_id, tenant_id) in due
     await scheduler._execute_due_verification(run_id, tenant_id)
 
@@ -359,6 +380,7 @@ async def test_repository_task_runs_approved_tool_loop_in_docker_and_delivers_dr
     )
     assert decision.status_code == 200, decision.text
     current_digest = workspace_manager.fingerprint(managed)
+    assert current_digest == digest_before_test, "Sandbox pytest artifacts must not change approved workspace content."
     assert decision.json()["decision_workspace_digest"] == current_digest
 
     runs = await client.get(
@@ -367,7 +389,7 @@ async def test_repository_task_runs_approved_tool_loop_in_docker_and_delivers_dr
     assert runs.status_code == 200, runs.text
     run_evidence = next(item for item in runs.json()["verification_runs"] if item["id"] == str(run_id))
     assert run_evidence["status"] == "passed", run_evidence
-    assert run_evidence["kind"] == "lint"
+    assert run_evidence["kind"] == "test"
     assert run_evidence["source_digest"] == current_digest
     task_rows = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
     child = next(row for row in task_rows.json()["tasks"] if row["task_id"] == str(child_task_id))
