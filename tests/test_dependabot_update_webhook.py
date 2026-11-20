@@ -13,7 +13,7 @@ from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.api.v1.webhooks import _parse_github_work_item, receive_github_webhook
-from solvyn.db.models import ProactiveEvent
+from solvyn.db.models import GitHubWorkItemState, ProactiveEvent, ProactiveEventTransition
 
 _SECRET = "dependabot-webhook-test-secret"
 
@@ -57,6 +57,7 @@ def _payload(*, login: str = "dependabot[bot]") -> dict[str, Any]:
         "pull_request": {
             "number": 123,
             "state": "open",
+            "updated_at": "2026-11-20T10:00:00Z",
             "title": "Bump fastapi from 0.114 to 0.115",
             "body": "This body is untrusted and must never be stored.",
             "html_url": "https://github.com/Octo/Repo/pull/123",
@@ -69,17 +70,20 @@ def _payload(*, login: str = "dependabot[bot]") -> dict[str, Any]:
 def test_dependabot_pull_request_is_classified_from_bounded_metadata_only() -> None:
     parsed = _parse_github_work_item("pull_request", _payload())
 
-    assert parsed == {
-        "repository_name": "Octo/Repo",
-        "source_event_id": "dependabot_update:octo/repo:123:opened",
-        "workflow_name": "Bump fastapi from 0.114 to 0.115",
-        "conclusion": "open",
-        "branch": "dependabot/pip/fastapi-0.115",
-        "details_url": "https://github.com/Octo/Repo/pull/123",
-        "action": "opened",
-        "event_type": "dependabot_update",
-    }
-    assert all("untrusted" not in value for value in parsed.values())
+    assert parsed is not None
+    assert parsed["repository_name"] == "Octo/Repo"
+    assert parsed["source_event_id"].startswith("dependabot_update:octo/repo:123:opened:")
+    assert parsed["repository_key"] == "octo/repo"
+    assert parsed["item_number"] == 123
+    assert parsed["item_event_type"] == "pull_request"
+    assert parsed["lifecycle_state"] == "open"
+    assert parsed["workflow_name"] == "Bump fastapi from 0.114 to 0.115"
+    assert parsed["conclusion"] == "open"
+    assert parsed["branch"] == "dependabot/pip/fastapi-0.115"
+    assert parsed["details_url"] == "https://github.com/Octo/Repo/pull/123"
+    assert parsed["action"] == "opened"
+    assert parsed["event_type"] == "dependabot_update"
+    assert all("untrusted" not in value for value in parsed.values() if isinstance(value, str))
 
 
 @pytest.mark.parametrize("login", ["dependabot", "dependabot[bot]evil", "octocat"])
@@ -87,7 +91,7 @@ def test_non_dependabot_pull_requests_keep_the_existing_event_type(login: str) -
     parsed = _parse_github_work_item("pull_request", _payload(login=login))
 
     assert parsed is not None
-    assert parsed["source_event_id"] == "pull_request:octo/repo:123:opened"
+    assert parsed["source_event_id"].startswith("pull_request:octo/repo:123:opened:")
     assert "event_type" not in parsed
 
 
@@ -99,8 +103,9 @@ async def test_signed_dependabot_update_signal_is_persisted_and_replay_deduplica
     class StubDB:
         def __init__(self) -> None:
             self.execute_count = 0
-            self.added: list[ProactiveEvent] = []
-            self.persisted: ProactiveEvent | None = None
+            self.added: list[Any] = []
+            self.persisted_event: ProactiveEvent | None = None
+            self.persisted_state: GitHubWorkItemState | None = None
 
         async def execute(self, _query: object) -> Any:
             self.execute_count += 1
@@ -108,15 +113,23 @@ async def test_signed_dependabot_update_signal_is_persisted_and_replay_deduplica
                 return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [tenant_id]))
             if self.execute_count == 2:
                 return SimpleNamespace(all=lambda: [(project_id, organization_id, tenant_id)])
-            return SimpleNamespace(scalar_one_or_none=lambda: self.persisted)
+            if self.execute_count == 4:
+                return SimpleNamespace(scalar_one_or_none=lambda: self.persisted_state)
+            if self.execute_count == 5:
+                return SimpleNamespace(scalar_one_or_none=lambda: self.persisted_event)
+            return SimpleNamespace(scalar_one_or_none=lambda: None)
 
-        def add(self, event: ProactiveEvent) -> None:
-            event.id = uuid.uuid4()
+        def add(self, event: Any) -> None:
+            if event.id is None:
+                event.id = uuid.uuid4()
             self.added.append(event)
+            if isinstance(event, ProactiveEvent):
+                self.persisted_event = event
+            elif isinstance(event, GitHubWorkItemState):
+                self.persisted_state = event
 
         async def commit(self) -> None:
-            if self.added:
-                self.persisted = self.added[-1]
+            return None
 
         async def flush(self) -> None:
             return None
@@ -136,11 +149,15 @@ async def test_signed_dependabot_update_signal_is_persisted_and_replay_deduplica
 
     assert first["created_count"] == 1
     assert replay["created_count"] == 0
-    assert replay["duplicate_count"] == 1
-    assert len(db.added) == 1
-    event = db.added[0]
+    assert replay["duplicate_count"] == 0
+    assert replay["processed_transition_count"] == 1
+    event = next(item for item in db.added if isinstance(item, ProactiveEvent))
+    assert len([item for item in db.added if isinstance(item, ProactiveEvent)]) == 1
+    transitions = [item for item in db.added if isinstance(item, ProactiveEventTransition)]
+    assert len(transitions) == 2
+    assert all(item.event_type == "pull_request" for item in transitions)
     assert event.event_type == "dependabot_update"
-    assert event.source_event_id == "dependabot_update:octo/repo:123:opened"
+    assert event.source_event_id.startswith("dependabot_update:octo/repo:123:opened:")
     assert event.workflow_name == "Bump fastapi from 0.114 to 0.115"
     assert event.branch == "dependabot/pip/fastapi-0.115"
     assert event.details_url == "https://github.com/Octo/Repo/pull/123"
