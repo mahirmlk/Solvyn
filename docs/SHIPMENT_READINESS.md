@@ -4,7 +4,7 @@ This status compares the repository with `UPDATE.md`, including its primary engi
 
 ## Latest CI verification
 
-PR #129's exact head passed lint and type checks, frontend audit, 747 tests (1 skipped), the PostgreSQL backup/restore smoke, and API/frontend image builds. The restore smoke confirmed tenant visibility and forced RLS on 40 tables after migration 0062. PR #128 also passed its exact-head CI (742 tests, 1 skipped). Docker Compose configuration validates locally, but Docker runtime validation was unavailable on this host. Staging and production deployment jobs were skipped, so these runs do not count as a controlled deployment or deployment-specific restore drill.
+PR #130's exact head passed lint and type checks, frontend audit, the Collector-to-Tempo trace smoke, 747 tests (1 skipped), the PostgreSQL backup/restore smoke, and API/frontend image builds. The restore smoke confirmed tenant visibility and forced RLS on 40 tables after migration 0062. PR #129 also passed its exact-head CI (747 tests, 1 skipped). Docker Compose configuration validates locally, and CI starts the isolated trace stack; full production Compose runtime and staging/production deployment jobs were not validated. These runs do not count as a controlled deployment or deployment-specific restore drill.
 
 ## Phase 10: self-hosted deployment
 
