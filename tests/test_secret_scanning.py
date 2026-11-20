@@ -39,8 +39,6 @@ def test_security_profile_is_a_fixed_redacted_gitleaks_command() -> None:
 @pytest.mark.asyncio
 @pytest.mark.e2e
 async def test_secret_scanner_passes_clean_workspace_and_redacts_findings(tmp_path: Path) -> None:
-    import json
-
     from solvyn.agents.workspace_tools import _DEFAULT_VERIFICATION_COMMANDS
     from solvyn.sandbox.runtime import DockerSandboxRunner
     from solvyn.sandbox.workspaces import WorkspaceManager
