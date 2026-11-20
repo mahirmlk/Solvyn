@@ -306,7 +306,12 @@ async def get_health_analytics() -> dict[str, Any]:
     # WebSockets cannot declare HTTP-style responses; the summary/description
     # are surfaced in the OpenAPI schema for discoverability only.
 )
-async def websocket_endpoint(websocket: WebSocket, tenant_id: str, session_id: str | None = None) -> None:
+async def websocket_endpoint(
+    websocket: WebSocket,
+    tenant_id: str,
+    session_id: str | None = None,
+    db: AsyncSession = Depends(get_session),
+) -> None:
     """Real-time observability event stream for a tenant.
 
     The WebSocket authenticates the same way the HTTP endpoints do — pass
@@ -322,24 +327,33 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, session_id: s
         await websocket.close(code=4001, reason="Unauthorized")
         return
 
+    requested_tenant = await _resolve_active_tenant(db, tenant_id)
+    if requested_tenant is None:
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
+    if tenant_context.tenant_id is not None and tenant_context.tenant_id != requested_tenant.id:
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
     # A WebSocket does not pass through the HTTP tenant middleware, so the
     # tenant in the URL is untrusted until it is tied to the supplied key.
     # The platform shared secret is a single-tenant compatibility credential;
     # it must never authorize a caller-selected tenant channel.
     if verify_api_key(api_key, settings.api_key_secret):
-        if tenant_context.tenant_id is not None or tenant_id != settings.default_tenant_id:
+        default_tenant = await _resolve_active_tenant(db, settings.default_tenant_id)
+        if default_tenant is None or default_tenant.id != requested_tenant.id:
             await websocket.close(code=4001, reason="Unauthorized")
             return
-        channel_tenant_id = tenant_id
+        channel_tenant_id = str(requested_tenant.id)
     else:
         from solvyn.multi_tenant.auth import _validate_tenant_api_key
 
-        expected_tenant_id = tenant_context.tenant_id
-        tenant = await _validate_tenant_api_key(api_key, expected_tenant_id=expected_tenant_id)
-        if tenant is None or tenant_id not in {str(tenant.id), tenant.slug}:
+        tenant = await _validate_tenant_api_key(api_key, expected_tenant_id=requested_tenant.id)
+        if tenant is None or tenant.id != requested_tenant.id:
             await websocket.close(code=4001, reason="Unauthorized")
             return
-        channel_tenant_id = str(tenant.id)
+        channel_tenant_id = str(requested_tenant.id)
 
     await ws_manager.connections.connect(websocket, channel_tenant_id, session_id)
     try:
