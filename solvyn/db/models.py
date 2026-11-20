@@ -818,6 +818,65 @@ class ProactiveEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class GitHubWorkItemState(Base):
+    """Latest sanitized GitHub lifecycle state for a connected issue or PR."""
+
+    __tablename__ = "github_work_item_states"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id", "project_id", "event_type", "repository_key", "item_number",
+            name="uq_github_work_item_states_identity",
+        ),
+        CheckConstraint("event_type IN ('issues', 'pull_request')", name="ck_github_work_item_states_type"),
+        CheckConstraint("lifecycle_state IN ('open', 'closed', 'merged')", name="ck_github_work_item_states_state"),
+        CheckConstraint("item_number > 0", name="ck_github_work_item_states_number"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    repository_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    repository_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    item_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    lifecycle_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    branch: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    details_url: Mapped[str] = mapped_column(String(512), default="", nullable=False)
+    provider_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_delivery_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class ProactiveEventTransition(Base):
+    """Sanitized immutable webhook history for GitHub issue/PR lifecycle changes."""
+
+    __tablename__ = "proactive_event_transitions"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "project_id", "delivery_id", name="uq_proactive_event_transitions_delivery"),
+        CheckConstraint("event_type IN ('issues', 'pull_request')", name="ck_proactive_event_transitions_type"),
+        CheckConstraint("lifecycle_state IN ('open', 'closed', 'merged')", name="ck_proactive_event_transitions_state"),
+        CheckConstraint("item_number > 0", name="ck_proactive_event_transitions_number"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False)
+    delivery_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    action: Mapped[str] = mapped_column(String(20), nullable=False)
+    repository_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    repository_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    item_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    lifecycle_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    branch: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    details_url: Mapped[str] = mapped_column(String(512), default="", nullable=False)
+    provider_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    applied_to_current: Mapped[bool] = mapped_column(default=False, nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class MaintenanceSchedule(Base):
     """Bounded recurring maintenance triggers that queue human-review events."""
 

@@ -6,8 +6,9 @@ import hashlib
 import hmac
 import json
 import uuid
+from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -25,7 +26,7 @@ from solvyn.api.v1.webhooks import (
     list_proactive_events,
     receive_github_webhook,
 )
-from solvyn.db.models import ProactiveEvent
+from solvyn.db.models import GitHubWorkItemState, ProactiveEvent, ProactiveEventTransition
 from solvyn.multi_tenant.auth import RateLimitMiddleware
 
 
@@ -90,6 +91,113 @@ async def test_proactive_event_listing_reports_acknowledgement_permission(role: 
     assert result["events"][0]["status"] == "pending"  # type: ignore[index]
 
 
+@pytest.mark.asyncio
+async def test_proactive_event_serialization_keeps_triage_and_github_state_separate() -> None:
+    organization_id = uuid.uuid4()
+    project_id = uuid.uuid4()
+    event = SimpleNamespace(
+        id=uuid.uuid4(),
+        project_id=project_id,
+        delivery_id=str(uuid.uuid4()),
+        source_event_id="issues:octo/repo:42:opened:20261120T100000000000Z",
+        event_type="issues",
+        action="opened",
+        repository_name="Octo/Repo",
+        workflow_name="Issue title",
+        conclusion="open",
+        branch="",
+        details_url="https://github.com/Octo/Repo/issues/42",
+        status="acknowledged",
+        created_at=None,
+    )
+    state = GitHubWorkItemState(
+        organization_id=organization_id,
+        project_id=project_id,
+        event_type="issues",
+        repository_key="octo/repo",
+        repository_name="Octo/Repo",
+        item_number=42,
+        title="Updated issue title",
+        lifecycle_state="closed",
+        branch="",
+        details_url=event.details_url,
+        provider_updated_at=datetime(2026, 11, 20, 11, tzinfo=UTC),
+        last_delivery_id=str(uuid.uuid4()),
+    )
+    db = AsyncMock()
+    db.execute.side_effect = [
+        SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [event])),
+        SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [state])),
+    ]
+    with patch(
+        "solvyn.api.v1.webhooks.require_org_membership",
+        new=AsyncMock(return_value=SimpleNamespace(role="member")),
+    ):
+        result = await list_proactive_events(organization_id, db=cast(AsyncSession, db))
+
+    listed = result["events"][0]  # type: ignore[index]
+    assert listed["status"] == "acknowledged"
+    assert listed["provider_state"] == "closed"
+    assert listed["conclusion"] == "closed"
+    assert listed["provider_updated_at"] == "2026-11-20T11:00:00+00:00"
+    assert listed["summary"] == "Updated issue title"
+
+
+@pytest.mark.asyncio
+async def test_proactive_event_state_lookup_keeps_same_item_isolated_by_project() -> None:
+    organization_id = uuid.uuid4()
+    project_a, project_b = uuid.uuid4(), uuid.uuid4()
+
+    def event(project_id: uuid.UUID) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=uuid.uuid4(),
+            project_id=project_id,
+            delivery_id=str(uuid.uuid4()),
+            source_event_id="issues:octo/repo:42:opened:20261120T100000000000Z",
+            event_type="issues",
+            action="opened",
+            repository_name="Octo/Repo",
+            workflow_name="Issue title",
+            conclusion="open",
+            branch="",
+            details_url="https://github.com/Octo/Repo/issues/42",
+            status="pending",
+            created_at=None,
+        )
+
+    event_a, event_b = event(project_a), event(project_b)
+    state_a = GitHubWorkItemState(
+        organization_id=organization_id, project_id=project_a, event_type="issues",
+        repository_key="octo/repo", repository_name="Octo/Repo", item_number=42,
+        title="Project A issue", lifecycle_state="closed", provider_updated_at=datetime(2026, 11, 20, 11, tzinfo=UTC),
+        last_delivery_id=str(uuid.uuid4()),
+    )
+    state_b = GitHubWorkItemState(
+        organization_id=organization_id, project_id=project_b, event_type="issues",
+        repository_key="octo/repo", repository_name="Octo/Repo", item_number=42,
+        title="Project B issue", lifecycle_state="merged", provider_updated_at=datetime(2026, 11, 20, 12, tzinfo=UTC),
+        last_delivery_id=str(uuid.uuid4()),
+    )
+    db = AsyncMock()
+    db.execute.side_effect = [
+        SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [event_a, event_b])),
+        SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [state_a, state_b])),
+    ]
+    with patch(
+        "solvyn.api.v1.webhooks.require_org_membership",
+        new=AsyncMock(return_value=SimpleNamespace(role="member")),
+    ):
+        result = await list_proactive_events(organization_id, db=cast(AsyncSession, db))
+
+    listed_by_project = {item["project_id"]: item for item in result["events"]}  # type: ignore[index]
+    assert listed_by_project[str(project_a)]["provider_state"] == "closed"
+    assert listed_by_project[str(project_a)]["conclusion"] == "closed"
+    assert listed_by_project[str(project_a)]["summary"] == "Project A issue"
+    assert listed_by_project[str(project_b)]["provider_state"] == "merged"
+    assert listed_by_project[str(project_b)]["conclusion"] == "merged"
+    assert listed_by_project[str(project_b)]["summary"] == "Project B issue"
+
+
 def _signature(secret: str, body: bytes) -> str:
     return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
@@ -142,6 +250,7 @@ def test_github_work_item_parser_keeps_only_bounded_safe_fields(
     item: dict[str, object] = {
         "number": number,
         "state": "open",
+        "updated_at": "2026-11-20T10:00:00Z",
         "title": "  Add safe behavior\u0000  ",
         "html_url": f"https://github.com/Octo/Repo/{'pull' if event_type == 'pull_request' else 'issues'}/{number}",
     }
@@ -152,19 +261,23 @@ def test_github_work_item_parser_keeps_only_bounded_safe_fields(
         {"action": "opened", "repository": {"full_name": "Octo/Repo"}, item_key: item},
     )
 
-    assert parsed == {
-        "repository_name": "Octo/Repo",
-        "source_event_id": f"{event_type}:octo/repo:{number}:opened",
-        "workflow_name": "Add safe behavior",
-        "conclusion": "open",
-        "branch": expected_branch,
-        "details_url": item["html_url"],
-        "action": "opened",
-    }
+    assert parsed is not None
+    assert parsed["repository_name"] == "Octo/Repo"
+    assert parsed["source_event_id"].startswith(f"{event_type}:octo/repo:{number}:opened:")
+    assert parsed["repository_key"] == "octo/repo"
+    assert parsed["item_number"] == number
+    assert parsed["item_event_type"] == event_type
+    assert parsed["provider_updated_at"].isoformat() == "2026-11-20T10:00:00+00:00"
+    assert parsed["lifecycle_state"] == "open"
+    assert parsed["workflow_name"] == "Add safe behavior"
+    assert parsed["conclusion"] == "open"
+    assert parsed["branch"] == expected_branch
+    assert parsed["details_url"] == item["html_url"]
+    assert parsed["action"] == "opened"
     assert _parse_github_work_item(
         event_type,
         {"action": "edited", "repository": {"full_name": "Octo/Repo"}, item_key: item},
-    ) is None
+    )["action"] == "edited"
     item["title"] = {"untrusted": "object"}
     item["number"] = True
     assert _parse_github_work_item(
@@ -181,6 +294,55 @@ def test_github_work_item_parser_keeps_only_bounded_safe_fields(
             event_type,
             {"action": "opened", "repository": {"full_name": "Octo/Repo"}, "issue": pull_request_issue},
         ) is None
+
+
+@pytest.mark.parametrize(
+    ("event_type", "action", "state", "merged", "expected_state"),
+    [
+        ("issues", "closed", "closed", None, "closed"),
+        ("issues", "reopened", "open", None, "open"),
+        ("pull_request", "closed", "closed", False, "closed"),
+        ("pull_request", "closed", "closed", True, "merged"),
+        ("pull_request", "synchronize", "open", False, "open"),
+    ],
+)
+def test_github_work_item_parser_maps_lifecycle_without_trusting_unrelated_fields(
+    event_type: str,
+    action: str,
+    state: str,
+    merged: bool | None,
+    expected_state: str,
+) -> None:
+    item_key = "issue" if event_type == "issues" else "pull_request"
+    item: dict[str, object] = {
+        "number": 41,
+        "state": state,
+        "updated_at": "2026-11-20T12:00:00Z",
+        "title": "Keep only safe metadata",
+        "html_url": f"https://github.com/Octo/Repo/{'issues' if event_type == 'issues' else 'pull'}/41",
+    }
+    if merged is not None:
+        item["merged"] = merged
+    parsed = _parse_github_work_item(
+        event_type,
+        {"action": action, "repository": {"full_name": "Octo/Repo"}, item_key: item},
+    )
+    assert parsed is not None
+    assert parsed["lifecycle_state"] == expected_state
+    assert parsed["action"] == action
+    assert "body" not in parsed
+
+
+def test_github_work_item_parser_rejects_missing_or_naive_provider_timestamp() -> None:
+    issue: dict[str, object] = {"number": 42, "state": "closed", "title": "Issue"}
+    payload = {
+        "action": "closed",
+        "repository": {"full_name": "Octo/Repo"},
+        "issue": issue,
+    }
+    assert _parse_github_work_item("issues", payload) is None
+    issue["updated_at"] = "2026-11-20T12:00:00"
+    assert _parse_github_work_item("issues", payload) is None
 
 
 def test_security_alert_parser_keeps_bounded_metadata_and_never_secret_values() -> None:
@@ -274,7 +436,7 @@ async def test_webhook_persists_one_triage_event_per_connected_project() -> None
     class StubDB:
         def __init__(self) -> None:
             self.execute_count = 0
-            self.added: list[ProactiveEvent] = []
+            self.added: list[Any] = []
 
         async def execute(self, _query: object) -> SimpleNamespace:
             self.execute_count += 1
@@ -345,7 +507,7 @@ async def test_signed_security_alert_is_persisted_without_secret_material() -> N
     class StubDB:
         def __init__(self) -> None:
             self.execute_count = 0
-            self.added: list[ProactiveEvent] = []
+            self.added: list[Any] = []
 
         async def execute(self, _query: object) -> SimpleNamespace:
             self.execute_count += 1
@@ -626,6 +788,7 @@ async def test_signed_github_work_item_is_persisted_as_triage_signal(
     item: dict[str, object] = {
         "number": number,
         "state": "open",
+        "updated_at": "2026-11-20T10:00:00Z",
         "title": "Review this change",
         "html_url": f"https://github.com/octo/repo/{'pull' if event_type == 'pull_request' else 'issues'}/{number}",
     }
@@ -638,7 +801,7 @@ async def test_signed_github_work_item_is_persisted_as_triage_signal(
     class StubDB:
         def __init__(self) -> None:
             self.execute_count = 0
-            self.added: list[ProactiveEvent] = []
+            self.added: list[Any] = []
 
         async def execute(self, _query: object) -> SimpleNamespace:
             self.execute_count += 1
@@ -649,7 +812,7 @@ async def test_signed_github_work_item_is_persisted_as_triage_signal(
                 return SimpleNamespace(all=lambda: [(uuid.uuid4(), uuid.uuid4(), self.tenant_id)])
             return SimpleNamespace(scalar_one_or_none=lambda: None)
 
-        def add(self, event: ProactiveEvent) -> None:
+        def add(self, event: Any) -> None:
             if event.id is None:
                 event.id = uuid.uuid4()
             self.added.append(event)
@@ -674,14 +837,133 @@ async def test_signed_github_work_item_is_persisted_as_triage_signal(
         )
 
     assert result["created_count"] == 1
-    assert len(stub_db.added) == 1
-    event = stub_db.added[0]
+    assert result["processed_transition_count"] == 1
+    event = next(item for item in stub_db.added if isinstance(item, ProactiveEvent))
+    transition = next(item for item in stub_db.added if isinstance(item, ProactiveEventTransition))
+    state = next(item for item in stub_db.added if isinstance(item, GitHubWorkItemState))
     assert event.event_type == event_type
     assert event.workflow_name == "Review this change"
-    assert event.source_event_id == f"{event_type}:octo/repo:{number}:opened"
+    assert event.source_event_id.startswith(f"{event_type}:octo/repo:{number}:opened:")
     assert event.status == "pending"
     assert event.conclusion == "open"
     assert event.details_url == item["html_url"]
+    assert state.lifecycle_state == "open"
+    assert state.provider_updated_at.isoformat() == "2026-11-20T10:00:00+00:00"
+    assert transition.action == "opened"
+    assert transition.applied_to_current is True
+
+
+@pytest.mark.asyncio
+async def test_github_work_item_lifecycle_history_is_idempotent_and_does_not_reset_triage() -> None:
+    tenant_id = uuid.uuid4()
+    project_id = uuid.uuid4()
+    organization_id = uuid.uuid4()
+    deliveries: dict[str, ProactiveEventTransition] = {}
+    state: GitHubWorkItemState | None = None
+    signals: list[ProactiveEvent] = []
+
+    class LifecycleDB:
+        def __init__(self, delivery_id: str) -> None:
+            self.execute_count = 0
+            self.delivery_id = delivery_id
+            self.added: list[Any] = []
+
+        async def execute(self, _query: object) -> SimpleNamespace:
+            self.execute_count += 1
+            if self.execute_count == 1:
+                return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [tenant_id]))
+            if self.execute_count == 2:
+                return SimpleNamespace(all=lambda: [(project_id, organization_id, tenant_id)])
+            if self.execute_count == 3:
+                existing = deliveries.get(self.delivery_id)
+                return SimpleNamespace(scalar_one_or_none=lambda: existing.id if existing else None)
+            if self.execute_count == 4:
+                return SimpleNamespace(scalar_one_or_none=lambda: state)
+            existing_signal = next(
+                (event for event in signals if event.delivery_id == self.delivery_id),
+                None,
+            )
+            return SimpleNamespace(scalar_one_or_none=lambda: existing_signal)
+
+        def add(self, item: Any) -> None:
+            if item.id is None:
+                item.id = uuid.uuid4()
+            self.added.append(item)
+            if isinstance(item, GitHubWorkItemState):
+                nonlocal state
+                state = item
+            elif isinstance(item, ProactiveEventTransition):
+                deliveries[item.delivery_id] = item
+            elif isinstance(item, ProactiveEvent):
+                signals.append(item)
+
+        async def commit(self) -> None:
+            return None
+
+        async def flush(self) -> None:
+            return None
+
+        async def refresh(self, _event: ProactiveEvent) -> None:
+            return None
+
+        async def rollback(self) -> None:
+            return None
+
+    async def send(action: str, updated_at: str, *, state_value: str, delivery: str | None = None) -> dict[str, Any]:
+        delivery_id = delivery or str(uuid.uuid4())
+        issue = {
+            "number": 77,
+            "state": state_value,
+            "updated_at": updated_at,
+            "title": "Lifecycle issue",
+            "body": "must not be persisted",
+            "html_url": "https://github.com/octo/repo/issues/77",
+        }
+        body = json.dumps(
+            {"action": action, "repository": {"full_name": "octo/repo"}, "issue": issue}
+        ).encode()
+        stub_db = LifecycleDB(delivery_id)
+        with (
+            patch("solvyn.api.v1.webhooks.settings.github_webhook_secret", "webhook-secret"),
+            patch("solvyn.api.v1.webhooks.bind_tenant_scope", new_callable=AsyncMock),
+        ):
+            return await receive_github_webhook(
+                _request(body, event="issues", delivery=delivery_id, signature=_signature("webhook-secret", body)),
+                db=cast(AsyncSession, stub_db),
+            )
+
+    opened = await send("opened", "2026-11-20T10:00:00Z", state_value="open")
+    assert opened["processed_transition_count"] == 1
+    assert state is not None and state.lifecycle_state == "open"
+    first_signal = signals[0]
+    first_signal.status = "acknowledged"
+
+    closed_delivery = str(uuid.uuid4())
+    closed = await send("closed", "2026-11-20T11:00:00Z", state_value="closed", delivery=closed_delivery)
+    assert closed["created_count"] == 0
+    assert closed["processed_transition_count"] == 1
+    assert state is not None and state.lifecycle_state == "closed"
+    assert first_signal.status == "acknowledged"
+
+    replay = await send("closed", "2026-11-20T11:00:00Z", state_value="closed", delivery=closed_delivery)
+    assert replay["duplicate_count"] == 1
+    assert replay["processed_transition_count"] == 0
+
+    stale = await send("reopened", "2026-11-20T10:30:00Z", state_value="open")
+    assert stale["processed_transition_count"] == 1
+    assert state is not None and state.lifecycle_state == "closed"
+    stale_transition = next(item for item in deliveries.values() if item.provider_updated_at.isoformat() == "2026-11-20T10:30:00+00:00")
+    assert stale_transition.applied_to_current is False
+    assert "must not be persisted" not in str(stale_transition.title)
+    assert len(signals) == 1
+
+    reopened = await send("reopened", "2026-11-20T12:00:00Z", state_value="open")
+    assert reopened["processed_transition_count"] == 1
+    assert state is not None and state.lifecycle_state == "open"
+    assert first_signal.status == "acknowledged"
+    assert len(signals) == 2
+    assert signals[-1].status == "pending"
+    assert len(deliveries) == 4
 
 
 @pytest.mark.asyncio
