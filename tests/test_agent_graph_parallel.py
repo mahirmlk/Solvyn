@@ -194,9 +194,12 @@ async def test_agent_graph_rejects_cycles_before_running_agents() -> None:
     checkpoint = AsyncMock()
 
     with patch("solvyn.agents.graph.agent_registry.create", create_agent):
-        with pytest.raises(ValueError, match="cycle"):
+        with pytest.raises(ValueError, match="cycle") as exc_info:
             await graph.execute("s1", "t1", on_checkpoint=checkpoint)
 
+    message = str(exc_info.value)
+    assert "blocked nodes:" in message
+    assert first in message and second in message
     create_agent.assert_not_called()
     checkpoint.assert_not_awaited()
     assert graph.nodes[first].status == "pending"
