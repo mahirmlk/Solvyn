@@ -155,8 +155,13 @@ export default function SignalsPage() {
               <div className={styles.eventTopline}>
                 <span className={styles.kind}>{signalLabel(event)}</span>
                 <span className={`${styles.status} ${event.status === "acknowledged" ? styles.acknowledged : ""}`}>
-                  {event.status.replaceAll("_", " ")}
+                  Triage: {event.status.replaceAll("_", " ")}
                 </span>
+                {event.provider_state && (
+                  <span className={styles.providerState}>
+                    GitHub: {event.provider_state}
+                  </span>
+                )}
               </div>
               <h3>{event.summary || event.workflow_name}</h3>
               <p className={styles.meta}>
