@@ -497,146 +497,7 @@ class TaskHandoff(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     lease_owner: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-
-
-class ExecutionGraph(Base):
-    __tablename__ = "execution_graphs"
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    session_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("sessions.id"), nullable=False, index=True)
-    graph_data: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[str] = mapped_column(String(50), default="running")
-    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
-    lease_owner: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
-    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-
-    session: Mapped["Session"] = relationship(back_populates="execution_graphs")
-
-
-class TokenUsage(Base):
-    __tablename__ = "token_usage"
-    __table_args__ = (
-        Index("ix_token_usage_tenant_task_created_at", "tenant_id", "task_id", "created_at"),
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
-    session_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("sessions.id"), nullable=True)
-    task_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=True
-    )
-    agent_type: Mapped[str] = mapped_column(String(100), nullable=False)
-    provider: Mapped[str] = mapped_column(String(50), nullable=False)
-    model: Mapped[str] = mapped_column(String(100), nullable=False)
-    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    cost: Mapped[float] = mapped_column(Numeric(12, 6), default=0.0)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-
-class ApiKey(Base):
-    """Per-tenant API key.
-
-    Only the SHA-256 hash of the key is stored. The plaintext key is shown to
-    the user exactly once at creation time. A short prefix (first 12 chars)
-    is kept for display/identification in the admin UI. Revoked keys are
-    kept (soft revoke) so audit trails remain intact.
-    """
-
-    __tablename__ = "api_keys"
-    # P0-003 (now db-enforced): key lookups hit the unique index instead of a full-table scan.
-    __table_args__ = (UniqueConstraint("key_hash", name="uq_api_keys_key_hash"),)
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    key_hash: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-    key_prefix: Mapped[str] = mapped_column(String(12), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-
-
-# ---------------------------------------------------------------------------
-# Phase 1 — Product foundation (feature/product-foundation)
-#
-# Identity chain: User → Organization → Membership → Workspace/Project.
-# Tenant remains the isolation boundary for all existing tables; new tables
-# are additionally scoped by organization_id / project_id.
-#
-# Permission levels (enforced by the tool gateway, never by prompts):
-#   READ_ONLY → PROPOSE_CHANGES → MODIFY_FILES → EXECUTE_COMMANDS →
-#   CREATE_BRANCH → CREATE_PULL_REQUEST → MERGE_PULL_REQUEST → DEPLOY
-# ---------------------------------------------------------------------------
-
-
-class PermissionLevel(StrEnum):
-    READ_ONLY = "READ_ONLY"
-    PROPOSE_CHANGES = "PROPOSE_CHANGES"
-    MODIFY_FILES = "MODIFY_FILES"
-    EXECUTE_COMMANDS = "EXECUTE_COMMANDS"
-    CREATE_BRANCH = "CREATE_BRANCH"
-    CREATE_PULL_REQUEST = "CREATE_PULL_REQUEST"
-    MERGE_PULL_REQUEST = "MERGE_PULL_REQUEST"
-    DEPLOY = "DEPLOY"
-
-
-class OrgRole(StrEnum):
-    OWNER = "owner"
-    ADMIN = "admin"
-    MEMBER = "member"
-    VIEWER = "viewer"
-
-
-class TeammateRole(StrEnum):
-    TECH_LEAD = "Tech Lead"
-    SOFTWARE_ENGINEER = "Software Engineer"
-    QA_ENGINEER = "QA Engineer"
-    SECURITY_ENGINEER = "Security Engineer"
-
-
-class TeammateStatus(StrEnum):
-    ACTIVE = "active"
-    IDLE = "idle"
-    BUSY = "busy"
-    PAUSED = "paused"
-    DISABLED = "disabled"
-
-
-class KnowledgeCategory(StrEnum):
-    ARCHITECTURE = "architecture"
-    CONVENTION = "convention"
-    API_STANDARD = "api_standard"
-    DB_CONVENTION = "db_convention"
-    TECH_CHOICE = "tech_choice"
-    TECHNICAL_DEBT = "technical_debt"
-    PROJECT_INSTRUCTION = "project_instruction"
-    DEPENDENCY = "dependency"
-    DECISION = "decision"
-
-
-class ApprovalStatus(StrEnum):
-    PENDING = "pending"
-    APPROVED = "approved"
-    REJECTED = "rejected"
-    EXPIRED = "expired"
-    CONSUMED = "consumed"
-    STALE = "stale"
-
-
-class ApprovalKind(StrEnum):
-    PLAN = "plan"
-    COMMAND = "command"
-    FILE_CHANGE = "file_change"
-    PULL_REQUEST = "pull_request"
-    MERGE = "merge"
-    DEPLOY = "deploy"
-    VERIFICATION_RUN = "verification_run"
+    created_at: Mapped[datetime] = mapped_c…1599 tokens truncated…N_RUN = "verification_run"
 
 
 class User(Base):
@@ -816,6 +677,65 @@ class ProactiveEvent(Base):
     details_url: Mapped[str] = mapped_column(String(512), default="")
     status: Mapped[str] = mapped_column(String(50), default="pending")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GitHubWorkItemState(Base):
+    """Latest sanitized GitHub lifecycle state for a connected issue or PR."""
+
+    __tablename__ = "github_work_item_states"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id", "project_id", "event_type", "repository_key", "item_number",
+            name="uq_github_work_item_states_identity",
+        ),
+        CheckConstraint("event_type IN ('issues', 'pull_request')", name="ck_github_work_item_states_type"),
+        CheckConstraint("lifecycle_state IN ('open', 'closed', 'merged')", name="ck_github_work_item_states_state"),
+        CheckConstraint("item_number > 0", name="ck_github_work_item_states_number"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    repository_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    repository_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    item_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    lifecycle_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    branch: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    details_url: Mapped[str] = mapped_column(String(512), default="", nullable=False)
+    provider_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_delivery_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class ProactiveEventTransition(Base):
+    """Sanitized immutable webhook history for GitHub issue/PR lifecycle changes."""
+
+    __tablename__ = "proactive_event_transitions"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "project_id", "delivery_id", name="uq_proactive_event_transitions_delivery"),
+        CheckConstraint("event_type IN ('issues', 'pull_request')", name="ck_proactive_event_transitions_type"),
+        CheckConstraint("lifecycle_state IN ('open', 'closed', 'merged')", name="ck_proactive_event_transitions_state"),
+        CheckConstraint("item_number > 0", name="ck_proactive_event_transitions_number"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False)
+    delivery_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    action: Mapped[str] = mapped_column(String(20), nullable=False)
+    repository_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    repository_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    item_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    lifecycle_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    branch: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    details_url: Mapped[str] = mapped_column(String(512), default="", nullable=False)
+    provider_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    applied_to_current: Mapped[bool] = mapped_column(default=False, nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class MaintenanceSchedule(Base):
