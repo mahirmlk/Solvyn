@@ -1,4 +1,4 @@
-FROM ghcr.io/gitleaks/gitleaks:v8.24.2 AS gitleaks
+FROM ghcr.io/gitleaks/gitleaks:v8.30.1 AS gitleaks
 
 FROM python:3.12-slim
 
