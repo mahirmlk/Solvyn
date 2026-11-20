@@ -138,6 +138,7 @@ async def test_proactive_event_serialization_keeps_triage_and_github_state_separ
     listed = result["events"][0]  # type: ignore[index]
     assert listed["status"] == "acknowledged"
     assert listed["provider_state"] == "closed"
+    assert listed["conclusion"] == "closed"
     assert listed["provider_updated_at"] == "2026-11-20T11:00:00+00:00"
     assert listed["summary"] == "Updated issue title"
 
@@ -190,8 +191,10 @@ async def test_proactive_event_state_lookup_keeps_same_item_isolated_by_project(
 
     listed_by_project = {item["project_id"]: item for item in result["events"]}  # type: ignore[index]
     assert listed_by_project[str(project_a)]["provider_state"] == "closed"
+    assert listed_by_project[str(project_a)]["conclusion"] == "closed"
     assert listed_by_project[str(project_a)]["summary"] == "Project A issue"
     assert listed_by_project[str(project_b)]["provider_state"] == "merged"
+    assert listed_by_project[str(project_b)]["conclusion"] == "merged"
     assert listed_by_project[str(project_b)]["summary"] == "Project B issue"
 
 
