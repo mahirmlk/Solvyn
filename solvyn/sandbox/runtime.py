@@ -327,7 +327,7 @@ class DockerSandboxRunner:
                 await asyncio.gather(copy_task, stdout_task, stderr_task, return_exceptions=True)
                 raise
             _, _ = await stdout_task
-            _, stderr = await stderr_task
+            stderr, _ = await stderr_task
             if proc.returncode != 0:
                 detail = self._docker_error_detail(stderr, sensitive_paths=(str(workspace.path),))
                 suffix = f": {detail}" if detail else ""
