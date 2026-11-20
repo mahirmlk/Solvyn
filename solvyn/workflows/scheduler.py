@@ -8,8 +8,8 @@ import json
 import logging
 import socket
 import uuid
-from datetime import UTC, datetime, timedelta
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 from opentelemetry.trace import Status, StatusCode
@@ -57,7 +57,6 @@ _WORKER_HEARTBEAT_INTERVAL_SECONDS = 5
 _WORKER_HEARTBEAT_RETENTION = timedelta(days=30)
 _MAINTENANCE_TENANT_OFFSET = 0
 _MAX_DEPENDABOT_REPOSITORIES = 10
-
 
 
 async def _trace_execution(
