@@ -17,7 +17,8 @@ def test_production_worker_has_authenticated_shared_sandbox_access() -> None:
     assert "SANDBOX_WORKSPACE_ROOT: /app/.solvyn/workspaces" in worker
     assert "SANDBOX_RUNTIME_URL: http://sandbox:8001" in worker
     assert "SANDBOX_RUNTIME_TOKEN: ${SANDBOX_RUNTIME_TOKEN:?Set SANDBOX_RUNTIME_TOKEN in .env.production}" in worker
-    assert "- sandbox_workspaces:/app/.solvyn/workspaces:ro" in worker
+    assert "- sandbox_workspaces:/app/.solvyn/workspaces" in worker
+    assert "- sandbox_workspaces:/app/.solvyn/workspaces:ro" not in worker
     assert "- sandbox-control" in worker
     assert "sandbox:\n        condition: service_healthy" in worker
 
