@@ -405,7 +405,15 @@ async def test_repository_task_runs_approved_tool_loop_in_docker_and_delivers_dr
     )
     assert runs.status_code == 200, runs.text
     run_evidence = next(item for item in runs.json()["verification_runs"] if item["id"] == str(run_id))
-    assert run_evidence["status"] == "passed", run_evidence
+    assert run_evidence["status"] == "passed", (
+        "Sandbox pytest failed: "
+        f"command={run_evidence.get('command')!r}, "
+        f"exit_code={run_evidence.get('exit_code')!r}, "
+        f"timed_out={run_evidence.get('timed_out')!r}, "
+        f"error={run_evidence.get('error')!r}, "
+        f"stdout={run_evidence.get('stdout')!r}, "
+        f"stderr={run_evidence.get('stderr')!r}"
+    )
     assert run_evidence["kind"] == "test"
     assert run_evidence["source_digest"] == current_digest
     task_rows = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
