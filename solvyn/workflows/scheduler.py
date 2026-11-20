@@ -437,6 +437,43 @@ async def _fetch_due_scheduled_workflows(db: AsyncSession) -> list[tuple[uuid.UU
     return [(execution_id, tenant_id) for execution_id, tenant_id, _, _ in due_rows[:_BATCH_SIZE]]
 
 
+async def _fetch_due_cancellation_workflows(db: AsyncSession) -> list[tuple[uuid.UUID, uuid.UUID]]:
+    """Discover tenant-scoped cancellations whose worker lease can no longer finish them."""
+    tenant_ids = (
+        await db.execute(select(Tenant.id).where(Tenant.is_active.is_(True)).order_by(Tenant.id))
+    ).scalars().all()
+    due_rows: list[tuple[uuid.UUID, uuid.UUID, datetime]] = []
+    for tenant_id in tenant_ids:
+        await bind_tenant_scope(db, tenant_id)
+        rows = (
+            await db.execute(
+                select(ExecutionGraph.id, Session.tenant_id, ExecutionGraph.created_at)
+                .join(Session, Session.id == ExecutionGraph.session_id)
+                .where(
+                    Session.tenant_id == tenant_id,
+                    ExecutionGraph.status == "cancelling",
+                    or_(
+                        ExecutionGraph.lease_owner.is_(None),
+                        ExecutionGraph.lease_expires_at.is_(None),
+                        ExecutionGraph.lease_expires_at <= func.now(),
+                    ),
+                )
+                .order_by(ExecutionGraph.created_at, ExecutionGraph.id)
+                .limit(_BATCH_SIZE)
+            )
+        ).all()
+        due_rows.extend((row.id, row.tenant_id, row.created_at) for row in rows if row.created_at is not None)
+        await db.commit()
+
+    due_rows.sort(key=lambda row: (row[2], row[0]))
+    return [(execution_id, tenant_id) for execution_id, tenant_id, _ in due_rows[:_BATCH_SIZE]]
+
+
+async def _finalize_stale_workflow_cancellation(execution_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
+    """Use the executor's conditional lease check to finalize, never resume, a stale cancellation."""
+    await workflow_executor.cancel(execution_id, str(tenant_id))
+
+
 async def _fetch_due_verification_runs(db: AsyncSession) -> list[tuple[uuid.UUID, uuid.UUID]]:
     """Discover approved work and interrupted attempts under each tenant scope."""
     tenant_ids = (
@@ -587,6 +624,7 @@ async def run_scheduled_workflows() -> None:
                     await db.commit()
                     await _queue_due_maintenance_events(db)
                     due = await _fetch_due_scheduled_workflows(db)
+                    due_cancellations = await _fetch_due_cancellation_workflows(db)
                     due_verifications = await _fetch_due_verification_runs(db)
             except Exception:
                 logger.exception("Unable to fetch scheduled workflow executions")
@@ -601,6 +639,15 @@ async def run_scheduled_workflows() -> None:
                     logger.info("Scheduled workflow %s was not claimed: %s", execution_id, exc)
                 except Exception:
                     logger.exception("Scheduled workflow %s failed", execution_id)
+
+            for execution_id, tenant_id in due_cancellations:
+                try:
+                    await _finalize_stale_workflow_cancellation(execution_id, tenant_id)
+                except RuntimeError as exc:
+                    # The owning worker or another scheduler finalized it after discovery.
+                    logger.info("Stale workflow cancellation %s was not finalized: %s", execution_id, exc)
+                except Exception:
+                    logger.exception("Stale workflow cancellation %s failed", execution_id)
 
             outcomes = await asyncio.gather(
                 *(_execute_due_verification(run_id, tenant_id) for run_id, tenant_id in due_verifications),
