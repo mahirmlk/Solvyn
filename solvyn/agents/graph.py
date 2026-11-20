@@ -66,7 +66,11 @@ class AgentGraph:
         """
         in_degree: dict[str, int] = {nid: 0 for nid in self.nodes}
         for edge in self.edges:
-            in_degree[edge.target] = in_degree.get(edge.target, 0) + 1
+            if edge.source not in self.nodes or edge.target not in self.nodes:
+                raise ValueError(
+                    f"Execution graph edge references unknown node: {edge.source} -> {edge.target}"
+                )
+            in_degree[edge.target] += 1
 
         levels: list[list[str]] = []
         remaining = set(self.nodes.keys())
@@ -75,9 +79,12 @@ class AgentGraph:
             # Current level: all nodes whose in-degree (among remaining) is 0
             current_level = [nid for nid in remaining if in_degree[nid] == 0]
             if not current_level:
-                # Circular dependency – break it by picking one node
-                logger.warning("Circular dependency detected; breaking cycle")
-                current_level = [next(iter(remaining))]
+                # A cycle may also leave downstream nodes blocked. List all
+                # unresolved nodes so the diagnostic stays deterministic.
+                blocked_nodes = ", ".join(sorted(remaining))
+                raise ValueError(
+                    f"Execution graph contains a cycle; blocked nodes: {blocked_nodes}"
+                )
 
             levels.append(current_level)
             for nid in current_level:

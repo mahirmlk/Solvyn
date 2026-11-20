@@ -177,3 +177,30 @@ async def test_agent_graph_compute_levels() -> None:
     assert set(levels[0]) == {a, b}  # level 0: a and b
     assert levels[1] == [c]  # level 1: c
     assert levels[2] == [d]  # level 2: d
+
+
+@pytest.mark.asyncio
+async def test_agent_graph_rejects_cycles_before_running_agents() -> None:
+    """Reject cyclic graphs before agents or checkpoint callbacks can run."""
+    from solvyn.agents.graph import AgentGraph
+
+    graph = AgentGraph()
+    first = graph.add_node("agent-a")
+    second = graph.add_node("agent-b")
+    graph.add_edge(first, second)
+    graph.add_edge(second, first)
+
+    create_agent = AsyncMock()
+    checkpoint = AsyncMock()
+
+    with patch("solvyn.agents.graph.agent_registry.create", create_agent):
+        with pytest.raises(ValueError, match="cycle") as exc_info:
+            await graph.execute("s1", "t1", on_checkpoint=checkpoint)
+
+    message = str(exc_info.value)
+    assert "blocked nodes:" in message
+    assert first in message and second in message
+    create_agent.assert_not_called()
+    checkpoint.assert_not_awaited()
+    assert graph.nodes[first].status == "pending"
+    assert graph.nodes[second].status == "pending"
