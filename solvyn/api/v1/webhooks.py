@@ -8,7 +8,7 @@ import json
 import unicodedata
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -325,6 +325,7 @@ def _event_dict_with_state(
         result["provider_state"] = state.lifecycle_state
         result["provider_updated_at"] = state.provider_updated_at.isoformat()
         result["summary"] = state.title
+        result["conclusion"] = state.lifecycle_state
         result["branch"] = state.branch
         result["details_url"] = state.details_url
     return result
@@ -428,6 +429,7 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
             await bind_tenant_scope(db, tenant_id)
             for project_id, organization_id in matches:
                 if event_type in {"issues", "pull_request"}:
+                    provider_updated_at = cast(datetime, signal["provider_updated_at"])
                     existing_transition = (
                         await db.execute(
                             select(ProactiveEventTransition.id).where(
@@ -478,17 +480,17 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
                             lifecycle_state=signal["lifecycle_state"],
                             branch=signal["branch"],
                             details_url=signal["details_url"],
-                            provider_updated_at=signal["provider_updated_at"],
+                            provider_updated_at=provider_updated_at,
                             last_delivery_id=normalized_delivery_id,
                         )
                         db.add(state)
-                    elif signal["provider_updated_at"] > state.provider_updated_at:
+                    elif provider_updated_at > state.provider_updated_at:
                         state.repository_name = signal["repository_name"]
                         state.title = signal["workflow_name"]
                         state.lifecycle_state = signal["lifecycle_state"]
                         state.branch = signal["branch"]
                         state.details_url = signal["details_url"]
-                        state.provider_updated_at = signal["provider_updated_at"]
+                        state.provider_updated_at = provider_updated_at
                         state.last_delivery_id = normalized_delivery_id
                         applied_to_current = True
 
@@ -506,7 +508,7 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
                             lifecycle_state=signal["lifecycle_state"],
                             branch=signal["branch"],
                             details_url=signal["details_url"],
-                            provider_updated_at=signal["provider_updated_at"],
+                            provider_updated_at=provider_updated_at,
                             applied_to_current=applied_to_current,
                         )
                     )
