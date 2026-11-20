@@ -32,7 +32,16 @@ _CONTROL_ARGUMENTS = [
     "--timeout",
     "90",
     "--exit-code",
+    "1",
 ]
+
+
+def _is_valid_command(args: list[str]) -> bool:
+    return (
+        len(args) == len(_CONTROL_ARGUMENTS) + 1
+        and args[:-1] == _CONTROL_ARGUMENTS
+        and args[-1] == "/workspace"
+    )
 
 
 def _workspace_files(root: Path) -> list[Path]:
@@ -111,7 +120,7 @@ def _run_bounded(argv: list[str], deadline: float, written: int) -> tuple[int, i
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
-    if len(args) != len(_CONTROL_ARGUMENTS) + 1 or args[:-1] != _CONTROL_ARGUMENTS or args[-1] != "/workspace":
+    if not _is_valid_command(args):
         print("Secret scan command is invalid.", file=sys.stderr)
         return 2
 
