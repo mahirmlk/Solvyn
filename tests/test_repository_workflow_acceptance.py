@@ -1,8 +1,3 @@
-SetValueInvocationException: 
-Line |
-   3 |  $RawUI.CursorPosition = @{X=0;Y=0}
-     |  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-     | Exception setting "CursorPosition": "The handle is invalid."
 """Credential-free acceptance of repository-backed teammate delivery.
 
 The test keeps the provider boundary deterministic, but exercises the real
