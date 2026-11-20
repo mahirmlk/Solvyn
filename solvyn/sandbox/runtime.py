@@ -76,6 +76,30 @@ class _CommandResult:
     timed_out: bool = False
 
 
+class _BoundedArchiveWriter:
+    """Forward tar bytes to a file while enforcing a hard byte ceiling."""
+
+    def __init__(self, target: BinaryIO, limit: int) -> None:
+        self.target = target
+        self.limit = limit
+        self.size = 0
+
+    def write(self, content: bytes) -> int:
+        if self.size + len(content) > self.limit:
+            raise SandboxRuntimeError("Workspace archive exceeded its size limit")
+        written = self.target.write(content)
+        if written != len(content):
+            raise OSError("Unable to write a complete workspace archive")
+        self.size += written
+        return written
+
+    def tell(self) -> int:
+        return self.size
+
+    def flush(self) -> None:
+        self.target.flush()
+
+
 class DockerSandboxRunner:
     """Run argv inside a one-shot, networkless container and return safe edits."""
 
@@ -242,7 +266,11 @@ class DockerSandboxRunner:
 
     def _create_workspace_archive(self, workspace: ManagedWorkspace, archive: BinaryIO) -> int:
         """Build a bounded tar containing only validated regular workspace files."""
-        with tarfile.open(fileobj=archive, mode="w") as tar:
+        bounded = _BoundedArchiveWriter(
+            archive,
+            self.limits.workspace_bytes + 2_000_000,
+        )
+        with tarfile.open(fileobj=cast(BinaryIO, bounded), mode="w") as tar:
             for path in sorted(workspace.path.rglob("*")):
                 metadata = path.lstat()
                 if stat.S_ISLNK(metadata.st_mode):
@@ -273,9 +301,7 @@ class DockerSandboxRunner:
                         tar.addfile(member, source)
                 finally:
                     os.close(descriptor)
-        size = archive.tell()
-        if size > self.limits.workspace_bytes + 2_000_000:
-            raise SandboxRuntimeError("Workspace archive exceeded its size limit")
+        size = bounded.tell()
         archive.seek(0)
         return size
 
@@ -339,7 +365,6 @@ class DockerSandboxRunner:
             stdin.write(chunk)
             await stdin.drain()
 
-    
     async def _cli(
         self,
         args: Sequence[str],
