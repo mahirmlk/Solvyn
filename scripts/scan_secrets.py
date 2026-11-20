@@ -10,7 +10,6 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import BinaryIO
 
 _MAX_FILES = 20_000
 _MAX_FILE_BYTES = 128_000_000
