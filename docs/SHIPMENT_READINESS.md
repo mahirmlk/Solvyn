@@ -8,6 +8,10 @@ PR #123 added a frontend dependency audit using the checked-in lockfile and made
 
 PR #122 added a provider-free `solvyn eval compare` command for saved reports and regression coverage for worker retry exhaustion. Its merged head passed Ruff, MyPy, 720 tests (1 skipped), the database backup/restore smoke test, `pip-audit` with no known vulnerabilities, and API/frontend image builds. The restore smoke test also checks tenant visibility, forced RLS after restore, and preservation of a COPY value that matches PostgreSQL 17's `transaction_timeout` setting. Deployment jobs were skipped, so this does not count as a staging deployment or deployment-specific restore drill.
 
+PR #124 closes a race between handoff delivery and task completion/verification acceptance. The delivery path refreshes and locks the task row before creating the `starting` delivery record, so delivery and acceptance gates serialize on the same task. A deterministic interleaving regression test covers the race. Exact-head CI passed Ruff, MyPy, 721 tests (1 skipped), backup/restore smoke, dependency audit, and API/frontend image builds; deployment jobs were skipped. The change received independent review before merge.
+
+PR #125 scopes observability trace APIs and WebSocket streams to the authenticated tenant. WebSocket setup resolves the URL tenant once and passes its canonical UUID into API-key validation, avoiding tenant-wide key lookup scans; the compatibility shared secret is restricted to the configured default tenant. Cross-tenant trace detail access returns 404. Independent security review found no actionable issue. Exact-head CI passed lint, backend tests, frontend dependency audit, and image build. Deployment jobs were skipped. CI emitted a non-failing notice that the workflow's Node.js 20 actions should be upgraded before GitHub removes the compatibility runtime.
+
 ## Phase 10: self-hosted deployment
 
 | Requirement | Status | Evidence / remaining work |
