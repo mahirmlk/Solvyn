@@ -339,6 +339,7 @@ class DockerSandboxRunner:
             stdin.write(chunk)
             await stdin.drain()
 
+    
     async def _cli(
         self,
         args: Sequence[str],
@@ -422,7 +423,6 @@ class DockerSandboxRunner:
                 await proc.wait()
                 stdout_task.cancel()
                 stderr_task.cancel()
-                await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
                 raise SandboxRuntimeError("Docker workspace export timed out") from exc
             except asyncio.CancelledError:
                 proc.kill()
@@ -529,4 +529,3 @@ class DockerSandboxRunner:
             if "no such container" in message or "no such object" in message:
                 return
             raise SandboxRuntimeError("Docker failed to clean up the sandbox container")
-
