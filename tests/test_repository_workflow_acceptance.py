@@ -339,7 +339,7 @@ async def test_repository_task_runs_approved_tool_loop_in_docker_and_delivers_dr
         f"/api/v1/workflows/executions/{execution_id}/tasks/{root_task_id}/handoffs/{handoff_id}/resume"
     )
     assert resumed.status_code == 200, resumed.text
-    assert resumed.json()["status"] == "completed"
+    assert resumed.json()["status"] == "review_required"
     assert tool_cursor == len(tool_calls), "The actual workspace tool loop must call list/read/write/lint."
     assert len(generated) >= 7
     assert workspace_manager.read_file(managed, "src/health.py").decode() == (
