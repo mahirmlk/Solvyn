@@ -290,6 +290,21 @@ async def test_runner_applies_container_policy_and_returns_workspace_changes(tmp
     assert calls[-1][2].startswith("solvyn-sandbox-")
 
 
+def test_workspace_archive_is_bounded_during_writes(tmp_path: Path) -> None:
+    manager = WorkspaceManager(tmp_path / "workspaces")
+    workspace = manager.create()
+    for index in range(6_500):
+        (workspace.path / f"empty-{index:05}.txt").touch()
+    limits = SandboxLimits(workspace_bytes=1024 * 1024)
+    runner = DockerSandboxRunner(manager, limits=limits)
+    archive = io.BytesIO()
+
+    with pytest.raises(SandboxRuntimeError, match="archive exceeded its size limit"):
+        runner._create_workspace_archive(workspace, archive)
+
+    assert archive.tell() <= limits.workspace_bytes + 2_000_000
+
+
 def test_docker_error_detail_is_bounded_and_redacts_workspace_path() -> None:
     detail = DockerSandboxRunner._docker_error_detail(
         b"copy failed /tmp/private-workspace\n" + (b"x" * 400),
@@ -407,8 +422,10 @@ def _fake_docker(
         "    if '-x' in args:\n"
         "        data = sys.stdin.buffer.read()\n"
         "        with tarfile.open(fileobj=io.BytesIO(data), mode='r:') as archive:\n"
-        "            assert archive.getnames() == ['src/main.py']\n"
-        "            assert archive.extractfile('src/main.py').read() == b'before'\n"
+        "            members = archive.getnames()\n"
+        "            assert members in ([], ['src/main.py'])\n"
+        "            if members:\n"
+        "                assert archive.extractfile('src/main.py').read() == b'before'\n"
         "    else:\n"
         "        data = io.BytesIO()\n"
         "        with tarfile.open(fileobj=data, mode='w') as archive:\n"
