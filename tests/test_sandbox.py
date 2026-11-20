@@ -261,18 +261,43 @@ async def test_runner_applies_container_policy_and_returns_workspace_changes(tmp
     assert "--network" in create and "none" in create
     assert "--read-only" in create
     assert "--cap-drop" in create and "ALL" in create
+    assert "--memory" in create and "512m" in create
+    assert "--cpus" in create and "1.0" in create
+    assert "--pids-limit" in create and "128" in create
     assert "HOME=/tmp" in create
     assert "PYTHONDONTWRITEBYTECODE=1" in create
     assert "PYTHONPYCACHEPREFIX=/tmp/pycache" in create
     assert "PYTEST_ADDOPTS=-p no:cacheprovider" in create
-    assert "--memory" in create and "512m" in create
-    assert "--cpus" in create and "1.0" in create
-    assert "--pids-limit" in create and "128" in create
     assert "--tmpfs" in create and "/workspace:rw,nosuid,nodev,size=134217728,nr_inodes=10000" in create
+    assert calls[2] == [
+        "exec",
+        "--user",
+        "0",
+        "-i",
+        "a" * 64,
+        "tar",
+        "-x",
+        "--no-same-owner",
+        "--no-same-permissions",
+        "-C",
+        "/workspace",
+    ]
     assert calls[3] == ["exec", "--user", "0", "a" * 64, "chmod", "-R", "a+rwX", "/workspace"]
     assert calls[4] == ["exec", "a" * 64, "python", "-c", "print('safe')"]
+    assert calls[5] == ["exec", "-i", "a" * 64, "tar", "-c", "-C", "/workspace", "."]
     assert calls[-1][:2] == ["rm", "--force"]
     assert calls[-1][2].startswith("solvyn-sandbox-")
+
+
+def test_docker_error_detail_is_bounded_and_redacts_workspace_path() -> None:
+    detail = DockerSandboxRunner._docker_error_detail(
+        b"copy failed /tmp/private-workspace\n" + (b"x" * 400),
+        sensitive_paths=("/tmp/private-workspace",),
+    )
+
+    assert detail.startswith("copy failed <workspace>")
+    assert "/tmp/private-workspace" not in detail
+    assert len(detail) <= 300
 
 
 @pytest.mark.asyncio
@@ -377,18 +402,27 @@ def _fake_docker(
         "    print('a' * 64)\n"
         "elif args[0] == 'rm':\n"
         f"    {fail_rm}\n"
+        "elif args[0] == 'exec' and 'tar' in args:\n"
+        "    if '-x' in args:\n"
+        "        data = sys.stdin.buffer.read()\n"
+        "        with tarfile.open(fileobj=io.BytesIO(data), mode='r:') as archive:\n"
+        "            assert archive.getnames() == ['src/main.py']\n"
+        "            assert archive.extractfile('src/main.py').read() == b'before'\n"
+        "    else:\n"
+        "        data = io.BytesIO()\n"
+        "        with tarfile.open(fileobj=data, mode='w') as archive:\n"
+        "            payload = b'after'\n"
+        "            item = tarfile.TarInfo('./src/main.py')\n"
+        "            item.size = len(payload)\n"
+        "            archive.addfile(item, io.BytesIO(payload))\n"
+        "        sys.stdout.buffer.write(data.getvalue())\n"
+        "elif args[0] == 'exec' and 'chmod' in args:\n"
+        "    pass\n"
         "elif args[0] == 'exec':\n"
         "    if args[-1] == 'slow':\n"
         f"        {slow}\n"
-        "    print('runner output')\n"
-        "elif args[0] == 'cp' and args[-1] == '-':\n"
-        "    data = io.BytesIO()\n"
-        "    with tarfile.open(fileobj=data, mode='w') as archive:\n"
-        "        payload = b'after'\n"
-        "        item = tarfile.TarInfo('src/main.py')\n"
-        "        item.size = len(payload)\n"
-        "        archive.addfile(item, io.BytesIO(payload))\n"
-        "    sys.stdout.buffer.write(data.getvalue())\n",
+        "    print('runner output')\n",
         encoding="utf-8",
     )
     return script_path, calls_file
+
