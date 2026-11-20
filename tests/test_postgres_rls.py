@@ -94,6 +94,135 @@ async def test_every_tenant_owned_orm_table_has_forced_postgres_rls() -> None:
 
 
 @pytest.mark.asyncio
+async def test_github_work_item_state_rls_and_transition_history_are_enforced() -> None:
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url.startswith("postgresql+"):
+        pytest.skip("GitHub lifecycle RLS behavior requires PostgreSQL and migrations at head")
+
+    engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
+    tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+    organization_a, organization_b = uuid.uuid4(), uuid.uuid4()
+    project_a, project_b = uuid.uuid4(), uuid.uuid4()
+    state_a, transition_a = uuid.uuid4(), uuid.uuid4()
+    try:
+        async with engine.connect() as connection:
+            transaction = await connection.begin()
+            try:
+                role = (
+                    await connection.execute(
+                        text("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user")
+                    )
+                ).one()
+                assert role == (False, False)
+                await connection.execute(
+                    text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'Lifecycle A', :slug, '')"),
+                    {"id": tenant_a, "slug": f"lifecycle-{tenant_a}"},
+                )
+                await connection.execute(
+                    text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'Lifecycle B', :slug, '')"),
+                    {"id": tenant_b, "slug": f"lifecycle-{tenant_b}"},
+                )
+                await _seed_organizations(
+                    connection,
+                    [
+                        (organization_a, tenant_a, f"lifecycle-{organization_a}", "Lifecycle A"),
+                        (organization_b, tenant_b, f"lifecycle-{organization_b}", "Lifecycle B"),
+                    ],
+                )
+                for tenant_id, organization_id, project_id in (
+                    (tenant_a, organization_a, project_a),
+                    (tenant_b, organization_b, project_b),
+                ):
+                    await connection.execute(
+                        text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                        {"tenant_id": str(tenant_id)},
+                    )
+                    await connection.execute(
+                        text(
+                            "INSERT INTO projects (id, organization_id, tenant_id, name, slug) "
+                            "VALUES (:id, :organization_id, :tenant_id, 'Lifecycle project', :slug)"
+                        ),
+                        {
+                            "id": project_id,
+                            "organization_id": organization_id,
+                            "tenant_id": tenant_id,
+                            "slug": f"lifecycle-{project_id}",
+                        },
+                    )
+
+                await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
+                await connection.execute(
+                    text(
+                        "INSERT INTO github_work_item_states "
+                        "(id, organization_id, project_id, event_type, repository_key, repository_name, item_number, "
+                        "title, lifecycle_state, provider_updated_at, last_delivery_id) "
+                        "VALUES (:id, :org, :project, 'issues', 'octo/repo', 'Octo/Repo', 14, 'Issue', 'open', "
+                        "'2026-11-20T10:00:00Z', :delivery)"
+                    ),
+                    {"id": state_a, "org": organization_a, "project": project_a, "delivery": str(uuid.uuid4())},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO proactive_event_transitions "
+                        "(id, organization_id, project_id, delivery_id, event_type, action, repository_key, "
+                        "repository_name, item_number, title, lifecycle_state, provider_updated_at, applied_to_current) "
+                        "VALUES (:id, :org, :project, :delivery, 'issues', 'opened', 'octo/repo', 'Octo/Repo', 14, "
+                        "'Issue', 'open', '2026-11-20T10:00:00Z', true)"
+                    ),
+                    {
+                        "id": transition_a,
+                        "org": organization_a,
+                        "project": project_a,
+                        "delivery": str(uuid.uuid4()),
+                    },
+                )
+
+                await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_b)})
+                assert await connection.scalar(
+                    text("SELECT count(*) FROM github_work_item_states WHERE id = :id"), {"id": state_a}
+                ) == 0
+                assert await connection.scalar(
+                    text("SELECT count(*) FROM proactive_event_transitions WHERE id = :id"), {"id": transition_a}
+                ) == 0
+
+                savepoint = await connection.begin_nested()
+                with pytest.raises(DBAPIError):
+                    await connection.execute(
+                        text(
+                            "INSERT INTO github_work_item_states "
+                            "(id, organization_id, project_id, event_type, repository_key, repository_name, item_number, "
+                            "title, lifecycle_state, provider_updated_at, last_delivery_id) "
+                            "VALUES (:id, :org, :project, 'issues', 'octo/forged', 'Octo/Forged', 1, 'forged', 'open', "
+                            "'2026-11-20T10:00:00Z', :delivery)"
+                        ),
+                        {
+                            "id": uuid.uuid4(),
+                            "org": organization_a,
+                            "project": project_a,
+                            "delivery": str(uuid.uuid4()),
+                        },
+                    )
+                await savepoint.rollback()
+
+                await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
+                for statement in (
+                    "UPDATE proactive_event_transitions SET title = 'tampered' WHERE id = :id",
+                    "DELETE FROM proactive_event_transitions WHERE id = :id",
+                ):
+                    savepoint = await connection.begin_nested()
+                    with pytest.raises(DBAPIError):
+                        await connection.execute(text(statement), {"id": transition_a})
+                    await savepoint.rollback()
+                assert await connection.scalar(
+                    text("SELECT count(*) FROM proactive_event_transitions WHERE id = :id"), {"id": transition_a}
+                ) == 1
+            finally:
+                await transaction.rollback()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_teammate_conversation_rls_scopes_tenant_and_assignment() -> None:
     database_url = os.environ.get("DATABASE_URL", "")
     if not database_url.startswith("postgresql+"):
@@ -1361,6 +1490,7 @@ async def test_background_worker_webhook_and_maintenance_writes_are_tenant_scope
                 work_item: dict[str, object] = {
                     "number": number,
                     "state": "open",
+                    "updated_at": "2026-11-20T10:00:00Z",
                     "title": f"Tenant scoped {event_type}",
                     "html_url": f"https://github.com/Shared/Worker-RLS/{'pull' if key == 'pull_request' else 'issues'}/{number}",
                 }
