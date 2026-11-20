@@ -94,6 +94,14 @@
   color: var(--color-muted);
 }
 
+.providerState {
+  padding: 4px 8px;
+  border: 1px solid var(--line-light);
+  color: var(--color-muted);
+  font-size: 9px;
+  text-transform: capitalize;
+}
+
 .event h3 {
   margin: 0;
   font-size: 14px;
