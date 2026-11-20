@@ -8,9 +8,11 @@ import json
 import logging
 import socket
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
+from opentelemetry.trace import Status, StatusCode
 from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,6 +37,7 @@ from solvyn.db.models import (
 )
 from solvyn.db.session import async_session_factory, bind_tenant_scope
 from solvyn.multi_tenant.middleware import tenant_context
+from solvyn.observability.opentelemetry import get_tracer
 from solvyn.proactive_dependabot import dependabot_alert_signal
 from solvyn.repositories.credentials import CredentialEncryptionUnavailableError, GitHubCredentialNotFoundError
 from solvyn.repositories.github import GitHubRepositoryError
@@ -54,6 +57,35 @@ _WORKER_HEARTBEAT_INTERVAL_SECONDS = 5
 _WORKER_HEARTBEAT_RETENTION = timedelta(days=30)
 _MAINTENANCE_TENANT_OFFSET = 0
 _MAX_DEPENDABOT_REPOSITORIES = 10
+
+
+async def _trace_execution(
+    span_name: str,
+    execution_id: uuid.UUID,
+    execution_kind: str,
+    operation: Callable[[], Awaitable[str]],
+) -> str:
+    """Trace a worker operation with identifiers and bounded outcome labels only."""
+    with get_tracer("solvyn.scheduler").start_as_current_span(
+        span_name,
+        record_exception=False,
+        set_status_on_exception=False,
+    ) as span:
+        span.set_attribute("solvyn.execution.id", str(execution_id))
+        span.set_attribute("solvyn.execution.kind", execution_kind)
+        try:
+            outcome = await operation()
+        except asyncio.CancelledError:
+            span.set_attribute("solvyn.execution.outcome", "cancelled")
+            raise
+        except Exception:
+            span.set_attribute("solvyn.execution.outcome", "failed")
+            span.set_status(Status(StatusCode.ERROR))
+            raise
+        span.set_attribute("solvyn.execution.outcome", outcome)
+        if outcome == "failed":
+            span.set_status(Status(StatusCode.ERROR))
+        return outcome
 
 
 def _dependabot_error_outcome(exc: Exception) -> tuple[str, str, str]:
@@ -469,9 +501,44 @@ async def _fetch_due_cancellation_workflows(db: AsyncSession) -> list[tuple[uuid
     return [(execution_id, tenant_id) for execution_id, tenant_id, _ in due_rows[:_BATCH_SIZE]]
 
 
+async def _resume_scheduled_workflow(execution_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
+    """Resume one due workflow while recording a privacy-safe execution span."""
+    async def resume() -> str:
+        try:
+            await workflow_executor.resume(execution_id, str(tenant_id))
+        except RuntimeError:
+            # Another scheduler claimed it, or the schedule was cancelled.
+            logger.info("Scheduled workflow %s was not claimed", execution_id)
+            return "not_claimed"
+        except Exception:
+            logger.exception("Scheduled workflow %s failed", execution_id)
+            return "failed"
+        return "completed"
+
+    await _trace_execution(
+        "solvyn.scheduler.workflow.resume",
+        execution_id,
+        "workflow",
+        resume,
+    )
+
+
 async def _finalize_stale_workflow_cancellation(execution_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
-    """Use the executor's conditional lease check to finalize, never resume, a stale cancellation."""
-    await workflow_executor.cancel(execution_id, str(tenant_id))
+    """Finalize a stale cancellation with a privacy-safe execution span."""
+    async def finalize() -> str:
+        try:
+            await workflow_executor.cancel(execution_id, str(tenant_id))
+        except RuntimeError:
+            logger.info("Stale workflow cancellation %s was not finalized", execution_id)
+            return "not_claimed"
+        return "completed"
+
+    await _trace_execution(
+        "solvyn.scheduler.workflow.cancel",
+        execution_id,
+        "workflow_cancellation",
+        finalize,
+    )
 
 
 async def _fetch_due_verification_runs(db: AsyncSession) -> list[tuple[uuid.UUID, uuid.UUID]]:
@@ -520,50 +587,59 @@ async def _fetch_due_verification_runs(db: AsyncSession) -> list[tuple[uuid.UUID
 
 
 async def _execute_due_verification(run_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
-    """Claim and execute one persisted, already-approved verification."""
+    """Claim one approved verification and record its bounded execution outcome."""
     from fastapi import HTTPException
 
     from solvyn.api.v1.verification import _execute_approved_verification
 
-    async with async_session_factory() as db:
-        await bind_tenant_scope(db, tenant_id)
-        run = (
-            await db.execute(
-                select(VerificationRun).where(
-                    VerificationRun.id == run_id,
-                    VerificationRun.tenant_id == tenant_id,
+    async def execute() -> str:
+        async with async_session_factory() as db:
+            await bind_tenant_scope(db, tenant_id)
+            run = (
+                await db.execute(
+                    select(VerificationRun).where(
+                        VerificationRun.id == run_id,
+                        VerificationRun.tenant_id == tenant_id,
+                    )
                 )
-            )
-        ).scalar_one_or_none()
-        if run is None:
-            return
-        task = (
-            await db.execute(
-                select(Task).where(Task.id == run.task_id, Task.tenant_id == tenant_id)
-            )
-        ).scalar_one_or_none()
-        approval = (
-            await db.execute(
-                select(Approval).where(Approval.verification_run_id == run.id)
-            )
-        ).scalar_one_or_none()
-        if task is None or approval is None:
-            logger.error("Approved verification %s has no tenant-owned task or approval", run_id)
-            return
-        with tenant_context.scoped_tenant(tenant_id):
-            try:
-                await _execute_approved_verification(
-                    db,
-                    task,
-                    run,
-                    approval,
-                    recover_interrupted=True,
+            ).scalar_one_or_none()
+            if run is None:
+                return "not_found"
+            task = (
+                await db.execute(
+                    select(Task).where(Task.id == run.task_id, Task.tenant_id == tenant_id)
                 )
-            except HTTPException as exc:
-                if exc.status_code == 409:
-                    logger.info("Verification %s was claimed elsewhere or is not retryable", run_id)
-                else:
+            ).scalar_one_or_none()
+            approval = (
+                await db.execute(
+                    select(Approval).where(Approval.verification_run_id == run.id)
+                )
+            ).scalar_one_or_none()
+            if task is None or approval is None:
+                logger.error("Approved verification %s has no tenant-owned task or approval", run_id)
+                return "missing_context"
+            with tenant_context.scoped_tenant(tenant_id):
+                try:
+                    await _execute_approved_verification(
+                        db,
+                        task,
+                        run,
+                        approval,
+                        recover_interrupted=True,
+                    )
+                except HTTPException as exc:
+                    if exc.status_code == 409:
+                        logger.info("Verification %s was claimed elsewhere or is not retryable", run_id)
+                        return "not_claimed"
                     raise
+        return "completed"
+
+    await _trace_execution(
+        "solvyn.scheduler.verification.execute",
+        run_id,
+        "verification",
+        execute,
+    )
 
 
 async def _interrupt_stale_verification_runs() -> None:
@@ -632,20 +708,11 @@ async def run_scheduled_workflows() -> None:
                 continue
 
             for execution_id, tenant_id in due:
-                try:
-                    await workflow_executor.resume(execution_id, str(tenant_id))
-                except RuntimeError as exc:
-                    # Another scheduler claimed it, or the schedule was cancelled.
-                    logger.info("Scheduled workflow %s was not claimed: %s", execution_id, exc)
-                except Exception:
-                    logger.exception("Scheduled workflow %s failed", execution_id)
+                await _resume_scheduled_workflow(execution_id, tenant_id)
 
             for execution_id, tenant_id in due_cancellations:
                 try:
                     await _finalize_stale_workflow_cancellation(execution_id, tenant_id)
-                except RuntimeError as exc:
-                    # The owning worker or another scheduler finalized it after discovery.
-                    logger.info("Stale workflow cancellation %s was not finalized: %s", execution_id, exc)
                 except Exception:
                     logger.exception("Stale workflow cancellation %s failed", execution_id)
 
