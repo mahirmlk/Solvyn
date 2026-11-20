@@ -58,7 +58,6 @@ async def test_repository_task_runs_approved_tool_loop_in_docker_and_delivers_dr
 
     workspace_root = tmp_path / "repository-workspaces"
     monkeypatch.setattr(settings, "sandbox_workspace_root", str(workspace_root))
-    monkeypatch.setattr(teammates_api.settings, "sandbox_workspace_root", str(workspace_root))
     monkeypatch.setattr(teammate_runtime.settings, "sandbox_workspace_root", str(workspace_root))
     monkeypatch.setattr(verification_api.settings, "sandbox_workspace_root", str(workspace_root))
     monkeypatch.setattr(task_completion.settings, "sandbox_workspace_root", str(workspace_root))
