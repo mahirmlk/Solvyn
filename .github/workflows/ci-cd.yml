@@ -98,12 +98,15 @@ jobs:
           MIGRATION_DATABASE_URL: postgresql+asyncpg://solvyn_migrator:solvyn_migrator@localhost:5432/solvyn
           REDIS_URL: redis://localhost:6379/0
           API_KEY_SECRET: test-secret-key-for-ci-only
+      - name: Build sandbox image for repository workflow acceptance
+        run: docker build --file sandbox.Dockerfile --tag solvyn-sandbox:local .
       - name: Run tests
         run: pytest tests/ -v --cov=solvyn
         env:
           DATABASE_URL: postgresql+asyncpg://solvyn_runtime:solvyn_runtime@localhost:5432/solvyn
           REDIS_URL: redis://localhost:6379/0
           API_KEY_SECRET: test-secret-key-for-ci-only
+          SOLVYN_REQUIRE_SANDBOX_IMAGE: "1"
       - name: Smoke test database backup and restore
         run: bash scripts/backup-restore-smoke.sh
       - name: Check for dependency vulnerabilities
