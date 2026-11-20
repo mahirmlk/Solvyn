@@ -123,7 +123,7 @@ _DEFAULT_VERIFICATION_COMMANDS: dict[VerificationKind, list[str]] = {
         "/opt/solvyn/gitleaks.toml",
         "--gitleaks-ignore-path",
         "/opt/solvyn/gitleaks.ignore",
-        "--redact",
+        "--redact=100",
         "--no-banner",
         "--no-color",
         "--max-target-megabytes",
