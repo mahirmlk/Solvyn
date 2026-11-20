@@ -210,7 +210,7 @@ async def test_repository_task_runs_approved_tool_loop_in_docker_and_delivers_dr
         "acceptance_criteria": ["The health handler reports ready."],
         "implementation_steps": ["Update the health status response."],
         "relevant_files": ["src/health.py"],
-        "verification_strategy": ["Run Ruff lint in the sandbox."],
+        "verification_strategy": ["Run the repository pytest suite in the sandbox."],
         "risks": [],
     }
     tool_calls = [
@@ -232,7 +232,7 @@ async def test_repository_task_runs_approved_tool_loop_in_docker_and_delivers_dr
         if has_tool_runtime:
             if tool_cursor >= len(tool_calls):
                 return LLMResponse(
-                    content="Updated the health endpoint and requested lint verification.",
+                    content="Updated the health endpoint and requested pytest verification.",
                     provider="fake",
                     model="acceptance",
                     prompt_tokens=2,
@@ -333,7 +333,7 @@ async def test_repository_task_runs_approved_tool_loop_in_docker_and_delivers_dr
     )
     assert resumed.status_code == 200, resumed.text
     assert resumed.json()["status"] == "completed"
-    assert tool_cursor == len(tool_calls), "The actual workspace tool loop must call list/read/write/lint."
+    assert tool_cursor == len(tool_calls), "The workspace tool loop must call list/read/write/test."
     assert len(generated) >= 7
     assert workspace_manager.read_file(managed, "src/health.py").decode() == (
         "def health():\n    return {'status': 'ready'}\n"
@@ -355,7 +355,7 @@ async def test_repository_task_runs_approved_tool_loop_in_docker_and_delivers_dr
         run_id, verify_approval_id = run.id, verify_approval.id
     approved_verification = await client.post(
         f"/api/v1/approvals/{verify_approval_id}/approve",
-        json={"note": "Owner approved the sandbox lint run."},
+        json={"note": "Owner approved the sandbox pytest run."},
     )
     assert approved_verification.status_code == 200, approved_verification.text
     digest_before_test = workspace_manager.fingerprint(managed)
@@ -477,7 +477,7 @@ async def test_repository_task_runs_approved_tool_loop_in_docker_and_delivers_dr
             "branch_name": "solvyn/health-ready",
             "commit_message": "Report ready from health handler",
             "pull_request_title": "Report ready from health handler",
-            "pull_request_body": "Updates the repository health response after approved sandbox lint.",
+            "pull_request_body": "Updates the repository health response after approved sandbox pytest.",
         },
     )
     assert delivered.status_code == 201, delivered.text
