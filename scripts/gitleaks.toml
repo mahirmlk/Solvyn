@@ -1,0 +1,4 @@
+title = "Solvyn trusted secret scanning"
+
+[extend]
+useDefault = true

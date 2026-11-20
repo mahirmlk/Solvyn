@@ -667,23 +667,24 @@ async def test_dependency_schedule_repository_cap_is_incomplete_and_skips_partia
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("maintenance_type", "verification_kind", "command"),
+    ("maintenance_type", "verification_kind"),
     [
-        ("code_quality", "test", ["pytest", "-q"]),
-        ("code_quality", "build", ["python", "-m", "compileall", "-q", "."]),
-        ("code_quality", "lint", ["ruff", "check", "."]),
-        ("code_quality", "typecheck", ["mypy", "."]),
-        ("code_quality", "security", ["ruff", "check", "--select", "S", "."]),
-        ("documentation_review", "documentation", ["python", "/opt/solvyn/verify_markdown.py", "/workspace"]),
+        ("code_quality", "test"),
+        ("code_quality", "build"),
+        ("code_quality", "lint"),
+        ("code_quality", "typecheck"),
+        ("code_quality", "security"),
+        ("documentation_review", "documentation"),
     ],
 )
 async def test_due_verification_schedule_requests_profile_with_real_approval(
     monkeypatch: pytest.MonkeyPatch,
     maintenance_type: str,
     verification_kind: str,
-    command: list[str],
 ) -> None:
     from solvyn.api.v1 import verification
+
+    command = verification._DEFAULT_VERIFICATION_COMMANDS[verification_kind]
 
     now = datetime.now(UTC)
     tenant_id, organization_id, project_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
