@@ -43,6 +43,7 @@ async def test_repository_task_runs_approved_tool_loop_in_docker_and_delivers_dr
         TeammatePermission,
         TeammateProfile,
         TeammateProjectAssignment,
+        TeammateToolInvocation,
         Tenant,
         User,
         VerificationRun,
@@ -348,6 +349,21 @@ async def test_repository_task_runs_approved_tool_loop_in_docker_and_delivers_dr
 
     async with async_session_factory() as db:
         await bind_tenant_scope(db, tenant_id)
+        invocation_rows = (
+            await db.execute(
+                select(TeammateToolInvocation.tool_name, TeammateToolInvocation.status).where(
+                    TeammateToolInvocation.tenant_id == tenant_id,
+                    TeammateToolInvocation.task_id == child_task_id,
+                )
+            )
+        ).all()
+        invocations = {(row.tool_name, row.status) for row in invocation_rows}
+        assert invocations == {
+            ("workspace_list_files", "succeeded"),
+            ("workspace_read_file", "succeeded"),
+            ("workspace_write_file", "succeeded"),
+            ("workspace_run_verification", "succeeded"),
+        }
         run = (
             await db.execute(
                 select(VerificationRun).where(
