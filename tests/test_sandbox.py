@@ -261,6 +261,10 @@ async def test_runner_applies_container_policy_and_returns_workspace_changes(tmp
     assert "--network" in create and "none" in create
     assert "--read-only" in create
     assert "--cap-drop" in create and "ALL" in create
+    assert "HOME=/tmp" in create
+    assert "PYTHONDONTWRITEBYTECODE=1" in create
+    assert "PYTHONPYCACHEPREFIX=/tmp/pycache" in create
+    assert "PYTEST_ADDOPTS=-p no:cacheprovider" in create
     assert "--memory" in create and "512m" in create
     assert "--cpus" in create and "1.0" in create
     assert "--pids-limit" in create and "128" in create
