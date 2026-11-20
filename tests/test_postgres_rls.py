@@ -1373,7 +1373,13 @@ async def test_background_worker_webhook_and_maintenance_writes_are_tenant_scope
     monkeypatch.setattr("solvyn.api.v1.webhooks.settings.github_webhook_secret", secret)
     monkeypatch.setattr(scheduler, "_BATCH_SIZE", 1000)
     engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
-    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    connection = await engine.connect()
+    outer_transaction = await connection.begin()
+    sessions = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
     tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
     organization_a, organization_b = uuid.uuid4(), uuid.uuid4()
     project_a, project_b = uuid.uuid4(), uuid.uuid4()
@@ -1422,15 +1428,14 @@ async def test_background_worker_webhook_and_maintenance_writes_are_tenant_scope
     )
 
     try:
-        async with engine.connect() as connection:
-            role = (
-                await connection.execute(
-                    text("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user")
-                )
-            ).one()
-            assert role == (False, False)
+        role = (
+            await connection.execute(
+                text("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user")
+            )
+        ).one()
+        assert role == (False, False)
 
-        async with engine.begin() as connection:
+        async with connection.begin_nested():
             await connection.execute(
                 text("INSERT INTO tenants (id, name, slug, api_key_hash) VALUES (:id, 'Worker RLS', :slug, '')"),
                 [
@@ -1551,33 +1556,8 @@ async def test_background_worker_webhook_and_maintenance_writes_are_tenant_scope
         tenant_context.clear()
     finally:
         tenant_context.clear()
-        async with engine.begin() as connection:
-            for tenant_id in (tenant_a, tenant_b):
-                await connection.execute(
-                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
-                    {"tenant_id": str(tenant_id)},
-                )
-                await connection.execute(
-                    text("DELETE FROM proactive_events WHERE project_id IN (:a, :b)"),
-                    {"a": project_a, "b": project_b},
-                )
-                await connection.execute(
-                    text("DELETE FROM maintenance_schedules WHERE id IN (:a, :b)"),
-                    {"a": schedule_a, "b": schedule_b},
-                )
-                await connection.execute(
-                    text("DELETE FROM repositories WHERE id IN (:a, :b)"),
-                    {"a": repository_a, "b": repository_b},
-                )
-                await connection.execute(
-                    text("DELETE FROM projects WHERE id IN (:a, :b)"),
-                    {"a": project_a, "b": project_b},
-                )
-                await connection.execute(
-                    text("DELETE FROM organizations WHERE id IN (:a, :b)"),
-                    {"a": organization_a, "b": organization_b},
-                )
-            await connection.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant_a, "b": tenant_b})
+        await outer_transaction.rollback()
+        await connection.close()
         await engine.dispose()
 
 
