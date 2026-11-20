@@ -151,7 +151,7 @@ services:
       SANDBOX_RUNTIME_URL: http://sandbox:8001
       SANDBOX_RUNTIME_TOKEN: ${SANDBOX_RUNTIME_TOKEN:?Set SANDBOX_RUNTIME_TOKEN in .env.production}
     volumes:
-      - sandbox_workspaces:/app/.solvyn/workspaces:ro
+      - sandbox_workspaces:/app/.solvyn/workspaces
     networks:
       - default
       - sandbox-control
