@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -343,6 +344,40 @@ async def test_verification_tool_requests_approval_without_executing(
     assert approval.kind == "verification_run"
     assert approval.verification_run_id == verification.id
     assert '"command": ["pytest", "-q"]' in approval.payload
+
+
+@pytest.mark.asyncio
+async def test_security_verification_requests_approval_for_fixed_secret_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from solvyn.agents import workspace_tools
+
+    runtime, session, _manager, _workspace = _runtime(tmp_path, {"EXECUTE_COMMANDS"})
+    refresh = AsyncMock()
+    monkeypatch.setattr(workspace_tools, "refresh_task_completion_state", refresh)
+
+    result = await runtime._invoke(
+        {
+            "id": "call-secret-scan",
+            "function": {
+                "name": "workspace_run_verification",
+                "arguments": '{"kind":"security"}',
+            },
+        }
+    )
+
+    expected_command = workspace_tools._DEFAULT_VERIFICATION_COMMANDS["security"]
+    assert result["kind"] == "security"
+    assert result["status"] == "pending_approval"
+    verification = session.records[1]
+    assert verification.status == "pending_approval"
+    assert verification.command == json.dumps(expected_command)
+    assert verification.source_digest is not None
+    approval = session.records[2]
+    assert approval.kind == "verification_run"
+    assert approval.verification_run_id == verification.id
+    assert json.loads(approval.payload)["command"] == expected_command
+    refresh.assert_awaited_once_with(session, session.task)
 
 
 @pytest.mark.asyncio
