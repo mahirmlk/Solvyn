@@ -41,7 +41,7 @@ def test_production_compose_has_unique_and_isolated_dependency_services() -> Non
     assert "dependency-fetch" not in services["api"]["networks"]
     assert "dependency-fetch" not in services["worker"]["networks"]
     assert config["networks"]["dependency-fetch"]["internal"] is True
-    assert "internal" not in config["networks"]["dependency-egress"]
+    assert "internal" not in (config["networks"]["dependency-egress"] or {})
 
     proxy = (ROOT / "ops" / "dependency-proxy.conf").read_text(encoding="utf-8")
     assert "dstdomain pypi.org files.pythonhosted.org" in proxy
