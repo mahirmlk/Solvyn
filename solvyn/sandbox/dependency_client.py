@@ -9,16 +9,15 @@ import base64
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
 from urllib.parse import urlparse
 
 import httpx
 
 from solvyn.sandbox.dependencies import (
-    DependencyEvidence,
-    DependencyInputs,
     _MAX_BUNDLE_BYTES,
     DependencyBlockedError,
+    DependencyEvidence,
+    DependencyInputs,
     extract_bundle_archive,
 )
 
