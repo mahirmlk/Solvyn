@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import platform
 import re
 import stat
@@ -90,17 +91,37 @@ def runtime_fingerprint() -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 def _read_regular_file(path: Path, maximum: int) -> bytes:
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise DependencyBlockedError("The platform cannot safely read dependency inputs")
+    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
-        metadata = path.lstat()
+        descriptor = os.open(path, flags)
     except FileNotFoundError:
         raise
-    if not stat.S_ISREG(metadata.st_mode) or path.is_symlink() or metadata.st_size > maximum:
-        raise DependencyBlockedError("A dependency input is not a bounded regular file")
-    with path.open("rb") as stream:
-        content = stream.read(maximum + 1)
-    if len(content) > maximum:
-        raise DependencyBlockedError("A dependency input exceeds the configured size limit")
-    return content
+    except OSError as exc:
+        raise DependencyBlockedError("A dependency input could not be opened safely") from exc
+
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > maximum:
+            raise DependencyBlockedError("A dependency input is not a bounded regular file")
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = -1
+            content = stream.read(maximum + 1)
+            after = os.fstat(stream.fileno())
+        unchanged = (
+            before.st_dev == after.st_dev
+            and before.st_ino == after.st_ino
+            and before.st_size == after.st_size
+            and before.st_mtime_ns == after.st_mtime_ns
+            and before.st_ctime_ns == after.st_ctime_ns
+        )
+        if len(content) > maximum or len(content) != before.st_size or not unchanged:
+            raise DependencyBlockedError("A dependency input changed or exceeded its configured size limit")
+        return content
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _declares_project_dependencies(pyproject: dict[str, object]) -> bool:
