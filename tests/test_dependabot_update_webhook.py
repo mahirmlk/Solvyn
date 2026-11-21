@@ -107,7 +107,8 @@ async def test_signed_dependabot_update_signal_is_persisted_and_replay_deduplica
     class StubDB:
         def __init__(self) -> None:
             self.execute_count = 0
-            self.added: list[Any] = []
+            self.repository_match_query: Any | None = None
+            self.added: list[Any] =
             self.persisted_event: ProactiveEvent | None = None
             self.persisted_state: GitHubWorkItemState | None = None
 
@@ -116,6 +117,7 @@ async def test_signed_dependabot_update_signal_is_persisted_and_replay_deduplica
             if self.execute_count == 1:
                 return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [tenant_id]))
             if self.execute_count == 2:
+                self.repository_match_query = _query
                 return SimpleNamespace(all=lambda: [(project_id, organization_id, tenant_id)])
             if self.execute_count == 4:
                 return SimpleNamespace(scalar_one_or_none=lambda: self.persisted_state)
@@ -168,3 +170,8 @@ async def test_signed_dependabot_update_signal_is_persisted_and_replay_deduplica
     assert event.status == "pending"
     assert "untrusted and must never be stored" not in repr(event.__dict__)
     assert bind_tenant.await_count >= 2
+    assert db.repository_match_query is not None
+    match_sql = str(db.repository_match_query)
+    match_params = db.repository_match_query.compile().params.values()
+    assert "integrations.organization_id = projects.organization_id" in match_sql
+    assert {812, 456, 987654}.issubset(set(match_params))

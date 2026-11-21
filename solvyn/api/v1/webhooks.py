@@ -429,6 +429,7 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
                     Project.is_active == True,  # noqa: E712
                     Organization.is_active == True,  # noqa: E712
                     Integration.is_active == True,  # noqa: E712
+                    Integration.organization_id == Project.organization_id,
                     Integration.github_installation_id == installation_id,
                     Integration.github_account_id == github_account_id,
                     Repository.github_repository_id == github_repository_id,
