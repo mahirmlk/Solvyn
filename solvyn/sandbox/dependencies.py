@@ -432,7 +432,6 @@ def extract_bundle_archive(source: BinaryIO, destination: Path, expected_lock_sh
     if (
         not isinstance(listed, list)
         or len(listed) != len(wheel_paths)
-        or manifest.get("package_count") != len(logical_requirements)
         or manifest.get("wheel_count") != len(wheel_paths)
     ):
         raise DependencyBlockedError("Dependency bundle package or wheel count does not match its lock")
