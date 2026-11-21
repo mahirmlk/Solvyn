@@ -1,19 +1,18 @@
 from __future__ import annotations
 
-import base64
 import csv
 import hashlib
 import io
 import os
 import shutil
-import socket
+import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
 
 import pytest
 
-from solvyn.sandbox.dependencies import DependencyEvidence, DependencyInputs, runtime_fingerprint
+from solvyn.sandbox.dependencies import DependencyEvidence, DependencyInputs
 from solvyn.sandbox.runtime import DockerSandboxRunner
 from solvyn.sandbox.workspaces import WorkspaceManager
 
@@ -59,7 +58,23 @@ async def test_locked_wheel_installs_offline_without_changing_source(
     requirements = tmp_path / "requirements.txt"
     requirements.write_text(f"demo-pkg==0.1.0 --hash=sha256:{digest}\n", encoding="utf-8")
     temporary = tempfile.TemporaryDirectory(prefix="solvyn-test-bundle-")
-    evidence = DependencyEvidence("a" * 64, "b" * 64, 1, wheel.stat().st_size, runtime_fingerprint())
+    runner = DockerSandboxRunner(manager, image="solvyn-sandbox:local")
+    if not await runner.check_ready():
+        if os.getenv("SOLVYN_REQUIRE_SANDBOX_IMAGE") == "1":
+            pytest.fail("The required sandbox Docker image is unavailable")
+        pytest.skip("Sandbox Docker image is unavailable")
+    runtime_code = (
+        "import hashlib,json,platform,sys,sysconfig; "
+        "identity={\"python\":list(sys.version_info[:3]),\"implementation\":sys.implementation.name,"
+        "\"soabi\":sysconfig.get_config_var(\"SOABI\"),\"platform\":sysconfig.get_platform(),"
+        "\"machine\":platform.machine(),\"libc\":list(platform.libc_ver())}; "
+        "print(hashlib.sha256(json.dumps(identity,sort_keys=True,separators=(chr(44),chr(58))).encode()).hexdigest())"
+    )
+    target_runtime = subprocess.run(
+        ["docker", "run", "--rm", "--network", "none", "solvyn-sandbox:local", "python", "-c", runtime_code],
+        check=True, capture_output=True, text=True, timeout=30
+    ).stdout.strip()
+    evidence = DependencyEvidence("a" * 64, "b" * 64, 1, wheel.stat().st_size, target_runtime)
 
     async def fake_fetch(_inputs: DependencyInputs, *, base_url: str):
         from solvyn.sandbox.dependency_client import DependencyBundle
@@ -69,12 +84,6 @@ async def test_locked_wheel_installs_offline_without_changing_source(
 
     monkeypatch.setattr("solvyn.sandbox.runtime.discover_dependency_inputs", lambda *_args, **_kwargs: DependencyInputs(b"project", b"lock"))
     monkeypatch.setattr("solvyn.sandbox.runtime.fetch_dependency_bundle", fake_fetch)
-    runner = DockerSandboxRunner(manager, image="solvyn-sandbox:local")
-    if not await runner.check_ready():
-        if os.getenv("SOLVYN_REQUIRE_SANDBOX_IMAGE") == "1":
-            pytest.fail("The required sandbox Docker image is unavailable")
-        pytest.skip("Sandbox Docker image is unavailable")
-
     code = """import demo_pkg
 import socket
 print(demo_pkg.VALUE)
