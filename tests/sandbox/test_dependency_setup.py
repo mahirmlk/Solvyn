@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import io
+import os
+import sys
 import zipfile
 from pathlib import Path
-import sys
 
 import pytest
 
-from solvyn.sandbox.fetch_service import _run_tool
 from solvyn.sandbox.dependencies import (
     DependencyBlockedError,
     build_bundle_manifest,
@@ -17,6 +16,7 @@ from solvyn.sandbox.dependencies import (
     extract_bundle_archive,
     parse_exported_requirements,
 )
+from solvyn.sandbox.fetch_service import _run_tool
 
 
 def _wheel(path: Path, name: str, version: str, module_text: str) -> str:
