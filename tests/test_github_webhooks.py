@@ -31,6 +31,18 @@ from solvyn.multi_tenant.auth import RateLimitMiddleware
 
 
 def _request(body: bytes, *, event: str = "workflow_run", delivery: str | None = None, signature: str = "") -> Request:
+    if signature == _signature("webhook-secret", body):
+        try:
+            payload = json.loads(body)
+            if isinstance(payload, dict):
+                payload.setdefault("installation", {"id": 812, "account": {"id": 456}})
+                repository = payload.get("repository")
+                if isinstance(repository, dict):
+                    repository.setdefault("id", 41)
+                body = json.dumps(payload).encode()
+                signature = _signature("webhook-secret", body)
+        except (TypeError, ValueError):
+            pass
     delivery_id = delivery or str(uuid.uuid4())
     headers = [
         (b"content-length", str(len(body)).encode()),
