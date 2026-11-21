@@ -182,6 +182,8 @@ def validate_uv_project(project: dict[str, object], lock: dict[str, object]) -> 
     project_data = project.get("project")
     if not isinstance(project_data, dict):
         raise DependencyBlockedError("pyproject.toml must declare a PEP 621 project")
+    if project_data.get("dynamic"):
+        raise DependencyBlockedError("Dynamic project metadata is unsupported by the dependency fetcher")
     packages = lock.get("package")
     if not isinstance(packages, list) or len(packages) > _MAX_PACKAGES:
         raise DependencyBlockedError("uv.lock has an invalid or oversized package set")
