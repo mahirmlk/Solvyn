@@ -11,13 +11,14 @@ from pathlib import Path
 import pytest
 
 from solvyn.sandbox.dependencies import (
+    _read_regular_file,
     DependencyBlockedError,
     build_bundle_manifest,
     create_bundle_archive,
+    discover_dependency_inputs,
     extract_bundle_archive,
     parse_exported_requirements,
     validate_uv_project,
-    _read_regular_file,
 )
 from solvyn.sandbox.fetch_service import _render_export_pyproject, _run_tool
 
@@ -168,6 +169,31 @@ def test_dynamic_project_metadata_is_rejected_before_export() -> None:
     }
     with pytest.raises(DependencyBlockedError, match="Dynamic project metadata"):
         validate_uv_project(project, {"version": 1, "package": []})
+
+
+@pytest.mark.parametrize(
+    "pyproject",
+    [
+        "[tool.poetry]\nname='demo'\nversion='1.0'\n[tool.poetry.dev-dependencies]\npytest='^8'\n",
+        "[tool.poetry]\nname='demo'\nversion='1.0'\n[tool.poetry.group.test.dependencies]\npytest='^8'\n",
+        "[tool.pdm.dev-dependencies]\ntest=['pytest>=8']\n",
+    ],
+)
+def test_legacy_pyproject_dependencies_require_uv_lock(tmp_path: Path, pyproject: str) -> None:
+    (tmp_path / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+    with pytest.raises(DependencyBlockedError, match="supported root uv.lock"):
+        discover_dependency_inputs(tmp_path, required=False)
+
+
+@pytest.mark.parametrize("filename", ["setup.cfg", "setup.py"])
+def test_legacy_setup_manifests_require_uv_lock(tmp_path: Path, filename: str) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='demo'\nversion='1.0'\nrequires-python='>=3.12'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / filename).write_text("# package metadata may declare dependencies\n", encoding="utf-8")
+    with pytest.raises(DependencyBlockedError, match="manifest is not supported"):
+        discover_dependency_inputs(tmp_path, required=False)
 
 
 def test_fetch_subprocess_can_write_wheels_larger_than_two_megabytes(tmp_path: Path) -> None:
