@@ -1134,6 +1134,8 @@ async def test_task_verification_is_sandboxed_and_durable(
         self: DockerSandboxRunner,
         managed_workspace: Any,
         command: list[str],
+        *,
+        install_dependencies: bool = False,
     ) -> SandboxResult:
         nonlocal crashed_worker_calls
         from sqlalchemy import select
@@ -1170,7 +1172,7 @@ async def test_task_verification_is_sandboxed_and_durable(
     exhausted_result = await approve_and_execute(exhausted)
     assert exhausted_result.status_code == 200
     exhausted_run_id = uuid.UUID(exhausted_result.json()["id"])
-    assert exhausted_result.json()["status"] == "interrupted"
+    assert exhausted_result.json()["status"] == "interrupted", exhausted_result.json()
 
     for attempt_number, expected_status in ((2, "interrupted"), (3, "dead_letter")):
         async with async_session_factory() as db:
