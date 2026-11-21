@@ -214,7 +214,7 @@ async def test_repository_workspace_requires_a_delegated_task_handoff(client: As
         json={"repository_id": str(uuid.uuid4()), "repository_paths": ["README.md"]},
     )
 
-    assert response.status_code == 403
+    assert response.status_code == 403, response.text
     assert response.json()["detail"] == "Repository workspaces require an assigned project handoff"
 
 
@@ -704,7 +704,7 @@ async def test_task_verification_is_sandboxed_and_durable(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/workspace",
         json={"files": {"test_sample.py": "def test_sample():\n    assert 1 + 1 == 2\n"}},
     )
-    assert workspace.status_code == 201
+    assert workspace.status_code == 201, workspace.text
 
     from solvyn.db.models import (
         Approval,
@@ -799,7 +799,7 @@ async def test_task_verification_is_sandboxed_and_durable(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria",
         json={"criteria": ["The sample test passes"]},
     )
-    assert criteria.status_code == 201
+    assert criteria.status_code == 201, criteria.text
     accepted = await client.post(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria/{criteria.json()['acceptance_criteria'][0]['id']}/decision",
         json={"decision": "accepted", "note": "Reviewed the verification requirement"},
