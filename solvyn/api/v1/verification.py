@@ -206,7 +206,7 @@ async def _task_delivery_context(
                 "Repository is not bound to a GitHub App installation; reconnect it before delivery"
             )
     except GitHubCredentialNotFoundError as exc:
-        raise HTTPException(status_code=409, detail="Connect a GitHub organization token before delivery") from exc
+        raise HTTPException(status_code=409, detail="Reconnect this repository to a GitHub App installation before delivery") from exc
     except CredentialEncryptionUnavailableError as exc:
         raise HTTPException(
             status_code=503,

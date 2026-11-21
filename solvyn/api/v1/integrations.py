@@ -136,6 +136,8 @@ async def connect_github_installation(
             metadata = await app.installation_metadata(payload.installation_id)
     except GitHubRepositoryError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    if metadata.get("id") != payload.installation_id:
+        raise HTTPException(status_code=502, detail="GitHub returned metadata for a different installation")
     account_value = metadata.get("account")
     account = account_value if isinstance(account_value, dict) else {}
     account_id = account.get("id")

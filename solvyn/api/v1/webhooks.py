@@ -12,7 +12,7 @@ from typing import Any, cast
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import func, select, tuple_
+from sqlalchemy import select, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -433,8 +433,6 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
                     Integration.github_account_id == github_account_id,
                     Repository.github_repository_id == github_repository_id,
                     Project.tenant_id == tenant_id,
-                    # GitHub full names are case-insensitive; equality avoids LIKE wildcards.
-                    func.lower(Repository.full_name) == signal["repository_name"].lower(),
                 )
                 .limit(_MAX_PROJECT_MATCHES + 1)
             )

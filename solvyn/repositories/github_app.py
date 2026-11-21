@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import time
 from collections import OrderedDict
@@ -54,10 +55,10 @@ class InstallationTokenCache:
 
     def __init__(self, *, max_entries: int = _MAX_TOKEN_CACHE) -> None:
         self.max_entries = max_entries
-        self._items: OrderedDict[tuple[int, tuple[int, ...], tuple[tuple[str, str], ...]], tuple[str, float]] = OrderedDict()
+        self._items: OrderedDict[tuple[str, str, int, tuple[int, ...], tuple[tuple[str, str], ...]], tuple[str, float]] = OrderedDict()
         self._lock = asyncio.Lock()
 
-    async def get(self, key: tuple[int, tuple[int, ...], tuple[tuple[str, str], ...]]) -> str | None:
+    async def get(self, key: tuple[str, str, int, tuple[int, ...], tuple[tuple[str, str], ...]]) -> str | None:
         async with self._lock:
             item = self._items.get(key)
             if item is None:
@@ -69,7 +70,7 @@ class InstallationTokenCache:
             self._items.move_to_end(key)
             return token
 
-    async def put(self, key: tuple[int, tuple[int, ...], tuple[tuple[str, str], ...]], token: str, lifetime: int) -> None:
+    async def put(self, key: tuple[str, str, int, tuple[int, ...], tuple[tuple[str, str], ...]], token: str, lifetime: int) -> None:
         async with self._lock:
             self._items[key] = (token, time.monotonic() + max(0, lifetime))
             self._items.move_to_end(key)
@@ -78,6 +79,16 @@ class InstallationTokenCache:
 
 
 token_cache = InstallationTokenCache()
+
+
+def _app_cache_identity() -> tuple[str, str]:
+    """Return App ID plus a one-way key fingerprint for safe cache invalidation."""
+    app_id = settings.github_app_id
+    private_key = settings.github_app_private_key.replace("\\n", "\n")
+    if not app_id or not private_key:
+        raise GitHubRepositoryError(503, "GitHub App is not configured")
+    fingerprint = hashlib.sha256(private_key.encode("utf-8")).hexdigest()
+    return app_id, fingerprint
 
 
 class GitHubAppClient:
@@ -105,6 +116,8 @@ class GitHubAppClient:
             raise GitHubRepositoryError(502, "GitHub App request failed") from exc
         if response.status_code in (401, 403, 404):
             raise GitHubRepositoryError(response.status_code, "GitHub App authorization failed")
+        if response.status_code == 422:
+            raise GitHubRepositoryError(409, "GitHub App installation lacks a requested repository permission")
         if response.status_code == 429:
             raise GitHubRepositoryError(429, "GitHub rate limit reached")
         if response.status_code >= 500:
@@ -139,7 +152,8 @@ class GitHubAppClient:
             raise ValueError("Unsupported GitHub permission level")
         if any(level == "write" and permission not in {"contents", "pull_requests"} for permission, level in permission_items):
             raise ValueError("GitHub App write access is not used for this permission")
-        cache_key = installation_id, repo_ids, permission_items
+        app_id, key_fingerprint = _app_cache_identity()
+        cache_key = app_id, key_fingerprint, installation_id, repo_ids, permission_items
         cached = await token_cache.get(cache_key)
         if cached:
             return cached
@@ -152,6 +166,9 @@ class GitHubAppClient:
         expires_at = body.get("expires_at") if isinstance(body, dict) else None
         if not isinstance(token, str) or not token or not isinstance(expires_at, str):
             raise GitHubRepositoryError(502, "GitHub returned an invalid installation token")
+        actual_permissions = body.get("permissions") if isinstance(body, dict) else None
+        if not isinstance(actual_permissions, dict) or actual_permissions != dict(permission_items):
+            raise GitHubRepositoryError(502, "GitHub returned a token with an unexpected permission scope")
         from datetime import datetime
         try:
             expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00")).timestamp()
@@ -163,11 +180,16 @@ class GitHubAppClient:
     async def list_installation_repositories(self, installation_id: int) -> list[dict[str, Any]]:
         """List visible repositories for owner/admin discovery with a temporary broad token."""
         payload, _ = await self._request(
-            "POST", f"/app/installations/{installation_id}/access_tokens", payload={}
+            "POST",
+            f"/app/installations/{installation_id}/access_tokens",
+            payload={"permissions": {"metadata": "read"}},
         )
         token = payload.get("token") if isinstance(payload, dict) else None
+        permissions = payload.get("permissions") if isinstance(payload, dict) else None
         if not isinstance(token, str) or not token:
             raise GitHubRepositoryError(502, "GitHub returned an invalid installation token")
+        if permissions != {"metadata": "read"}:
+            raise GitHubRepositoryError(502, "GitHub returned a discovery token with an unexpected permission scope")
         repos: list[dict[str, Any]] = []
         for page in range(1, 21):
             try:

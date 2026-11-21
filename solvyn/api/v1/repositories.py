@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -162,8 +162,11 @@ async def connect_repository(
             )
         ).scalars().all()
         for app_integration in app_integrations:
+            installation_id = app_integration.github_installation_id
+            if not isinstance(installation_id, int) or installation_id < 1:
+                continue
             async with GitHubAppClient() as app:
-                installed = await app.list_installation_repositories(app_integration.github_installation_id)
+                installed = await app.list_installation_repositories(installation_id)
                 match = next(
                     (item for item in installed if isinstance(item.get("full_name"), str)
                      and item["full_name"].casefold() == payload.full_name.casefold()),
@@ -175,7 +178,7 @@ async def connect_repository(
                 if isinstance(numeric_id, bool) or not isinstance(numeric_id, int) or numeric_id < 1:
                     raise HTTPException(status_code=502, detail="GitHub returned invalid repository identity")
                 token = await app.installation_token(
-                    app_integration.github_installation_id,
+                    installation_id,
                     (numeric_id,),
                 )
                 async with GitHubClient(token=token) as github:
@@ -319,9 +322,12 @@ async def list_repository_candidates(
         ).scalars().all()
         if app_integrations:
             async with GitHubAppClient() as app:
-                all_candidates = []
+                all_candidates: list[dict[str, Any]] = []
                 for app_integration in app_integrations:
-                    installed = await app.list_installation_repositories(app_integration.github_installation_id)
+                    installation_id = app_integration.github_installation_id
+                    if not isinstance(installation_id, int) or installation_id < 1:
+                        continue
+                    installed = await app.list_installation_repositories(installation_id)
                     all_candidates.extend(
                         {
                             "id": item["id"],
@@ -329,7 +335,7 @@ async def list_repository_candidates(
                             "default_branch": item.get("default_branch") or "",
                             "private": bool(item.get("private", False)),
                             "url": item.get("html_url") or "",
-                            "installation_id": app_integration.github_installation_id,
+                            "installation_id": installation_id,
                         }
                         for item in installed
                         if isinstance(item.get("id"), int)

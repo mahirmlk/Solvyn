@@ -33,6 +33,11 @@ def upgrade() -> None:
         "integrations",
         "github_account_id IS NULL OR github_account_id > 0",
     )
+    op.create_check_constraint(
+        "ck_integrations_github_installation_account_pair",
+        "integrations",
+        "(github_installation_id IS NULL) = (github_account_id IS NULL)",
+    )
 
     op.add_column("repositories", sa.Column("github_repository_id", sa.BigInteger(), nullable=True))
     op.create_index("ix_repositories_github_repository_id", "repositories", ["github_repository_id"])
@@ -41,14 +46,21 @@ def upgrade() -> None:
         "repositories",
         "github_repository_id IS NULL OR github_repository_id > 0",
     )
+    op.create_check_constraint(
+        "ck_repositories_github_repository_binding",
+        "repositories",
+        "github_repository_id IS NULL OR (provider = 'github' AND integration_id IS NOT NULL)",
+    )
 
 
 def downgrade() -> None:
+    op.drop_constraint("ck_repositories_github_repository_binding", "repositories", type_="check")
     op.drop_constraint("ck_repositories_github_repository_id_positive", "repositories", type_="check")
     op.drop_index("ix_repositories_github_repository_id", table_name="repositories")
     op.drop_column("repositories", "github_repository_id")
 
     op.drop_constraint("ck_integrations_github_account_id_positive", "integrations", type_="check")
+    op.drop_constraint("ck_integrations_github_installation_account_pair", "integrations", type_="check")
     op.drop_constraint("ck_integrations_github_installation_id_positive", "integrations", type_="check")
     op.drop_constraint("uq_integrations_github_installation_id", "integrations", type_="unique")
     op.drop_column("integrations", "github_account_type")

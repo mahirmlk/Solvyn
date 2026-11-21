@@ -5,6 +5,7 @@ from enum import StrEnum
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -12,7 +13,6 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
-    BigInteger,
     LargeBinary,
     Numeric,
     String,
@@ -786,6 +786,10 @@ class Integration(Base):
             name="ck_integrations_github_installation_id_positive",
         ),
         CheckConstraint(
+            "(github_installation_id IS NULL) = (github_account_id IS NULL)",
+            name="ck_integrations_github_installation_account_pair",
+        ),
+        CheckConstraint(
             "github_account_id IS NULL OR github_account_id > 0",
             name="ck_integrations_github_account_id_positive",
         ),
@@ -992,6 +996,10 @@ class Repository(Base):
         CheckConstraint(
             "github_repository_id IS NULL OR github_repository_id > 0",
             name="ck_repositories_github_repository_id_positive",
+        ),
+        CheckConstraint(
+            "github_repository_id IS NULL OR (provider = 'github' AND integration_id IS NOT NULL)",
+            name="ck_repositories_github_repository_binding",
         ),
     )
 
