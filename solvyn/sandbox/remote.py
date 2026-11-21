@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from solvyn.sandbox.dependencies import DependencyEvidence
+from solvyn.sandbox.dependencies import DependencyBlockedError, DependencyEvidence, discover_dependency_inputs
 from solvyn.sandbox.runtime import SandboxRuntimeError
 from solvyn.sandbox.workspaces import ManagedWorkspace, WorkspaceManager
 
@@ -51,6 +51,12 @@ class RemoteSandboxRunner:
 
     async def run(self, workspace: ManagedWorkspace, command: Sequence[str], *, install_dependencies: bool = False) -> RemoteSandboxResult:
         self.workspaces.validate_tree(workspace)
+        expected_inputs = None
+        if install_dependencies:
+            try:
+                expected_inputs = discover_dependency_inputs(workspace.path, required=False)
+            except (DependencyBlockedError, OSError, ValueError) as exc:
+                raise SandboxRuntimeError(f"Dependency setup is blocked: {exc}") from exc
         try:
             async with httpx.AsyncClient(
                 base_url=self.base_url,
@@ -124,8 +130,12 @@ class RemoteSandboxRunner:
                 evidence_payload["uv_version"],
                 evidence_payload["pip_version"],
             )
-        if install_dependencies and evidence is None:
-            raise SandboxRuntimeError("Trusted sandbox runtime omitted dependency evidence")
+        if expected_inputs is None and evidence is not None:
+            raise SandboxRuntimeError("Trusted sandbox runtime reported unexpected dependency evidence")
+        if expected_inputs is not None and (
+            evidence is None or evidence.lock_sha256 != expected_inputs.lock_sha256
+        ):
+            raise SandboxRuntimeError("Trusted sandbox runtime omitted or mismatched dependency evidence")
         self.workspaces.validate_tree(workspace)
 
         return RemoteSandboxResult(
