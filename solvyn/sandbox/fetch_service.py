@@ -76,6 +76,7 @@ def _run_tool(
     deadline = time.monotonic() + _PROCESS_TIMEOUT
     with selectors.DefaultSelector() as selector:
         selector.register(process.stdout, selectors.EVENT_READ)
+        stdout_fd = process.stdout.fileno()
         try:
             while process.poll() is None or selector.get_map():
                 remaining = deadline - time.monotonic()
