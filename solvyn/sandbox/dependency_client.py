@@ -92,11 +92,12 @@ async def fetch_dependency_bundle(
                     raise DependencyBlockedError("Dependency bundle transfer was truncated")
 
         wheel_dir = root / "wheels"
-        evidence = extract_bundle_archive(
-            bundle_file.open("rb"),
-            wheel_dir,
-            inputs.lock_sha256,
-        )
+        with bundle_file.open("rb") as source:
+            evidence = extract_bundle_archive(
+                source,
+                wheel_dir,
+                inputs.lock_sha256,
+            )
         requirements_path = root / "requirements.txt"
         # extract_bundle_archive consumes requirements as an input; re-read it
         # from the validated response tar is intentionally avoided. The helper
