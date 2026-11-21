@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-import tarfile
 import zipfile
 from pathlib import Path
 
@@ -61,6 +60,7 @@ def test_wheelhouse_round_trip_binds_hashes_and_allows_marker_versions(tmp_path:
         f"demo-pkg==2.0 ; python_version >= '3.13' --hash=sha256:{digest_2}\n"
     ).encode()
     manifest, _ = build_bundle_manifest(wheels, lock_sha256="c" * 64, requirements=requirements)
+    manifest["toolchain"] = {"uv": "0.13.7", "pip": "26.3"}
     assert manifest["package_count"] == 1
     assert manifest["wheel_count"] == 2
 
@@ -68,8 +68,7 @@ def test_wheelhouse_round_trip_binds_hashes_and_allows_marker_versions(tmp_path:
     create_bundle_archive(wheels, requirements, manifest, archive)
     archive.seek(0)
     extracted = tmp_path / "extracted"
-    with tarfile.open(fileobj=archive, mode="r|") as source:
-        evidence = extract_bundle_archive(source.fileobj, extracted, "c" * 64)
+    evidence = extract_bundle_archive(archive, extracted, "c" * 64)
     assert evidence.package_count == 1
     assert len(list(extracted.glob("*.whl"))) == 2
 
