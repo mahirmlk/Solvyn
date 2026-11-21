@@ -664,6 +664,13 @@ def _verification_dict(run: VerificationRun) -> dict[str, Any]:
         "duration_seconds": float(run.duration_seconds) if run.duration_seconds is not None else None,
         "runner_version": run.runner_version,
         "source_digest": run.source_digest,
+        "dependency_lock_sha256": run.dependency_lock_sha256,
+        "dependency_wheelhouse_sha256": run.dependency_wheelhouse_sha256,
+        "dependency_runtime_fingerprint": run.dependency_runtime_fingerprint,
+        "dependency_uv_version": run.dependency_uv_version,
+        "dependency_pip_version": run.dependency_pip_version,
+        "dependency_package_count": run.dependency_package_count,
+        "dependency_wheelhouse_bytes": run.dependency_wheelhouse_bytes,
         "attempt_count": run.attempt_count,
         "attempt_started_at": run.attempt_started_at.isoformat() if run.attempt_started_at else None,
         "started_at": run.started_at.isoformat() if run.started_at else None,
@@ -1463,7 +1470,11 @@ async def _execute_approved_verification(
 
     command = json.loads(run.command)
     try:
-        result: SandboxResult | RemoteSandboxResult = await _sandbox_runner().run(workspace, command)
+        result: SandboxResult | RemoteSandboxResult = await _sandbox_runner().run(
+            workspace,
+            command,
+            install_dependencies=run.kind in {"test", "build", "lint", "typecheck"},
+        )
     except asyncio.CancelledError:
         await _finish_run(
             db,
@@ -1510,6 +1521,13 @@ async def _execute_approved_verification(
             "stdout": result.stdout[:_MAX_STORED_OUTPUT_CHARS],
             "stderr": result.stderr[:_MAX_STORED_OUTPUT_CHARS],
             "duration_seconds": result.duration_seconds,
+            "dependency_lock_sha256": result.dependency_evidence.lock_sha256 if result.dependency_evidence else None,
+            "dependency_wheelhouse_sha256": result.dependency_evidence.wheelhouse_sha256 if result.dependency_evidence else None,
+            "dependency_runtime_fingerprint": result.dependency_evidence.runtime_fingerprint if result.dependency_evidence else None,
+            "dependency_uv_version": result.dependency_evidence.uv_version if result.dependency_evidence else None,
+            "dependency_pip_version": result.dependency_evidence.pip_version if result.dependency_evidence else None,
+            "dependency_package_count": result.dependency_evidence.package_count if result.dependency_evidence else None,
+            "dependency_wheelhouse_bytes": result.dependency_evidence.wheelhouse_bytes if result.dependency_evidence else None,
             "completed_at": datetime.now(UTC),
         },
     )
