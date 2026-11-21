@@ -99,6 +99,67 @@ def _run_tool(
         raise DependencyBlockedError("Locked dependencies could not be exported or fetched safely")
     return bytes(output)
 
+def _toml_key(value: str) -> str:
+    if value and all(character.isalnum() or character in "_-" for character in value):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _toml_value(value: object) -> str:
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, list):
+        rendered: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                rendered.append(_toml_value(item))
+            elif isinstance(item, dict) and set(item) == {"include-group"} and isinstance(item["include-group"], str):
+                rendered.append("{ include-group = " + _toml_value(item["include-group"]) + " }")
+            else:
+                raise DependencyBlockedError("Dependency groups contain unsupported metadata")
+        return "[" + ", ".join(rendered) + "]"
+    raise DependencyBlockedError("Project dependency metadata has an unsupported value")
+
+
+def _render_export_pyproject(project_data: dict[str, object]) -> bytes:
+    """Render only static dependency declarations; omit all build/plugin configuration."""
+    project = project_data.get("project")
+    if not isinstance(project, dict) or project.get("dynamic"):
+        raise DependencyBlockedError("Dynamic project metadata is unsupported by the dependency fetcher")
+    required = ("name", "version", "requires-python")
+    if any(not isinstance(project.get(key), str) for key in required):
+        raise DependencyBlockedError("Project name, version, and requires-python must be static")
+
+    lines = ["[project]"]
+    for key in required:
+        lines.append(f"{key} = {_toml_value(project[key])}")
+    dependencies = project.get("dependencies", [])
+    if not isinstance(dependencies, list) or any(not isinstance(item, str) for item in dependencies):
+        raise DependencyBlockedError("Project dependencies must be static PEP 508 strings")
+    lines.append("dependencies = " + _toml_value(dependencies))
+
+    optional = project.get("optional-dependencies", {})
+    if not isinstance(optional, dict):
+        raise DependencyBlockedError("Optional dependencies must be a static table")
+    if optional:
+        lines.extend(["", "[project.optional-dependencies]"])
+        for key, value in sorted(optional.items()):
+            if not isinstance(key, str) or not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                raise DependencyBlockedError("Optional dependencies must be static PEP 508 strings")
+            lines.append(f"{_toml_key(key)} = {_toml_value(value)}")
+
+    groups = project_data.get("dependency-groups", {})
+    if not isinstance(groups, dict):
+        raise DependencyBlockedError("Dependency groups must be a static table")
+    if groups:
+        lines.extend(["", "[dependency-groups]"])
+        for key, value in sorted(groups.items()):
+            if not isinstance(key, str):
+                raise DependencyBlockedError("Dependency group names must be strings")
+            lines.append(f"{_toml_key(key)} = {_toml_value(value)}")
+    return ("\\n".join(lines) + "\\n").encode("utf-8")
+
+
 def _build_wheelhouse(pyproject_bytes: bytes, lock_bytes: bytes) -> tuple[BinaryIO, int]:
     project = tomllib.loads(pyproject_bytes.decode("utf-8"))
     lock = tomllib.loads(lock_bytes.decode("utf-8"))
@@ -107,7 +168,7 @@ def _build_wheelhouse(pyproject_bytes: bytes, lock_bytes: bytes) -> tuple[Binary
 
     temporary = tempfile.TemporaryDirectory(prefix="solvyn-deps-")
     root = Path(temporary.name)
-    (root / "pyproject.toml").write_bytes(pyproject_bytes)
+    (root / "pyproject.toml").write_bytes(_render_export_pyproject(project))
     (root / "uv.lock").write_bytes(lock_bytes)
     wheel_dir = root / "wheelhouse"
     wheel_dir.mkdir(mode=0o700)
