@@ -207,11 +207,18 @@ services:
     volumes:
       - sandbox_workspaces:/app/.solvyn/workspaces
       - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      SANDBOX_WORKSPACE_ROOT: /app/.solvyn/workspaces
+      SANDBOX_RUNTIME_TOKEN: ${SANDBOX_RUNTIME_TOKEN:?Set SANDBOX_RUNTIME_TOKEN in .env.production}
+      DEPENDENCY_FETCHER_URL: http://dependency-fetcher:8002
     networks:
       - sandbox-control
+      - dependency-fetch
     depends_on:
       sandbox-workspace-init:
         condition: service_completed_successfully
+      dependency-fetcher:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3)"]
       interval: 30s
@@ -223,6 +230,45 @@ services:
         limits:
           cpus: "1.0"
           memory: 512M
+
+  dependency-proxy:
+    build:
+      context: .
+      dockerfile: ops/dependency-proxy.Dockerfile
+    image: solvyn-dependency-proxy:local
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,nosuid,nodev
+      - /var/run/squid:size=4m,nosuid,nodev
+    networks:
+      - dependency-fetch
+      - dependency-egress
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+  dependency-fetcher:
+    build:
+      context: .
+      dockerfile: dependency-fetcher.Dockerfile
+    image: solvyn-dependency-fetcher:local
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=1024m,mode=1777,noexec,nosuid,nodev
+    networks:
+      - dependency-fetch
+    depends_on:
+      dependency-proxy:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
 
   frontend:
     build:
@@ -251,3 +297,6 @@ volumes:
 networks:
   sandbox-control:
     internal: true
+  dependency-fetch:
+    internal: true
+  dependency-egress:
