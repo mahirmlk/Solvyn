@@ -436,7 +436,7 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
     assert rereview.json()["decision_workspace_digest"] != initial_workspace_digest
     accepted_workspace_digest = rereview.json()["decision_workspace_digest"]
 
-    async def fake_verification_run(self: Any, managed_workspace: Any, command: list[str]) -> Any:
+    async def fake_verification_run(self: Any, managed_workspace: Any, command: list[str], *, install_dependencies: bool = False) -> Any:
         from solvyn.sandbox.runtime import SandboxResult
 
         return SandboxResult(uuid.uuid4(), tuple(command), 0, False, "1 passed", "", False, 0.05)
