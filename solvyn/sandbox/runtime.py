@@ -7,6 +7,7 @@ credentials, caller environment, or network is mounted into the untrusted job.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
 import stat
@@ -19,7 +20,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, cast
 
-from solvyn.sandbox.workspaces import ManagedWorkspace, WorkspaceError, WorkspaceManager, safe_relative_path
+from solvyn.sandbox.dependencies import (
+    _PIP_VERSION,
+    DependencyBlockedError,
+    DependencyEvidence,
+    _sha256_file,
+    create_bundle_archive,
+    discover_dependency_inputs,
+)
+from solvyn.sandbox.dependency_client import DependencyBundle, fetch_dependency_bundle
+from solvyn.sandbox.workspaces import (
+    ManagedWorkspace,
+    WorkspaceError,
+    WorkspaceManager,
+    safe_relative_path,
+)
 
 _CONTAINER_ID = re.compile(r"^[a-f0-9]{12,64}$")
 
@@ -65,6 +80,7 @@ class SandboxResult:
     stderr: str
     output_truncated: bool
     duration_seconds: float
+    dependency_evidence: DependencyEvidence | None = None
 
 
 @dataclass(frozen=True)
@@ -112,6 +128,7 @@ class DockerSandboxRunner:
         docker_command: Sequence[str] | None = None,
         limits: SandboxLimits | None = None,
         cli_timeout_seconds: float = 20.0,
+        dependency_fetcher_url: str | None = None,
     ) -> None:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}", image):
             raise ValueError("Invalid sandbox image reference")
@@ -124,6 +141,7 @@ class DockerSandboxRunner:
             raise ValueError("docker_command must contain non-empty executable arguments")
         self.limits = limits or SandboxLimits()
         self.cli_timeout_seconds = cli_timeout_seconds
+        self.dependency_fetcher_url = dependency_fetcher_url or os.getenv("DEPENDENCY_FETCHER_URL") or "http://dependency-fetcher:8002"
 
     async def check_ready(self) -> bool:
         """Check that the configured engine and prebuilt execution image are available."""
@@ -133,11 +151,24 @@ class DockerSandboxRunner:
         image = await self._cli(["image", "inspect", self.image], timeout=self.cli_timeout_seconds)
         return image.returncode == 0 and not image.timed_out
 
-    async def run(self, workspace: ManagedWorkspace, command: Sequence[str]) -> SandboxResult:
+    async def run(self, workspace: ManagedWorkspace, command: Sequence[str], *, install_dependencies: bool = False) -> SandboxResult:
         argv = self._validate_command(command)
         size = self.workspaces.validate_tree(workspace)
         if size > self.limits.workspace_bytes:
             raise WorkspaceError("Workspace exceeds the execution size limit")
+
+        source_fingerprint = self.workspaces.fingerprint(workspace)
+        dependency_bundle: DependencyBundle | None = None
+        if install_dependencies:
+            try:
+                inputs = discover_dependency_inputs(workspace.path, required=False)
+                if inputs is not None:
+                    dependency_bundle = await fetch_dependency_bundle(
+                        inputs,
+                        base_url=self.dependency_fetcher_url,
+                    )
+            except (DependencyBlockedError, OSError, ValueError) as exc:
+                raise SandboxRuntimeError(f"Dependency setup is blocked: {exc}") from exc
 
         run_id = uuid.uuid4()
         container_name = f"solvyn-sandbox-{run_id.hex}"
@@ -146,7 +177,7 @@ class DockerSandboxRunner:
         cleanup_needed = False
         exec_result = _CommandResult(125, b"", b"Sandbox did not run")
         try:
-            created = await self._cli(self._create_args(container_name), timeout=self.cli_timeout_seconds)
+            created = await self._cli(self._create_args(container_name, install_dependencies=dependency_bundle is not None), timeout=self.cli_timeout_seconds)
             cleanup_needed = created.returncode == 0 or created.timed_out
             container_id = created.stdout.decode("ascii", errors="ignore").strip()
             if created.returncode != 0 or not _CONTAINER_ID.fullmatch(container_id):
@@ -157,6 +188,11 @@ class DockerSandboxRunner:
                 raise SandboxRuntimeError("Docker failed to start the sandbox container")
 
             await self._stage_workspace(container_id, workspace)
+            if dependency_bundle is not None:
+                await self._stage_dependency_bundle(container_id, dependency_bundle)
+                await self._install_dependencies(container_id)
+                if self.workspaces.fingerprint(workspace) != source_fingerprint:
+                    raise SandboxRuntimeError("Dependency setup changed the source workspace")
 
             permissions_set = await self._cli(
                 ["exec", "--user", "0", container_id, "chmod", "-R", "a+rwX", "/workspace"],
@@ -165,8 +201,12 @@ class DockerSandboxRunner:
             if permissions_set.returncode != 0:
                 raise SandboxRuntimeError("Docker failed to prepare the workspace")
 
+            run_arguments = ["exec"]
+            if dependency_bundle is not None:
+                run_arguments.extend(["--env", "PYTHONPATH=/deps/site-packages:/workspace"])
+            run_arguments.extend([container_id, *argv])
             exec_result = await self._cli(
-                ["exec", container_id, *argv],
+                run_arguments,
                 timeout=self.limits.timeout_seconds,
                 output_limit=self.limits.output_bytes,
             )
@@ -177,8 +217,12 @@ class DockerSandboxRunner:
 
             await self._export_workspace(container_id, workspace)
         finally:
-            if cleanup_needed:
-                await self._remove_container(container_name)
+            try:
+                if cleanup_needed:
+                    await self._remove_container(container_name)
+            finally:
+                if dependency_bundle is not None:
+                    dependency_bundle.close()
 
         return SandboxResult(
             run_id=run_id,
@@ -189,13 +233,14 @@ class DockerSandboxRunner:
             stderr=exec_result.stderr.decode("utf-8", errors="replace"),
             output_truncated=exec_result.truncated,
             duration_seconds=time.monotonic() - started,
+            dependency_evidence=dependency_bundle.evidence if dependency_bundle is not None else None,
         )
 
-    def _create_args(self, name: str) -> list[str]:
+    def _create_args(self, name: str, *, install_dependencies: bool = False) -> list[str]:
         limits = self.limits
         tmp_size = f"{limits.tmp_bytes}"
         workspace_size = f"{limits.workspace_bytes}"
-        memory = f"{limits.memory_mb}m"
+        memory = f"{max(limits.memory_mb, 2048) if install_dependencies else limits.memory_mb}m"
         return [
             "create",
             "--name",
@@ -227,6 +272,7 @@ class DockerSandboxRunner:
             f"/tmp:rw,noexec,nosuid,nodev,size={tmp_size},nr_inodes=2048",
             "--tmpfs",
             f"/workspace:rw,nosuid,nodev,size={workspace_size},nr_inodes=10000",
+            *(["--tmpfs", "/deps:rw,nosuid,nodev,size=1536m,uid=10001,gid=10001,nr_inodes=100000"] if install_dependencies else []),
             "--workdir",
             "/workspace",
             "--env",
@@ -304,6 +350,111 @@ class DockerSandboxRunner:
         size = bounded.tell()
         archive.seek(0)
         return size
+
+    async def _stage_dependency_bundle(self, container_id: str, bundle: DependencyBundle) -> None:
+        """Copy a locally verified archive into the job's separate /deps tmpfs."""
+        if await self._target_runtime_fingerprint(container_id) != bundle.evidence.runtime_fingerprint:
+            raise SandboxRuntimeError("Dependency wheels do not match the sandbox Python ABI or platform")
+        with tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode="w+b") as archive:
+            requirements = bundle.requirements_path.read_bytes()
+            size = create_bundle_archive(bundle.wheel_dir, requirements, {
+                "schema": 1,
+                "lock_sha256": bundle.evidence.lock_sha256,
+                "requirements_sha256": hashlib.sha256(requirements).hexdigest(),
+                "package_count": bundle.evidence.package_count,
+                "wheelhouse_bytes": bundle.evidence.wheelhouse_bytes,
+                "wheels": [
+                    {"filename": path.name, "sha256": _sha256_file(path), "size": path.stat().st_size}
+                    for path in sorted(bundle.wheel_dir.iterdir(), key=lambda item: item.name)
+                ],
+            }, cast(BinaryIO, archive))
+            if size > 400 * 1024 * 1024:
+                raise SandboxRuntimeError("Verified dependency archive exceeds its transfer limit")
+            archive.seek(0)
+            proc = await asyncio.create_subprocess_exec(
+                *self.docker_command,
+                "exec", "--user", "0", "-i", container_id,
+                "tar", "-x", "--no-same-owner", "--no-same-permissions", "-C", "/deps",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env={"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "")},
+            )
+            assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+            stdout_task = asyncio.create_task(self._read_bounded(proc.stdout, 16 * 1024))
+            stderr_task = asyncio.create_task(self._read_bounded(proc.stderr, 16 * 1024))
+            copy_task = asyncio.create_task(self._copy_archive(cast(BinaryIO, archive), proc.stdin))
+            try:
+                await asyncio.wait_for(copy_task, timeout=self.cli_timeout_seconds)
+                proc.stdin.close()
+                try:
+                    await proc.stdin.wait_closed()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                await asyncio.wait_for(proc.wait(), timeout=self.cli_timeout_seconds)
+            except (TimeoutError, asyncio.CancelledError) as exc:
+                proc.kill()
+                await proc.wait()
+                await asyncio.gather(copy_task, stdout_task, stderr_task, return_exceptions=True)
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                raise SandboxRuntimeError("Dependency bundle staging timed out") from exc
+            _, _ = await stdout_task
+            stderr, _ = await stderr_task
+            if proc.returncode != 0:
+                detail = self._docker_error_detail(stderr)
+                raise SandboxRuntimeError("Docker failed to stage dependency wheels" + (f": {detail}" if detail else ""))
+
+    async def _target_runtime_fingerprint(self, container_id: str) -> str:
+        script = (
+            "import hashlib,json,platform,sys,sysconfig; "
+            "identity={'python':list(sys.version_info[:3]),'implementation':sys.implementation.name,"
+            "'soabi':sysconfig.get_config_var('SOABI'),'platform':sysconfig.get_platform(),"
+            "'machine':platform.machine(),'libc':list(platform.libc_ver())}; "
+            "print(hashlib.sha256(json.dumps(identity,sort_keys=True,separators=(',',':')).encode()).hexdigest())"
+        )
+        result = await self._cli(["exec", container_id, "python", "-c", script], timeout=self.cli_timeout_seconds)
+        if result.returncode != 0 or result.timed_out:
+            raise SandboxRuntimeError("Docker could not verify the sandbox Python runtime")
+        fingerprint = result.stdout.decode("ascii", errors="ignore").strip()
+        if not re.fullmatch(r"[a-f0-9]{64}", fingerprint):
+            raise SandboxRuntimeError("Sandbox Python runtime returned invalid ABI evidence")
+        return fingerprint
+
+    async def _install_dependencies(self, container_id: str) -> None:
+        pip_version = await self._cli(
+            ["exec", container_id, "python", "-m", "pip", "--version"],
+            timeout=self.cli_timeout_seconds,
+        )
+        if pip_version.returncode != 0 or not pip_version.stdout.decode("ascii", errors="ignore").startswith(f"pip {_PIP_VERSION} "):
+            raise SandboxRuntimeError("Sandbox pip version does not match the pinned dependency toolchain")
+        created = await self._cli(
+            ["exec", "--user", "10001", container_id, "mkdir", "-p", "/deps/site-packages", "/deps/tmp"],
+            timeout=self.cli_timeout_seconds,
+        )
+        if created.returncode != 0 or created.timed_out:
+            detail = self._docker_error_detail(created.stderr)
+            suffix = f": {detail}" if detail else ""
+            raise SandboxRuntimeError("Docker failed to prepare the dependency target" + suffix)
+        installed = await self._cli(
+            [
+                "exec", "--user", "10001",
+                "--env", "PIP_CONFIG_FILE=/dev/null",
+                "--env", "PIP_NO_INDEX=1",
+                "--env", "PIP_NO_INPUT=1",
+                "--env", "TMPDIR=/deps/tmp",
+                "--env", "PIP_DISABLE_PIP_VERSION_CHECK=1",
+                container_id, "python", "-m", "pip", "install",
+                "--disable-pip-version-check", "--no-input", "--no-index",
+                "--require-hashes", "--only-binary=:all:", "--no-deps", "--no-cache-dir",
+                "--find-links", "/deps/wheels", "--target", "/deps/site-packages",
+                "-r", "/deps/requirements.txt",
+            ],
+            timeout=self.limits.timeout_seconds,
+            output_limit=self.limits.output_bytes,
+        )
+        if installed.returncode != 0 or installed.timed_out:
+            raise SandboxRuntimeError("Offline dependency installation failed")
 
     async def _stage_workspace(self, container_id: str, workspace: ManagedWorkspace) -> None:
         """Stream workspace bytes to tar in the container without using docker cp."""

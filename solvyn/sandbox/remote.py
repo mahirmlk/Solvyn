@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from solvyn.sandbox.dependencies import DependencyBlockedError, DependencyEvidence, discover_dependency_inputs
 from solvyn.sandbox.runtime import SandboxRuntimeError
 from solvyn.sandbox.workspaces import ManagedWorkspace, WorkspaceManager
 
@@ -22,6 +23,7 @@ class RemoteSandboxResult:
     stderr: str
     output_truncated: bool
     duration_seconds: float
+    dependency_evidence: DependencyEvidence | None = None
 
 
 class RemoteSandboxRunner:
@@ -47,8 +49,14 @@ class RemoteSandboxRunner:
         self.token = token
         self.timeout_seconds = timeout_seconds
 
-    async def run(self, workspace: ManagedWorkspace, command: Sequence[str]) -> RemoteSandboxResult:
+    async def run(self, workspace: ManagedWorkspace, command: Sequence[str], *, install_dependencies: bool = False) -> RemoteSandboxResult:
         self.workspaces.validate_tree(workspace)
+        expected_inputs = None
+        if install_dependencies:
+            try:
+                expected_inputs = discover_dependency_inputs(workspace.path, required=False)
+            except (DependencyBlockedError, OSError, ValueError) as exc:
+                raise SandboxRuntimeError(f"Dependency setup is blocked: {exc}") from exc
         try:
             async with httpx.AsyncClient(
                 base_url=self.base_url,
@@ -57,7 +65,11 @@ class RemoteSandboxRunner:
                 response = await client.post(
                     "/v1/runs",
                     headers={"Authorization": f"Bearer {self.token}"},
-                    json={"workspace_id": str(workspace.id), "command": list(command)},
+                    json={
+                        "workspace_id": str(workspace.id),
+                        "command": list(command),
+                        "install_dependencies": install_dependencies,
+                    },
                 )
                 response.raise_for_status()
                 payload = response.json()
@@ -81,6 +93,49 @@ class RemoteSandboxRunner:
             raise SandboxRuntimeError("Trusted sandbox runtime returned invalid output")
         if len(result["stdout"]) > 1024 * 1024 or len(result["stderr"]) > 1024 * 1024:
             raise SandboxRuntimeError("Trusted sandbox runtime returned oversized output")
+        evidence_payload = result.get("dependency_evidence")
+        evidence: DependencyEvidence | None = None
+        if evidence_payload is not None:
+            if (
+                not isinstance(evidence_payload, dict)
+                or set(evidence_payload)
+                != {
+                    "lock_sha256",
+                    "wheelhouse_sha256",
+                    "package_count",
+                    "wheelhouse_bytes",
+                    "runtime_fingerprint",
+                    "uv_version",
+                    "pip_version",
+                }
+                or any(
+                    not isinstance(evidence_payload.get(key), str) or len(evidence_payload[key]) != 64
+                    for key in ("lock_sha256", "wheelhouse_sha256", "runtime_fingerprint")
+                )
+                or any(char not in "0123456789abcdef" for key in ("lock_sha256", "wheelhouse_sha256", "runtime_fingerprint") for char in evidence_payload[key])
+                or type(evidence_payload.get("package_count")) is not int
+                or type(evidence_payload.get("wheelhouse_bytes")) is not int
+                or not 1 <= evidence_payload["package_count"] <= 500
+                or not 1 <= evidence_payload["wheelhouse_bytes"] <= 384 * 1024 * 1024
+                or evidence_payload.get("uv_version") != "0.13.7"
+                or evidence_payload.get("pip_version") != "26.3"
+            ):
+                raise SandboxRuntimeError("Trusted sandbox runtime returned invalid dependency evidence")
+            evidence = DependencyEvidence(
+                evidence_payload["lock_sha256"],
+                evidence_payload["wheelhouse_sha256"],
+                evidence_payload["package_count"],
+                evidence_payload["wheelhouse_bytes"],
+                evidence_payload["runtime_fingerprint"],
+                evidence_payload["uv_version"],
+                evidence_payload["pip_version"],
+            )
+        if expected_inputs is None and evidence is not None:
+            raise SandboxRuntimeError("Trusted sandbox runtime reported unexpected dependency evidence")
+        if expected_inputs is not None and (
+            evidence is None or evidence.lock_sha256 != expected_inputs.lock_sha256
+        ):
+            raise SandboxRuntimeError("Trusted sandbox runtime omitted or mismatched dependency evidence")
         self.workspaces.validate_tree(workspace)
 
         return RemoteSandboxResult(
@@ -92,4 +147,5 @@ class RemoteSandboxRunner:
             stderr=result["stderr"],
             output_truncated=result["output_truncated"],
             duration_seconds=float(result.get("duration_seconds", 0.0)),
+            dependency_evidence=evidence,
         )

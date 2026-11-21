@@ -37,7 +37,7 @@ async def test_private_sandbox_service_authenticates_and_dispatches(
     service = create_sandbox_service("internal-test-token")
 
     class FakeRunner:
-        async def run(self, workspace, command):
+        async def run(self, workspace, command, *, install_dependencies=False):
             return SimpleNamespace(
                 run_id=uuid.uuid4(),
                 command=tuple(command),
@@ -47,6 +47,7 @@ async def test_private_sandbox_service_authenticates_and_dispatches(
                 stderr="",
                 output_truncated=False,
                 duration_seconds=0.01,
+                dependency_evidence=None,
             )
 
     manager = WorkspaceManager(Path(settings.sandbox_workspace_root))

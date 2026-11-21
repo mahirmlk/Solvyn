@@ -3165,7 +3165,7 @@ async def test_verification_run_rls_and_scheduler_recovery_are_tenant_scoped(
                 return "a" * 64
 
         class FakeSandboxRunner:
-            async def run(self, workspace: object, command: list[str]) -> object:
+            async def run(self, workspace: object, command: list[str], *, install_dependencies: bool = False) -> object:
                 from solvyn.sandbox.runtime import SandboxResult
 
                 return SandboxResult(

@@ -436,7 +436,7 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
     assert rereview.json()["decision_workspace_digest"] != initial_workspace_digest
     accepted_workspace_digest = rereview.json()["decision_workspace_digest"]
 
-    async def fake_verification_run(self: Any, managed_workspace: Any, command: list[str]) -> Any:
+    async def fake_verification_run(self: Any, managed_workspace: Any, command: list[str], *, install_dependencies: bool = False) -> Any:
         from solvyn.sandbox.runtime import SandboxResult
 
         return SandboxResult(uuid.uuid4(), tuple(command), 0, False, "1 passed", "", False, 0.05)
@@ -822,7 +822,13 @@ async def test_task_verification_is_sandboxed_and_durable(
 
     verification_calls: list[list[str]] = []
 
-    async def fake_run(self: DockerSandboxRunner, managed_workspace: Any, command: list[str]) -> SandboxResult:
+    async def fake_run(
+        self: DockerSandboxRunner,
+        managed_workspace: Any,
+        command: list[str],
+        *,
+        install_dependencies: bool = False,
+    ) -> SandboxResult:
         verification_calls.append(command)
         return SandboxResult(uuid.uuid4(), tuple(command), 0, False, "1 passed", "", False, 0.05)
 
@@ -996,7 +1002,13 @@ async def test_task_verification_is_sandboxed_and_durable(
     after_rereview = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
     assert next(item for item in after_rereview.json()["tasks"] if item["task_id"] == task_id)["status"] == "completed"
 
-    async def failed_run(self: DockerSandboxRunner, managed_workspace: Any, command: list[str]) -> SandboxResult:
+    async def failed_run(
+        self: DockerSandboxRunner,
+        managed_workspace: Any,
+        command: list[str],
+        *,
+        install_dependencies: bool = False,
+    ) -> SandboxResult:
         return SandboxResult(uuid.uuid4(), tuple(command), 1, False, "1 failed", "", False, 0.05)
 
     monkeypatch.setattr(DockerSandboxRunner, "run", failed_run)
@@ -1046,7 +1058,13 @@ async def test_task_verification_is_sandboxed_and_durable(
     first_task = next(task for task in history.json()["tasks"] if task["task_id"] == task_id)
     assert first_task["verification_runs"][0]["status"] == "passed"
 
-    async def late_result(self: DockerSandboxRunner, managed_workspace: Any, command: list[str]) -> SandboxResult:
+    async def late_result(
+        self: DockerSandboxRunner,
+        managed_workspace: Any,
+        command: list[str],
+        *,
+        install_dependencies: bool = False,
+    ) -> SandboxResult:
         from sqlalchemy import select
 
         from solvyn.db.models import VerificationRun
@@ -1077,7 +1095,7 @@ async def test_task_verification_is_sandboxed_and_durable(
     assert late.status_code == 202
     late = await approve_and_execute(late)
     assert late.status_code == 200
-    assert late.json()["status"] == "interrupted"
+    assert late.json()["status"] == "interrupted", late.json()
     from solvyn.workflows import scheduler
 
     late_run_id = uuid.UUID(late.json()["id"])
@@ -1116,6 +1134,8 @@ async def test_task_verification_is_sandboxed_and_durable(
         self: DockerSandboxRunner,
         managed_workspace: Any,
         command: list[str],
+        *,
+        install_dependencies: bool = False,
     ) -> SandboxResult:
         nonlocal crashed_worker_calls
         from sqlalchemy import select
@@ -1152,7 +1172,7 @@ async def test_task_verification_is_sandboxed_and_durable(
     exhausted_result = await approve_and_execute(exhausted)
     assert exhausted_result.status_code == 200
     exhausted_run_id = uuid.UUID(exhausted_result.json()["id"])
-    assert exhausted_result.json()["status"] == "interrupted"
+    assert exhausted_result.json()["status"] == "interrupted", exhausted_result.json()
 
     for attempt_number, expected_status in ((2, "interrupted"), (3, "dead_letter")):
         async with async_session_factory() as db:
@@ -1200,7 +1220,13 @@ async def test_task_verification_is_sandboxed_and_durable(
     )
     assert denied_execution.status_code == 409
 
-    async def unexpected_failure(self: DockerSandboxRunner, managed_workspace: Any, command: list[str]) -> SandboxResult:
+    async def unexpected_failure(
+        self: DockerSandboxRunner,
+        managed_workspace: Any,
+        command: list[str],
+        *,
+        install_dependencies: bool = False,
+    ) -> SandboxResult:
         raise RuntimeError("transport diagnostic should not be exposed")
 
     monkeypatch.setattr(DockerSandboxRunner, "run", unexpected_failure)

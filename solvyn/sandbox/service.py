@@ -31,6 +31,7 @@ class SandboxRunRequest(BaseModel):
 
     workspace_id: uuid.UUID
     command: list[str] = Field(min_length=1, max_length=128)
+    install_dependencies: bool = False
 
     @field_validator("command")
     @classmethod
@@ -57,7 +58,7 @@ def create_sandbox_service(token: str | None = None) -> FastAPI:
             raise RuntimeError("SANDBOX_RUNTIME_TOKEN is required by the sandbox supervisor")
         manager = WorkspaceManager(Path(settings.sandbox_workspace_root))
         service.state.workspaces = manager
-        service.state.runner = DockerSandboxRunner(manager, image=settings.sandbox_image)
+        service.state.runner = DockerSandboxRunner(manager, image=settings.sandbox_image, dependency_fetcher_url=os.getenv("DEPENDENCY_FETCHER_URL"))
         service.state.capacity = asyncio.Semaphore(2)
         yield
 
@@ -84,7 +85,10 @@ def create_sandbox_service(token: str | None = None) -> FastAPI:
             raise HTTPException(status_code=503, detail="Sandbox execution capacity is full") from exc
         try:
             workspace = service.state.workspaces.get(payload.workspace_id)
-            result = await service.state.runner.run(workspace, payload.command)
+            if payload.install_dependencies:
+                result = await service.state.runner.run(workspace, payload.command, install_dependencies=True)
+            else:
+                result = await service.state.runner.run(workspace, payload.command)
         except (WorkspaceError, ValueError) as exc:
             raise HTTPException(status_code=400, detail="Invalid sandbox workspace or command") from exc
         except Exception as exc:
@@ -103,6 +107,15 @@ def create_sandbox_service(token: str | None = None) -> FastAPI:
                 "stderr": result.stderr,
                 "output_truncated": result.output_truncated,
                 "duration_seconds": result.duration_seconds,
+                "dependency_evidence": ({
+                    "lock_sha256": result.dependency_evidence.lock_sha256,
+                    "wheelhouse_sha256": result.dependency_evidence.wheelhouse_sha256,
+                    "package_count": result.dependency_evidence.package_count,
+                    "wheelhouse_bytes": result.dependency_evidence.wheelhouse_bytes,
+"runtime_fingerprint": result.dependency_evidence.runtime_fingerprint,
+                    "uv_version": result.dependency_evidence.uv_version,
+                    "pip_version": result.dependency_evidence.pip_version,
+                } if result.dependency_evidence is not None else None),
             },
         }
 

@@ -19,8 +19,11 @@ RUN set -eu; \
 FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends git \
-    && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir pytest==9.0.3 ruff==0.15.16 mypy==2.1.0
+    && rm -rf /var/lib/apt/lists/*
+RUN printf '%s\n' 'pip==26.3 --hash=sha256:f3b60b20ffaadd4415ed7957212a38ac63fa4c5fa375bd0f4a797777940fad13' > /tmp/pip-requirements.txt \
+    && python -m pip install --no-cache-dir --no-deps --require-hashes -r /tmp/pip-requirements.txt \
+    && rm /tmp/pip-requirements.txt
+RUN python -m pip install --no-cache-dir pytest==9.0.3 ruff==0.15.16 mypy==2.1.0
 RUN mkdir -p /opt/solvyn
 COPY --from=gitleaks-build /usr/local/bin/gitleaks /usr/local/bin/gitleaks
 COPY scripts/gitleaks.toml /opt/solvyn/gitleaks.toml

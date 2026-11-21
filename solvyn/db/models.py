@@ -355,6 +355,31 @@ class VerificationRun(Base):
             "(maintenance_schedule_id IS NULL) = (maintenance_scheduled_for IS NULL)",
             name="ck_verification_runs_maintenance_occurrence_pair",
         ),
+        CheckConstraint(
+            """(
+                dependency_lock_sha256 IS NULL
+                AND dependency_wheelhouse_sha256 IS NULL
+                AND dependency_runtime_fingerprint IS NULL
+                AND dependency_uv_version IS NULL
+                AND dependency_pip_version IS NULL
+                AND dependency_package_count IS NULL
+                AND dependency_wheelhouse_bytes IS NULL
+            ) OR (
+                dependency_lock_sha256 IS NOT NULL
+                AND length(dependency_lock_sha256) = 64
+                AND dependency_wheelhouse_sha256 IS NOT NULL
+                AND length(dependency_wheelhouse_sha256) = 64
+                AND dependency_runtime_fingerprint IS NOT NULL
+                AND length(dependency_runtime_fingerprint) = 64
+                AND dependency_uv_version IS NOT NULL
+                AND dependency_pip_version IS NOT NULL
+                AND dependency_package_count IS NOT NULL
+                AND dependency_package_count > 0
+                AND dependency_wheelhouse_bytes IS NOT NULL
+                AND dependency_wheelhouse_bytes > 0
+            )""",
+            name="ck_verification_runs_dependency_evidence_pair",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -378,6 +403,13 @@ class VerificationRun(Base):
     duration_seconds: Mapped[float | None] = mapped_column(Numeric(10, 3), nullable=True)
     runner_version: Mapped[str] = mapped_column(String(100), nullable=False)
     source_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dependency_lock_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dependency_wheelhouse_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dependency_runtime_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dependency_uv_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    dependency_pip_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    dependency_package_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    dependency_wheelhouse_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     attempt_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     lease_owner: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
