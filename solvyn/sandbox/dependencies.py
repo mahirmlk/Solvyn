@@ -46,6 +46,8 @@ _PYTHON_DEPENDENCY_MANIFESTS = {
     "Pipfile.lock",
     "poetry.lock",
     "pdm.lock",
+    "setup.cfg",
+    "setup.py",
 }
 _OTHER_LOCKFILES = {
     "package-lock.json",
@@ -137,10 +139,23 @@ def _declares_project_dependencies(pyproject: dict[str, object]) -> bool:
     tool = pyproject.get("tool")
     if isinstance(tool, dict):
         poetry = tool.get("poetry")
-        if isinstance(poetry, dict) and isinstance(poetry.get("dependencies"), dict):
-            dependencies = poetry["dependencies"]
-            if any(name.casefold() != "python" for name in dependencies):
+        if isinstance(poetry, dict):
+            dependencies = poetry.get("dependencies")
+            if isinstance(dependencies, dict) and any(name.casefold() != "python" for name in dependencies):
                 return True
+            if poetry.get("dev-dependencies"):
+                return True
+            groups = poetry.get("group")
+            if isinstance(groups, dict) and any(
+                isinstance(group, dict) and bool(group.get("dependencies"))
+                for group in groups.values()
+            ):
+                return True
+        pdm = tool.get("pdm")
+        if isinstance(pdm, dict) and any(
+            key in pdm and bool(pdm[key]) for key in ("dependencies", "dev-dependencies")
+        ):
+            return True
     return False
 
 
@@ -184,7 +199,10 @@ def discover_dependency_inputs(workspace: Path, *, required: bool) -> Dependency
         raise DependencyBlockedError("pyproject.toml is invalid") from exc
 
     for name in _PYTHON_DEPENDENCY_MANIFESTS:
-        if _has_content_dependency_file(workspace / name):
+        path = workspace / name
+        if name in {"setup.cfg", "setup.py"} and (path.exists() or path.is_symlink()):
+            raise DependencyBlockedError("This Python dependency manifest is not supported; use uv.lock")
+        if _has_content_dependency_file(path):
             raise DependencyBlockedError("This Python dependency manifest is not supported; use uv.lock")
     for name in _OTHER_LOCKFILES:
         if (workspace / name).exists() or (workspace / name).is_symlink():
