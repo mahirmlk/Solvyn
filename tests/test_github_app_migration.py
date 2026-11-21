@@ -25,7 +25,7 @@ def test_github_app_migration_adds_numeric_identity_pair_constraints() -> None:
     migration["upgrade"]()
 
     sql = output.getvalue()
-    assert migration["revision"] == "0064_github_app_installation_scope"
+    assert migration["revision"] == "0064_github_app_scope"
     assert migration["down_revision"] == "0063_uv_lock_dependency_evidence"
     assert "ck_integrations_github_installation_account_pair" in sql
     assert "(github_installation_id IS NULL) = (github_account_id IS NULL)" in sql
