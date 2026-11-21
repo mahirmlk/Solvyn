@@ -192,9 +192,9 @@ def _build_wheelhouse(pyproject_bytes: bytes, lock_bytes: bytes) -> tuple[_Owned
         "no_proxy": "",
     }
     try:
-        uv_version = _run_tool(["uv", "--version"], cwd=root, env=env).decode("ascii").strip()
+        uv_version_output = _run_tool(["uv", "--version"], cwd=root, env=env).decode("ascii").strip()
         pip_version = _run_tool(["python", "-m", "pip", "--version"], cwd=root, env=env).decode("ascii").strip()
-        if uv_version != f"uv {_UV_VERSION}" or not pip_version.startswith(f"pip {_PIP_VERSION} "):
+        if uv_version_output.split()[:2] != ["uv", _UV_VERSION] or not pip_version.startswith(f"pip {_PIP_VERSION} "):
             raise DependencyBlockedError("Dependency fetcher toolchain version is unsupported")
         exported = _run_tool(
             [
