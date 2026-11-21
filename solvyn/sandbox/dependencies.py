@@ -175,6 +175,9 @@ def discover_dependency_inputs(workspace: Path, *, required: bool) -> Dependency
         if project_path.exists() or project_path.is_symlink():
             project_bytes = _read_regular_file(project_path, _MAX_PYPROJECT_BYTES)
             project = tomllib.loads(project_bytes.decode("utf-8"))
+            project_data = project.get("project")
+            if isinstance(project_data, dict) and project_data.get("dynamic"):
+                raise DependencyBlockedError("Dynamic project metadata requires a supported root uv.lock")
             if _declares_project_dependencies(project):
                 raise DependencyBlockedError("Project dependencies require a supported root uv.lock")
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
