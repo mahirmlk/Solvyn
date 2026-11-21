@@ -141,7 +141,7 @@ class DockerSandboxRunner:
             raise ValueError("docker_command must contain non-empty executable arguments")
         self.limits = limits or SandboxLimits()
         self.cli_timeout_seconds = cli_timeout_seconds
-        self.dependency_fetcher_url = dependency_fetcher_url or os.getenv("DEPENDENCY_FETCHER_URL", "http://dependency-fetcher:8002")
+        self.dependency_fetcher_url = dependency_fetcher_url or os.getenv("DEPENDENCY_FETCHER_URL") or "http://dependency-fetcher:8002"
 
     async def check_ready(self) -> bool:
         """Check that the configured engine and prebuilt execution image are available."""
@@ -384,7 +384,7 @@ class DockerSandboxRunner:
             assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
             stdout_task = asyncio.create_task(self._read_bounded(proc.stdout, 16 * 1024))
             stderr_task = asyncio.create_task(self._read_bounded(proc.stderr, 16 * 1024))
-            copy_task = asyncio.create_task(self._copy_archive(archive, proc.stdin))
+            copy_task = asyncio.create_task(self._copy_archive(cast(BinaryIO, archive), proc.stdin))
             try:
                 await asyncio.wait_for(copy_task, timeout=self.cli_timeout_seconds)
                 proc.stdin.close()
