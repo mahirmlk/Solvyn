@@ -174,8 +174,9 @@ def discover_dependency_inputs(workspace: Path, *, required: bool) -> Dependency
     for name in _OTHER_LOCKFILES:
         if (workspace / name).exists() or (workspace / name).is_symlink():
             raise DependencyBlockedError("This dependency ecosystem is not supported by this verification profile")
-    if required:
-        raise DependencyBlockedError("Dependency installation requires a supported root uv.lock")
+    # A genuinely manifest-free workspace has no dependency set to install.
+    # The caller can request dependency setup without forcing an empty project to
+    # invent a lockfile; any Python project/manifest above still requires uv.lock.
     return None
 
 
