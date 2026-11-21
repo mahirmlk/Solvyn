@@ -12,7 +12,9 @@ import hashlib
 import http.server
 import json
 import os
+import selectors
 import subprocess
+import time
 import tempfile
 import threading
 import tomllib
@@ -38,44 +40,63 @@ _PROXY = "http://dependency-proxy:3128"
 _slots = threading.BoundedSemaphore(_MAX_ACTIVE_REQUESTS)
 
 
-def _limit_output_files() -> None:
-    import resource
-
-    resource.setrlimit(resource.RLIMIT_FSIZE, (2 * 1024 * 1024, 2 * 1024 * 1024))
-
-def _run_tool(args: list[str], *, cwd: Path, env: dict[str, str]) -> bytes:
-    import signal
-
-    with tempfile.TemporaryFile(dir=cwd) as output, tempfile.TemporaryFile(dir=cwd) as errors:
-        try:
-            process = subprocess.Popen(
-                args,
-                cwd=cwd,
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=output,
-                stderr=errors,
-                start_new_session=True,
-                preexec_fn=_limit_output_files,
-            )
-        except (OSError, ValueError) as exc:
-            raise DependencyBlockedError("Pinned dependency tooling is unavailable") from exc
+def _run_tool(
+    args: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    capture_stdout: bool = True,
+    output_limit: int = 1_048_576,
+) -> bytes:
+    try:
+        process = subprocess.Popen(
+            args,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE if capture_stdout else subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except (OSError, ValueError) as exc:
+        raise DependencyBlockedError("Pinned dependency tooling is unavailable") from exc
+    if not capture_stdout:
         try:
             return_code = process.wait(timeout=_PROCESS_TIMEOUT)
         except subprocess.TimeoutExpired as exc:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
             raise DependencyBlockedError("Dependency resolution exceeded its time limit") from exc
-        output.seek(0, os.SEEK_END)
-        output_size = output.tell()
-        errors.seek(0, os.SEEK_END)
-        errors_size = errors.tell()
-        if output_size > 1_048_576 or errors_size > 1_048_576:
-            raise DependencyBlockedError("Dependency tooling exceeded its output limit")
         if return_code != 0:
             raise DependencyBlockedError("Locked dependencies could not be exported or fetched safely")
-        output.seek(0)
-        return output.read(1_048_577)
+        return b""
+    assert process.stdout is not None
+    output = bytearray()
+    deadline = time.monotonic() + _PROCESS_TIMEOUT
+    with selectors.DefaultSelector() as selector:
+        selector.register(process.stdout, selectors.EVENT_READ)
+        try:
+            while process.poll() is None or selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError
+                for key, _ in selector.select(min(0.25, remaining)):
+                    chunk = os.read(key.fileobj.fileno(), min(64 * 1024, output_limit + 1 - len(output)))
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    output.extend(chunk)
+                    if len(output) > output_limit:
+                        raise DependencyBlockedError("Dependency tooling exceeded its output limit")
+        except (TimeoutError, DependencyBlockedError) as exc:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+            if isinstance(exc, DependencyBlockedError):
+                raise
+            raise DependencyBlockedError("Dependency resolution exceeded its time limit") from exc
+    if process.wait() != 0:
+        raise DependencyBlockedError("Locked dependencies could not be exported or fetched safely")
+    return bytes(output)
 
 def _build_wheelhouse(pyproject_bytes: bytes, lock_bytes: bytes) -> tuple[BinaryIO, int]:
     project = tomllib.loads(pyproject_bytes.decode("utf-8"))
@@ -133,6 +154,7 @@ def _build_wheelhouse(pyproject_bytes: bytes, lock_bytes: bytes) -> tuple[Binary
             ],
             cwd=root,
             env=env,
+            capture_stdout=False,
         )
         manifest, _ = build_bundle_manifest(wheel_dir, lock_sha256=lock_sha, requirements=requirements)
         manifest["toolchain"] = {"uv": _UV_VERSION, "pip": _PIP_VERSION}
