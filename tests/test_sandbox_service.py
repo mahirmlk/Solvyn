@@ -47,6 +47,7 @@ async def test_private_sandbox_service_authenticates_and_dispatches(
                 stderr="",
                 output_truncated=False,
                 duration_seconds=0.01,
+                dependency_evidence=None,
             )
 
     manager = WorkspaceManager(Path(settings.sandbox_workspace_root))
