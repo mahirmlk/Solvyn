@@ -161,13 +161,12 @@ class DockerSandboxRunner:
         dependency_bundle: DependencyBundle | None = None
         if install_dependencies:
             try:
-                inputs = discover_dependency_inputs(workspace.path, required=True)
-                if inputs is None:
-                    raise DependencyBlockedError("A supported uv.lock is required")
-                dependency_bundle = await fetch_dependency_bundle(
-                    inputs,
-                    base_url=self.dependency_fetcher_url,
-                )
+                inputs = discover_dependency_inputs(workspace.path, required=False)
+                if inputs is not None:
+                    dependency_bundle = await fetch_dependency_bundle(
+                        inputs,
+                        base_url=self.dependency_fetcher_url,
+                    )
             except (DependencyBlockedError, OSError, ValueError) as exc:
                 raise SandboxRuntimeError(f"Dependency setup is blocked: {exc}") from exc
 
@@ -273,7 +272,7 @@ class DockerSandboxRunner:
             f"/tmp:rw,noexec,nosuid,nodev,size={tmp_size},nr_inodes=2048",
             "--tmpfs",
             f"/workspace:rw,nosuid,nodev,size={workspace_size},nr_inodes=10000",
-            *(["--tmpfs", "/deps:rw,nosuid,nodev,size=960m,nr_inodes=100000"] if install_dependencies else []),
+            *(["--tmpfs", "/deps:rw,nosuid,nodev,size=1536m,uid=10001,gid=10001,nr_inodes=100000"] if install_dependencies else []),
             "--workdir",
             "/workspace",
             "--env",
@@ -430,17 +429,13 @@ class DockerSandboxRunner:
         if pip_version.returncode != 0 or not pip_version.stdout.decode("ascii", errors="ignore").startswith(f"pip {_PIP_VERSION} "):
             raise SandboxRuntimeError("Sandbox pip version does not match the pinned dependency toolchain")
         created = await self._cli(
-            ["exec", "--user", "0", container_id, "mkdir", "-p", "/deps/site-packages", "/deps/tmp"],
+            ["exec", "--user", "10001", container_id, "mkdir", "-p", "/deps/site-packages", "/deps/tmp"],
             timeout=self.cli_timeout_seconds,
         )
         if created.returncode != 0 or created.timed_out:
-            raise SandboxRuntimeError("Docker failed to prepare the dependency target")
-        owned = await self._cli(
-            ["exec", "--user", "0", container_id, "chown", "10001:10001", "/deps/site-packages", "/deps/tmp"],
-            timeout=self.cli_timeout_seconds,
-        )
-        if owned.returncode != 0 or owned.timed_out:
-            raise SandboxRuntimeError("Docker failed to secure the dependency target")
+            detail = self._docker_error_detail(created.stderr)
+            suffix = f": {detail}" if detail else ""
+            raise SandboxRuntimeError("Docker failed to prepare the dependency target" + suffix)
         installed = await self._cli(
             [
                 "exec", "--user", "10001",
