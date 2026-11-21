@@ -22,6 +22,7 @@ def _make_wheel(path: Path) -> str:
 
     files = {
         "demo_pkg/__init__.py": b"VALUE = 'installed offline'\n",
+        "demo_pkg/assets.bin": b"x" * (20 * 1024 * 1024),
         "demo_pkg-0.1.0.dist-info/METADATA": b"Metadata-Version: 2.1\nName: demo-pkg\nVersion: 0.1.0\n\n",
         "demo_pkg-0.1.0.dist-info/WHEEL": b"Wheel-Version: 1.0\nGenerator: solvyn-ci\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
     }
