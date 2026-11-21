@@ -1095,7 +1095,7 @@ async def test_task_verification_is_sandboxed_and_durable(
     assert late.status_code == 202
     late = await approve_and_execute(late)
     assert late.status_code == 200
-    assert late.json()["status"] == "interrupted"
+    assert late.json()["status"] == "interrupted", late.json()
     from solvyn.workflows import scheduler
 
     late_run_id = uuid.UUID(late.json()["id"])
@@ -1218,7 +1218,13 @@ async def test_task_verification_is_sandboxed_and_durable(
     )
     assert denied_execution.status_code == 409
 
-    async def unexpected_failure(self: DockerSandboxRunner, managed_workspace: Any, command: list[str]) -> SandboxResult:
+    async def unexpected_failure(
+        self: DockerSandboxRunner,
+        managed_workspace: Any,
+        command: list[str],
+        *,
+        install_dependencies: bool = False,
+    ) -> SandboxResult:
         raise RuntimeError("transport diagnostic should not be exposed")
 
     monkeypatch.setattr(DockerSandboxRunner, "run", unexpected_failure)
