@@ -8,7 +8,7 @@ The trusted sandbox supervisor reads only the root lock and project manifest, th
 
 The fetcher joins only an internal Docker network. A separate Squid proxy is its only route to the public network and allows HTTPS to pypi.org and files.pythonhosted.org; it denies localhost, private and link-local destinations. The API and worker do not join the fetch network. A run container has --network none.
 
-The supervisor checks each wheel against the exported requirement hashes, validates archive paths and limits, and verifies the fetcher and sandbox Python ABI/platform fingerprints. It installs with pip 26.3 into a distinct /deps tmpfs using --no-index, --require-hashes, --only-binary=:all: and --no-deps. The mounted source workspace remains separate and its fingerprint is checked after dependency setup.
+The supervisor checks each wheel against the exported requirement hashes, validates archive paths and limits, and verifies the fetcher and sandbox Python ABI/platform fingerprints. It installs with pip 26.3 into a distinct /deps tmpfs using --no-index, --require-hashes, --only-binary=:all: and --no-deps. The mounted source workspace remains separate and its fingerprint is checked after dependency setup. Pip staging also stays inside `/deps/tmp`; the 1536 MiB dependency tmpfs budgets for the maximum compressed wheelhouse plus bounded unpacked staging and target copies. Dependency-enabled jobs receive at least 2 GiB of container memory.
 
 ## Limits and evidence
 
