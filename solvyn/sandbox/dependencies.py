@@ -159,6 +159,21 @@ def _declares_project_dependencies(pyproject: dict[str, object]) -> bool:
     return False
 
 
+def _has_requirements_family(workspace: Path) -> bool:
+    for path in workspace.iterdir():
+        name = path.name.casefold()
+        if not name.startswith(("requirements", "constraints")):
+            continue
+        if path.is_symlink() or path.is_file():
+            return True
+        if path.is_dir() and any(
+            child.is_symlink() or child.is_file()
+            for child in path.rglob("*")
+        ):
+            return True
+    return False
+
+
 def _has_content_dependency_file(path: Path) -> bool:
     try:
         content = _read_regular_file(path, _MAX_REQUIREMENTS_BYTES).decode("utf-8")
@@ -190,6 +205,9 @@ def discover_dependency_inputs(workspace: Path, *, required: bool) -> Dependency
         if project_path.exists() or project_path.is_symlink():
             project_bytes = _read_regular_file(project_path, _MAX_PYPROJECT_BYTES)
             project = tomllib.loads(project_bytes.decode("utf-8"))
+            build_system = project.get("build-system")
+            if isinstance(build_system, dict) and build_system.get("requires"):
+                raise DependencyBlockedError("Build requirements require a supported root uv.lock")
             project_data = project.get("project")
             if isinstance(project_data, dict) and project_data.get("dynamic"):
                 raise DependencyBlockedError("Dynamic project metadata requires a supported root uv.lock")
@@ -198,6 +216,8 @@ def discover_dependency_inputs(workspace: Path, *, required: bool) -> Dependency
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise DependencyBlockedError("pyproject.toml is invalid") from exc
 
+    if _has_requirements_family(workspace):
+        raise DependencyBlockedError("Requirements and constraints manifests require a supported root uv.lock")
     for name in _PYTHON_DEPENDENCY_MANIFESTS:
         path = workspace / name
         if name in {"setup.cfg", "setup.py"} and (path.exists() or path.is_symlink()):
