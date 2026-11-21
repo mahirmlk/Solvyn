@@ -16,9 +16,9 @@ from solvyn.sandbox.dependencies import (
     create_bundle_archive,
     extract_bundle_archive,
     parse_exported_requirements,
+    validate_uv_project,
 )
 from solvyn.sandbox.fetch_service import _render_export_pyproject, _run_tool
-from solvyn.sandbox.dependencies import validate_uv_project
 
 
 def _wheel(path: Path, name: str, version: str, module_text: str) -> str:
@@ -121,7 +121,7 @@ def test_fetch_export_drops_repository_build_backend(tmp_path: Path) -> None:
         "dependency-groups": {"dev": ["pytest>=8"]},
     }
     (tmp_path / "backend.py").write_text(
-        f"from pathlib import Path\\nPath({str(marker)!r}).write_text('executed')\\n",
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('executed')\n",
         encoding="utf-8",
     )
 
