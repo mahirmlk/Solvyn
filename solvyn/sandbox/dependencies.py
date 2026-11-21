@@ -213,8 +213,8 @@ def parse_exported_requirements(content: bytes) -> list[str]:
     if len(logical) > _MAX_PACKAGES:
         raise DependencyBlockedError("Project exceeds the package count limit")
     for line in logical:
-        hashes = re.findall(r"(?<!\\S)--hash=sha256:([a-f0-9]{64})(?=\\s|$)", line)
-        requirement = re.sub(r"\\s+--hash=sha256:[a-f0-9]{64}(?=\\s|$)", "", line).strip()
+        hashes = re.findall(r"(?<!\S)--hash=sha256:([a-f0-9]{64})(?=\s|$)", line)
+        requirement = re.sub(r"\s+--hash=sha256:[a-f0-9]{64}(?=\s|$)", "", line).strip()
         if not hashes or not _REQUIREMENT.fullmatch(requirement) or "://" in requirement or "@" in requirement:
             raise DependencyBlockedError("Only pinned registry requirements with SHA-256 hashes are supported")
     return logical
