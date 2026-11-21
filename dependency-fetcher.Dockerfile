@@ -18,7 +18,9 @@ RUN set -eu; \
 FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 COPY --from=uv-build /usr/local/bin/uv /usr/local/bin/uv
-RUN python -m pip install --no-cache-dir --no-deps --require-hashes "pip==26.3 --hash=sha256:f3b60b20ffaadd4415ed7957212a38ac63fa4c5fa375bd0f4a797777940fad13" \
+RUN printf '%s\n' 'pip==26.3 --hash=sha256:f3b60b20ffaadd4415ed7957212a38ac63fa4c5fa375bd0f4a797777940fad13' > /tmp/pip-requirements.txt \
+    && python -m pip install --no-cache-dir --no-deps --require-hashes -r /tmp/pip-requirements.txt \
+    && rm /tmp/pip-requirements.txt \
     && uv --version | grep -Fx "uv 0.13.7" \
     && python -m pip --version | grep -F "pip 26.3 "
 RUN groupadd --system --gid 10002 dependency-fetcher \
