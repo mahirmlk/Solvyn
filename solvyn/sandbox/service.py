@@ -109,6 +109,9 @@ def create_sandbox_service(token: str | None = None) -> FastAPI:
                     "wheelhouse_sha256": result.dependency_evidence.wheelhouse_sha256,
                     "package_count": result.dependency_evidence.package_count,
                     "wheelhouse_bytes": result.dependency_evidence.wheelhouse_bytes,
+"runtime_fingerprint": result.dependency_evidence.runtime_fingerprint,
+                    "uv_version": result.dependency_evidence.uv_version,
+                    "pip_version": result.dependency_evidence.pip_version,
                 } if result.dependency_evidence is not None else None),
             },
         }
