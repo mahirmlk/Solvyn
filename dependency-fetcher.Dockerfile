@@ -17,12 +17,15 @@ RUN set -eu; \
 
 FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+RUN python -m pip install --no-cache-dir --no-deps --require-hashes "pip==26.3 --hash=sha256:f3b60b20ffaadd4415ed7957212a38ac63fa4c5fa375bd0f4a797777940fad13" \
+    && uv --version | grep -Fx "uv 0.13.7" \
+    && python -m pip --version | grep -F "pip 26.3 "
 RUN groupadd --system --gid 10002 dependency-fetcher \
     && useradd --system --uid 10002 --gid dependency-fetcher --no-create-home --shell /usr/sbin/nologin dependency-fetcher
 COPY --from=uv-build /usr/local/bin/uv /usr/local/bin/uv
 WORKDIR /app
 COPY --chown=10002:10002 solvyn/__init__.py ./solvyn/__init__.py
-COPY --chown=10002:10002 solvyn/sandbox/__init__.py solvyn/sandbox/runtime.py solvyn/sandbox/workspaces.py solvyn/sandbox/dependencies.py solvyn/sandbox/fetch_service.py ./solvyn/sandbox/
+COPY --chown=10002:10002 solvyn/sandbox/dependencies.py solvyn/sandbox/fetch_service.py ./solvyn/sandbox/
 USER 10002:10002
 EXPOSE 8002
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
