@@ -1002,7 +1002,13 @@ async def test_task_verification_is_sandboxed_and_durable(
     after_rereview = await client.get(f"/api/v1/workflows/executions/{execution_id}/tasks")
     assert next(item for item in after_rereview.json()["tasks"] if item["task_id"] == task_id)["status"] == "completed"
 
-    async def failed_run(self: DockerSandboxRunner, managed_workspace: Any, command: list[str]) -> SandboxResult:
+    async def failed_run(
+        self: DockerSandboxRunner,
+        managed_workspace: Any,
+        command: list[str],
+        *,
+        install_dependencies: bool = False,
+    ) -> SandboxResult:
         return SandboxResult(uuid.uuid4(), tuple(command), 1, False, "1 failed", "", False, 0.05)
 
     monkeypatch.setattr(DockerSandboxRunner, "run", failed_run)
@@ -1052,7 +1058,13 @@ async def test_task_verification_is_sandboxed_and_durable(
     first_task = next(task for task in history.json()["tasks"] if task["task_id"] == task_id)
     assert first_task["verification_runs"][0]["status"] == "passed"
 
-    async def late_result(self: DockerSandboxRunner, managed_workspace: Any, command: list[str]) -> SandboxResult:
+    async def late_result(
+        self: DockerSandboxRunner,
+        managed_workspace: Any,
+        command: list[str],
+        *,
+        install_dependencies: bool = False,
+    ) -> SandboxResult:
         from sqlalchemy import select
 
         from solvyn.db.models import VerificationRun
