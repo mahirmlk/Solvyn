@@ -23,12 +23,12 @@ from pathlib import Path
 from typing import BinaryIO
 
 from solvyn.sandbox.dependencies import (
-    DependencyBlockedError,
     _MAX_BUNDLE_BYTES,
     _MAX_LOCK_BYTES,
     _MAX_PYPROJECT_BYTES,
     _PIP_VERSION,
     _UV_VERSION,
+    DependencyBlockedError,
     build_bundle_manifest,
     create_bundle_archive,
     validate_uv_project,
