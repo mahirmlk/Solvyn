@@ -53,7 +53,11 @@ def _request(body: bytes, *, delivery_id: uuid.UUID) -> Request:
 def _payload(*, login: str = "dependabot[bot]") -> dict[str, Any]:
     return {
         "action": "opened",
-        "repository": {"full_name": "Octo/Repo"},
+        "repository": {"id": 987654, "full_name": "Octo/Repo"},
+        "installation": {
+            "id": 812,
+            "account": {"id": 456, "login": "Octo", "type": "Organization"},
+        },
         "pull_request": {
             "number": 123,
             "state": "open",
