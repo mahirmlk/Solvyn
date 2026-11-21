@@ -177,7 +177,7 @@ class DockerSandboxRunner:
         cleanup_needed = False
         exec_result = _CommandResult(125, b"", b"Sandbox did not run")
         try:
-            created = await self._cli(self._create_args(container_name, install_dependencies=install_dependencies), timeout=self.cli_timeout_seconds)
+            created = await self._cli(self._create_args(container_name, install_dependencies=dependency_bundle is not None), timeout=self.cli_timeout_seconds)
             cleanup_needed = created.returncode == 0 or created.timed_out
             container_id = created.stdout.decode("ascii", errors="ignore").strip()
             if created.returncode != 0 or not _CONTAINER_ID.fullmatch(container_id):
