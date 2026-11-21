@@ -17,6 +17,7 @@ from solvyn.sandbox.dependencies import (
     extract_bundle_archive,
     parse_exported_requirements,
     validate_uv_project,
+    _read_regular_file,
 )
 from solvyn.sandbox.fetch_service import _render_export_pyproject, _run_tool
 
@@ -44,6 +45,25 @@ def _wheel(path: Path, name: str, version: str, module_text: str) -> str:
         for filename, payload in files.items():
             archive.writestr(filename, payload)
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="O_NOFOLLOW is required for the production Linux boundary")
+def test_input_reader_rejects_symlink_swap_at_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "pyproject.toml"
+    target = tmp_path / "attacker.toml"
+    source.write_text("trusted", encoding="utf-8")
+    target.write_text("attacker", encoding="utf-8")
+    real_open = os.open
+
+    def swap_before_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        if os.fspath(path) == os.fspath(source):
+            source.unlink()
+            source.symlink_to(target)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swap_before_open)
+    with pytest.raises(DependencyBlockedError, match="opened safely"):
+        _read_regular_file(source, 1024)
 
 
 def test_requirements_accept_markers_and_multiple_hashes() -> None:
