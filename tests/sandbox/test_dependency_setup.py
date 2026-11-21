@@ -228,6 +228,32 @@ def test_requirements_family_requires_uv_lock(tmp_path: Path, relative_path: str
         discover_dependency_inputs(tmp_path, required=False)
 
 
+def test_manifest_free_workspace_can_skip_requested_dependency_setup(tmp_path: Path) -> None:
+    assert discover_dependency_inputs(tmp_path, required=True) is None
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "subproject/package.json",
+        "nested/pyproject.toml",
+        "ci/requirements.txt",
+        "libs/package-lock.json",
+    ],
+)
+def test_root_lock_rejects_nested_project_manifests(tmp_path: Path, relative_path: str) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='demo'\nversion='1.0'\nrequires-python='>=3.12'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\npackage = []\n", encoding="utf-8")
+    manifest = tmp_path / relative_path
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text("{}\n", encoding="utf-8")
+    with pytest.raises(DependencyBlockedError, match="Nested project and dependency manifests"):
+        discover_dependency_inputs(tmp_path, required=True)
+
+
 @pytest.mark.parametrize(
     "relative_path",
     [
