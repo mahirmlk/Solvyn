@@ -92,13 +92,15 @@ class RemoteSandboxRunner:
         if evidence_payload is not None:
             if (
                 not isinstance(evidence_payload, dict)
-                or set(evidence_payload) != {"lock_sha256", "wheelhouse_sha256", "package_count", "wheelhouse_bytes"}
-                or any(not isinstance(evidence_payload.get(key), str) or len(evidence_payload[key]) != 64 for key in ("lock_sha256", "wheelhouse_sha256"))
+                or set(evidence_payload) != {"lock_sha256", "wheelhouse_sha256", "package_count", "wheelhouse_bytes", "runtime_fingerprint", "uv_version", "pip_version"}
+                or any(not isinstance(evidence_payload.get(key), str) or len(evidence_payload[key]) != 64 for key in ("lock_sha256", "wheelhouse_sha256", "runtime_fingerprint"))
                 or any(char not in "0123456789abcdef" for key in ("lock_sha256", "wheelhouse_sha256") for char in evidence_payload[key])
                 or not isinstance(evidence_payload.get("package_count"), int)
                 or not isinstance(evidence_payload.get("wheelhouse_bytes"), int)
                 or not 0 <= evidence_payload["package_count"] <= 500
                 or not 0 <= evidence_payload["wheelhouse_bytes"] <= 384 * 1024 * 1024
+                or evidence_payload.get("uv_version") != "0.13.7"
+                or evidence_payload.get("pip_version") != "26.3"
             ):
                 raise SandboxRuntimeError("Trusted sandbox runtime returned invalid dependency evidence")
             evidence = DependencyEvidence(
@@ -106,6 +108,9 @@ class RemoteSandboxRunner:
                 evidence_payload["wheelhouse_sha256"],
                 evidence_payload["package_count"],
                 evidence_payload["wheelhouse_bytes"],
+                evidence_payload["runtime_fingerprint"],
+                evidence_payload["uv_version"],
+                evidence_payload["pip_version"],
             )
         if install_dependencies and evidence is None:
             raise SandboxRuntimeError("Trusted sandbox runtime omitted dependency evidence")
