@@ -1,6 +1,6 @@
 """Bind GitHub App installations and repositories to numeric provider identities.
 
-Revision ID: 0064_github_app_installation_scope
+Revision ID: 0064_github_app_scope
 Revises: 0063_uv_lock_dependency_evidence
 Create Date: 2026-11-21 00:00:00
 """
@@ -10,7 +10,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0064_github_app_installation_scope"
+revision: str = "0064_github_app_scope"
 down_revision: str | None = "0063_uv_lock_dependency_evidence"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | None = None
