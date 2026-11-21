@@ -430,13 +430,13 @@ class DockerSandboxRunner:
         if pip_version.returncode != 0 or not pip_version.stdout.decode("ascii", errors="ignore").startswith(f"pip {_PIP_VERSION} "):
             raise SandboxRuntimeError("Sandbox pip version does not match the pinned dependency toolchain")
         created = await self._cli(
-            ["exec", "--user", "0", container_id, "mkdir", "-p", "/deps/site-packages"],
+            ["exec", "--user", "0", container_id, "mkdir", "-p", "/deps/site-packages", "/deps/tmp"],
             timeout=self.cli_timeout_seconds,
         )
         if created.returncode != 0 or created.timed_out:
             raise SandboxRuntimeError("Docker failed to prepare the dependency target")
         owned = await self._cli(
-            ["exec", "--user", "0", container_id, "chown", "10001:10001", "/deps/site-packages"],
+            ["exec", "--user", "0", container_id, "chown", "10001:10001", "/deps/site-packages", "/deps/tmp"],
             timeout=self.cli_timeout_seconds,
         )
         if owned.returncode != 0 or owned.timed_out:
@@ -447,6 +447,7 @@ class DockerSandboxRunner:
                 "--env", "PIP_CONFIG_FILE=/dev/null",
                 "--env", "PIP_NO_INDEX=1",
                 "--env", "PIP_NO_INPUT=1",
+                "--env", "TMPDIR=/deps/tmp",
                 "--env", "PIP_DISABLE_PIP_VERSION_CHECK=1",
                 container_id, "python", "-m", "pip", "install",
                 "--disable-pip-version-check", "--no-input", "--no-index",
