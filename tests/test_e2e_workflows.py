@@ -231,6 +231,7 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
     from solvyn.config import settings
     from solvyn.db.models import (
         ExecutionGraph,
+        Integration,
         Organization,
         OrganizationMembership,
         Project,
@@ -262,7 +263,10 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
     assert listed.status_code == 200
     parent_id, task_id = (uuid.UUID(row["task_id"]) for row in listed.json()["tasks"][:2])
 
-    user_id, organization_id, project_id, teammate_id, repository_id = (uuid.uuid4() for _ in range(5))
+    user_id, organization_id, project_id, teammate_id, repository_id, integration_id = (uuid.uuid4() for _ in range(6))
+    github_installation_id = uuid.uuid4().int % (2**63 - 1) or 1
+    github_account_id = uuid.uuid4().int % (2**63 - 1) or 1
+    github_repository_id = uuid.uuid4().int % (2**63 - 1) or 1
     source_sha = "a" * 40
     source_tree_sha = "b" * 40
     source_text = "def health():\n    return {'status': 'ok'}\n"
@@ -302,9 +306,21 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
         await bind_tenant_scope(db, tenant.id)
         db.add_all(
             [
+                Integration(
+                    id=integration_id,
+                    organization_id=organization_id,
+                    provider="github",
+                    external_id=f"installation:{github_installation_id}",
+                    github_installation_id=github_installation_id,
+                    github_account_id=github_account_id,
+                    github_account_type="Organization",
+                    name="Repository Acceptance",
+                ),
                 Repository(
                     id=repository_id,
                     project_id=project_id,
+                    integration_id=integration_id,
+                    github_repository_id=github_repository_id,
                     full_name="solvyn/acceptance-fixture",
                     provider="github",
                     default_branch="main",
@@ -553,7 +569,21 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
             assert base == "main"
             return {"number": 12, "title": title, "url": "https://github.com/solvyn/acceptance-fixture/pull/12", "state": "open", "draft": True}
 
-    monkeypatch.setattr(verification_api, "load_organization_github_token", AsyncMock(return_value="test-github-token"))
+    class FakeGitHubApp:
+        async def __aenter__(self) -> FakeGitHubApp:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def installation_token(
+            self, installation_id: int, repository_ids: tuple[int, ...], _permissions: dict[str, str]
+        ) -> str:
+            assert installation_id == github_installation_id
+            assert repository_ids == (github_repository_id,)
+            return "test-github-token"
+
+    monkeypatch.setattr(verification_api, "GitHubAppClient", lambda: FakeGitHubApp())
     fake_github = FakeGitHub(token="test-github-token")
     monkeypatch.setattr(verification_api, "GitHubClient", lambda *, token: fake_github)
 
