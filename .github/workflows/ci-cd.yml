@@ -110,6 +110,12 @@ jobs:
           fetch_network="solvyn-dependency-fetch-ci"
           egress_network="solvyn-dependency-egress-ci"
           cleanup() {
+            result=$?
+            if [ "$result" -ne 0 ]; then
+              docker inspect solvyn-dependency-proxy-ci solvyn-dependency-fetcher-ci 2>/dev/null || true
+              docker logs solvyn-dependency-proxy-ci 2>/dev/null || true
+              docker logs solvyn-dependency-fetcher-ci 2>/dev/null || true
+            fi
             docker rm --force solvyn-dependency-fetcher-ci solvyn-dependency-proxy-ci >/dev/null 2>&1 || true
             docker network rm "$fetch_network" "$egress_network" >/dev/null 2>&1 || true
           }
@@ -120,26 +126,37 @@ jobs:
           docker run --detach --name solvyn-dependency-proxy-ci --network "$egress_network" \
             --network-alias dependency-proxy solvyn-dependency-proxy:ci
           docker network connect --alias dependency-proxy "$fetch_network" solvyn-dependency-proxy-ci
-          for attempt in $(seq 1 30); do
-            health="$(docker inspect --format '{{.State.Health.Status}}' solvyn-dependency-proxy-ci)"
-            [ "$health" = healthy ] && break
-            [ "$health" = unhealthy ] && { docker logs solvyn-dependency-proxy-ci; exit 1; }
-            sleep 2
-          done
-          [ "$health" = healthy ] || { docker logs solvyn-dependency-proxy-ci; exit 1; }
-
           docker run --detach --name solvyn-dependency-fetcher-ci --network "$fetch_network" \
             --network-alias dependency-fetcher solvyn-dependency-fetcher:ci
-          for attempt in $(seq 1 30); do
-            health="$(docker inspect --format '{{.State.Health.Status}}' solvyn-dependency-fetcher-ci)"
-            [ "$health" = healthy ] && break
-            [ "$health" = unhealthy ] && { docker logs solvyn-dependency-fetcher-ci; exit 1; }
-            sleep 2
-          done
-          [ "$health" = healthy ] || { docker logs solvyn-dependency-fetcher-ci; exit 1; }
 
-          docker exec solvyn-dependency-fetcher-ci python -c "import urllib.request; p=urllib.request.build_opener(urllib.request.ProxyHandler({'https':'http://dependency-proxy:3128'})); r=p.open('https://pypi.org/simple/pip/',timeout=15); assert r.status==200; r.close()"
-          docker exec solvyn-dependency-fetcher-ci python -c "import urllib.error,urllib.request; p=urllib.request.build_opener(urllib.request.ProxyHandler({'https':'http://dependency-proxy:3128'})); exec(\"try:\\n p.open('https://example.com/',timeout=10)\\nexcept urllib.error.URLError:\\n print('blocked as expected')\\nelse:\\n raise SystemExit('unlisted host unexpectedly accessible')\")"
+          for attempt in $(seq 1 30); do
+            if docker exec solvyn-dependency-fetcher-ci python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=2)" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec -i solvyn-dependency-fetcher-ci python - <<'PY'
+          import urllib.error
+          import urllib.request
+
+          local = urllib.request.urlopen("http://127.0.0.1:8002/health", timeout=3)
+          assert local.status == 200
+          local.close()
+
+          proxy = urllib.request.build_opener(
+              urllib.request.ProxyHandler({"https": "http://dependency-proxy:3128"})
+          )
+          allowed = proxy.open("https://pypi.org/simple/pip/", timeout=20)
+          assert allowed.status == 200
+          allowed.close()
+
+          try:
+              proxy.open("https://example.com/", timeout=10)
+          except urllib.error.URLError:
+              pass
+          else:
+              raise SystemExit("Unlisted host unexpectedly accessible through the proxy")
+          PY
       - name: Run tests
         run: pytest tests/ -v --cov=solvyn
         env:
