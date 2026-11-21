@@ -238,16 +238,12 @@ def _canonical_name(value: str) -> str:
 
 
 def _requirement_identity(line: str) -> tuple[str, str, set[str]]:
-    match = _REQUIREMENT.fullmatch(line)
-    if not match:
-        raise DependencyBlockedError("Exported requirements contain an unsupported pin")
     hashes = set(re.findall(r"(?<!\S)--hash=sha256:([a-f0-9]{64})(?=\s|$)", line))
     requirement = re.sub(r"\s+--hash=sha256:[a-f0-9]{64}(?=\s|$)", "", line).strip()
     match = _REQUIREMENT.fullmatch(requirement)
     if not match or not hashes:
         raise DependencyBlockedError("Every requirement must have a pinned version and SHA-256 hash")
     return _canonical_name(match.group("name")), match.group("version").lower(), hashes
-
 
 def _wheel_identity(filename: str) -> tuple[str, str]:
     if not filename.endswith(".whl"):
