@@ -822,7 +822,13 @@ async def test_task_verification_is_sandboxed_and_durable(
 
     verification_calls: list[list[str]] = []
 
-    async def fake_run(self: DockerSandboxRunner, managed_workspace: Any, command: list[str]) -> SandboxResult:
+    async def fake_run(
+        self: DockerSandboxRunner,
+        managed_workspace: Any,
+        command: list[str],
+        *,
+        install_dependencies: bool = False,
+    ) -> SandboxResult:
         verification_calls.append(command)
         return SandboxResult(uuid.uuid4(), tuple(command), 0, False, "1 passed", "", False, 0.05)
 
