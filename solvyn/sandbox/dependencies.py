@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import io
 import os
 import re
 import stat
@@ -212,13 +213,10 @@ def parse_exported_requirements(content: bytes) -> list[str]:
     if len(logical) > _MAX_PACKAGES:
         raise DependencyBlockedError("Project exceeds the package count limit")
     for line in logical:
-        parts = line.split()
-        requirement = parts[0]
-        if not _REQUIREMENT.fullmatch(requirement) or "://" in requirement or "@" in requirement:
-            raise DependencyBlockedError("Only pinned registry requirements are supported")
-        hashes = [part for part in parts[1:] if part.startswith("--hash=")]
-        if len(hashes) != len(parts) - 1 or not hashes or any(not _HASH.fullmatch(item) for item in hashes):
-            raise DependencyBlockedError("Every requirement must contain only SHA-256 hashes")
+        hashes = re.findall(r"(?<!\\S)--hash=sha256:([a-f0-9]{64})(?=\\s|$)", line)
+        requirement = re.sub(r"\\s+--hash=sha256:[a-f0-9]{64}(?=\\s|$)", "", line).strip()
+        if not hashes or not _REQUIREMENT.fullmatch(requirement) or "://" in requirement or "@" in requirement:
+            raise DependencyBlockedError("Only pinned registry requirements with SHA-256 hashes are supported")
     return logical
 
 
@@ -282,8 +280,10 @@ def build_bundle_manifest(
         "unpacked_bytes": total_unpacked,
         "wheels": wheels,
     }
-    manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
-    manifest["wheelhouse_sha256"] = hashlib.sha256(manifest_bytes).hexdigest()
+    wheelhouse_digest = hashlib.sha256()
+    for wheel in wheels:
+        wheelhouse_digest.update(str(wheel["filename"]).encode("utf-8") + b"\\0" + bytes.fromhex(str(wheel["sha256"])))
+    manifest["wheelhouse_sha256"] = wheelhouse_digest.hexdigest()
     return manifest, total_bytes
 
 
@@ -300,7 +300,7 @@ def create_bundle_archive(
             info = tarfile.TarInfo(name)
             info.size = len(content)
             info.mode = 0o444
-            archive.addfile(info, __import__("io").BytesIO(content))
+            archive.addfile(info, io.BytesIO(content))
             size += len(content)
 
         add_bytes("requirements.txt", requirements)
