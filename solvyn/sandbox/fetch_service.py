@@ -24,6 +24,8 @@ from solvyn.sandbox.dependencies import (
     _MAX_BUNDLE_BYTES,
     _MAX_LOCK_BYTES,
     _MAX_PYPROJECT_BYTES,
+    _PIP_VERSION,
+    _UV_VERSION,
     build_bundle_manifest,
     create_bundle_archive,
     validate_uv_project,
@@ -36,24 +38,44 @@ _PROXY = "http://dependency-proxy:3128"
 _slots = threading.BoundedSemaphore(_MAX_ACTIVE_REQUESTS)
 
 
-def _run_tool(args: list[str], *, cwd: Path, env: dict[str, str]) -> bytes:
-    try:
-        result = subprocess.run(
-            args,
-            cwd=cwd,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=_PROCESS_TIMEOUT,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise DependencyBlockedError("Dependency resolution exceeded its time limit") from exc
-    if result.returncode != 0:
-        raise DependencyBlockedError("Locked dependencies could not be exported or fetched safely")
-    return result.stdout
+def _limit_output_files() -> None:
+    import resource
 
+    resource.setrlimit(resource.RLIMIT_FSIZE, (2 * 1024 * 1024, 2 * 1024 * 1024))
+
+def _run_tool(args: list[str], *, cwd: Path, env: dict[str, str]) -> bytes:
+    import signal
+
+    with tempfile.TemporaryFile(dir=cwd) as output, tempfile.TemporaryFile(dir=cwd) as errors:
+        try:
+            process = subprocess.Popen(
+                args,
+                cwd=cwd,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=output,
+                stderr=errors,
+                start_new_session=True,
+                preexec_fn=_limit_output_files,
+            )
+        except (OSError, ValueError) as exc:
+            raise DependencyBlockedError("Pinned dependency tooling is unavailable") from exc
+        try:
+            return_code = process.wait(timeout=_PROCESS_TIMEOUT)
+        except subprocess.TimeoutExpired as exc:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+            raise DependencyBlockedError("Dependency resolution exceeded its time limit") from exc
+        output.seek(0, os.SEEK_END)
+        output_size = output.tell()
+        errors.seek(0, os.SEEK_END)
+        errors_size = errors.tell()
+        if output_size > 1_048_576 or errors_size > 1_048_576:
+            raise DependencyBlockedError("Dependency tooling exceeded its output limit")
+        if return_code != 0:
+            raise DependencyBlockedError("Locked dependencies could not be exported or fetched safely")
+        output.seek(0)
+        return output.read(1_048_577)
 
 def _build_wheelhouse(pyproject_bytes: bytes, lock_bytes: bytes) -> tuple[BinaryIO, int]:
     project = tomllib.loads(pyproject_bytes.decode("utf-8"))
@@ -78,6 +100,7 @@ def _build_wheelhouse(pyproject_bytes: bytes, lock_bytes: bytes) -> tuple[Binary
         "PIP_INDEX_URL": "https://pypi.org/simple",
         "PIP_DISABLE_PIP_VERSION_CHECK": "1",
         "PIP_NO_INPUT": "1",
+        "PIP_NO_CACHE_DIR": "1",
         "HTTPS_PROXY": _PROXY,
         "HTTP_PROXY": _PROXY,
         "https_proxy": _PROXY,
@@ -86,6 +109,10 @@ def _build_wheelhouse(pyproject_bytes: bytes, lock_bytes: bytes) -> tuple[Binary
         "no_proxy": "",
     }
     try:
+        uv_version = _run_tool(["uv", "--version"], cwd=root, env=env).decode("ascii").strip()
+        pip_version = _run_tool(["python", "-m", "pip", "--version"], cwd=root, env=env).decode("ascii").strip()
+        if uv_version != f"uv {_UV_VERSION}" or not pip_version.startswith(f"pip {_PIP_VERSION} "):
+            raise DependencyBlockedError("Dependency fetcher toolchain version is unsupported")
         exported = _run_tool(
             [
                 "uv", "export", "--locked", "--all-groups", "--all-extras",
@@ -102,12 +129,13 @@ def _build_wheelhouse(pyproject_bytes: bytes, lock_bytes: bytes) -> tuple[Binary
             [
                 "python", "-m", "pip", "download", "--disable-pip-version-check",
                 "--no-input", "--only-binary=:all:", "--require-hashes",
-                "--no-deps", "--dest", str(wheel_dir), "-r", str(root / "requirements.txt"),
+                "--no-deps", "--no-cache-dir", "--dest", str(wheel_dir), "-r", str(root / "requirements.txt"),
             ],
             cwd=root,
             env=env,
         )
         manifest, _ = build_bundle_manifest(wheel_dir, lock_sha256=lock_sha, requirements=requirements)
+        manifest["toolchain"] = {"uv": _UV_VERSION, "pip": _PIP_VERSION}
         bundle = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode="w+b")
         size = create_bundle_archive(wheel_dir, requirements, manifest, bundle)
         if size > _MAX_BUNDLE_BYTES:
