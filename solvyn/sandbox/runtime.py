@@ -20,9 +20,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, cast
 
-from solvyn.sandbox.dependencies import DependencyBlockedError, DependencyEvidence, _PIP_VERSION, _sha256_file, create_bundle_archive, discover_dependency_inputs
 from solvyn.sandbox.dependency_client import DependencyBundle, fetch_dependency_bundle
-from solvyn.sandbox.workspaces import ManagedWorkspace, WorkspaceError, WorkspaceManager, safe_relative_path
+from solvyn.sandbox.dependencies import (
+    DependencyBlockedError,
+    DependencyEvidence,
+    _PIP_VERSION,
+    _sha256_file,
+    create_bundle_archive,
+    discover_dependency_inputs,
+)
+from solvyn.sandbox.workspaces import (
+    ManagedWorkspace,
+    WorkspaceError,
+    WorkspaceManager,
+    safe_relative_path,
+)
 
 _CONTAINER_ID = re.compile(r"^[a-f0-9]{12,64}$")
 
