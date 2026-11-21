@@ -137,6 +137,14 @@ def _has_unlocked_python_manifest(workspace: Path) -> bool:
         "pipfile.lock",
         "poetry.lock",
         "pdm.lock",
+        "tox.ini",
+        "noxfile.py",
+        "environment.yml",
+        "environment.yaml",
+        "conda-lock.yml",
+        "conda-lock.yaml",
+        "package.json",
+        *{name.casefold() for name in _OTHER_LOCKFILES},
     }
     try:
         for path in workspace.rglob("*"):
@@ -153,7 +161,12 @@ def _has_unlocked_python_manifest(workspace: Path) -> bool:
 
 
 def discover_dependency_inputs(workspace: Path, *, required: bool) -> DependencyInputs | None:
-    """Return a validated root uv.lock pair; never infer project dependencies without it."""
+    """Return a validated root uv.lock pair.
+
+    The required flag is kept for caller compatibility. Dependency setup is skipped
+    only when a recursive scan finds no recognized project or package-manager
+    manifest. Any detected Python project requires the supported root lock.
+    """
     lock_path = workspace / "uv.lock"
     project_path = workspace / "pyproject.toml"
     if lock_path.exists() or lock_path.is_symlink():
