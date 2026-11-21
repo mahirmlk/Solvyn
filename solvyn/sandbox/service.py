@@ -85,7 +85,10 @@ def create_sandbox_service(token: str | None = None) -> FastAPI:
             raise HTTPException(status_code=503, detail="Sandbox execution capacity is full") from exc
         try:
             workspace = service.state.workspaces.get(payload.workspace_id)
-            result = await service.state.runner.run(workspace, payload.command, install_dependencies=payload.install_dependencies)
+            if payload.install_dependencies:
+                result = await service.state.runner.run(workspace, payload.command, install_dependencies=True)
+            else:
+                result = await service.state.runner.run(workspace, payload.command)
         except (WorkspaceError, ValueError) as exc:
             raise HTTPException(status_code=400, detail="Invalid sandbox workspace or command") from exc
         except Exception as exc:
