@@ -4,6 +4,7 @@ import hashlib
 import io
 import os
 import sys
+import tomllib
 import zipfile
 from pathlib import Path
 
@@ -16,7 +17,8 @@ from solvyn.sandbox.dependencies import (
     extract_bundle_archive,
     parse_exported_requirements,
 )
-from solvyn.sandbox.fetch_service import _run_tool
+from solvyn.sandbox.fetch_service import _render_export_pyproject, _run_tool
+from solvyn.sandbox.dependencies import validate_uv_project
 
 
 def _wheel(path: Path, name: str, version: str, module_text: str) -> str:
@@ -97,6 +99,55 @@ def test_wheelhouse_rejects_hash_not_allowed_by_locked_requirement(tmp_path: Pat
 def test_requirements_reject_unsafe_forms(line: str) -> None:
     with pytest.raises(DependencyBlockedError):
         parse_exported_requirements((line + "\n").encode())
+
+
+def test_fetch_export_drops_repository_build_backend(tmp_path: Path) -> None:
+    marker = tmp_path / "backend-ran"
+    pyproject = {
+        "project": {
+            "name": "demo",
+            "version": "1.0",
+            "requires-python": ">=3.12",
+            "dependencies": ["demo-dep>=1"],
+            "optional-dependencies": {"docs": ["docs-dep>=1"]},
+            "scripts": {"malicious": "backend:run"},
+        },
+        "build-system": {
+            "requires": [],
+            "build-backend": "backend",
+            "backend-path": ["."],
+        },
+        "tool": {"setuptools": {"dynamic": {"version": {"attr": "backend:run"}}}},
+        "dependency-groups": {"dev": ["pytest>=8"]},
+    }
+    (tmp_path / "backend.py").write_text(
+        f"from pathlib import Path\\nPath({str(marker)!r}).write_text('executed')\\n",
+        encoding="utf-8",
+    )
+
+    sanitized = _render_export_pyproject(pyproject).decode("utf-8")
+    parsed = tomllib.loads(sanitized)
+    assert parsed["project"]["dependencies"] == ["demo-dep>=1"]
+    assert parsed["project"]["optional-dependencies"]["docs"] == ["docs-dep>=1"]
+    assert parsed["dependency-groups"]["dev"] == ["pytest>=8"]
+    assert "build-system" not in parsed
+    assert "tool" not in parsed
+    assert "scripts" not in parsed["project"]
+    assert "backend" not in sanitized
+    assert not marker.exists()
+
+
+def test_dynamic_project_metadata_is_rejected_before_export() -> None:
+    project = {
+        "project": {
+            "name": "demo",
+            "version": "1.0",
+            "requires-python": ">=3.12",
+            "dynamic": ["version"],
+        }
+    }
+    with pytest.raises(DependencyBlockedError, match="Dynamic project metadata"):
+        validate_uv_project(project, {"version": 1, "package": []})
 
 
 def test_fetch_subprocess_can_write_wheels_larger_than_two_megabytes(tmp_path: Path) -> None:
