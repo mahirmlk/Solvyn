@@ -587,25 +587,27 @@ curl -H "X-API-Key: your-api-key" \
 
 These endpoints require a user JWT in `Authorization: Bearer <access-token>` and membership in the organization that owns the project. Tenant API keys alone cannot connect or inspect repositories.
 
-Repository inspection supports public repositories and private repositories linked to an active organization GitHub token. Solvyn can write through a connected organization token using bounded branch and commit operations. Repository text and metadata remain untrusted input.
+Repository inspection supports public repositories and private repositories linked to an active GitHub App installation. Solvyn requests short-lived tokens scoped to a connected repository's numeric GitHub ID and the needed permission profile. Repository text and metadata remain untrusted input.
 
 ### `GET /api/v1/organizations/{organization_id}/integrations/github`
 
-Read the GitHub credential connection status. Requires organization membership. The response reports the GitHub account login and last update time; it never returns a credential.
+Read the GitHub App installation status. Requires organization membership. The response reports the installation/account identity and never returns a credential.
 
 ### `PUT /api/v1/organizations/{organization_id}/integrations/github`
 
-Connect or replace an organization GitHub token. Requires owner or admin membership. Solvyn validates the token with GitHub, encrypts it with `INTEGRATION_ENCRYPTION_KEYS`, and returns only the connected account. If no encryption key is configured, this endpoint returns `503` without contacting GitHub or storing the token.
+Retired. Returns `410 Gone`; personal access tokens are not accepted for repository access.
+
+### `PUT /api/v1/organizations/{organization_id}/integrations/github/installation`
+
+Bind an already-installed GitHub App installation using `{ "installation_id": 123 }`. Requires owner or admin membership. Solvyn verifies the installation and account identity with its App JWT before saving the installation/account IDs. App setup and required permissions are described in [GitHub App setup](GITHUB_APP_SETUP.md).
 
 ### `DELETE /api/v1/organizations/{organization_id}/integrations/github`
 
-Disconnect the organization GitHub token. Requires owner or admin membership and deletes the encrypted credential.
-
-Generate a Fernet key with the command in `.env.example`. For key rotation, configure the new key first and retain the previous keys in the comma-separated list; reconnect each organization integration so its token is encrypted with the new key before removing old keys. A fine-grained GitHub token scoped to the required repositories is recommended; never send tokens through query parameters.
+Disconnect the GitHub integration. Requires owner or admin membership.
 
 ### `POST /api/v1/projects/{project_id}/repositories`
 
-Connect a public or organization-token-authorized private GitHub repository to a project. Requires an organization owner or admin.
+Connect a public repository or a private repository enabled for the linked GitHub App installation. Requires an organization owner or admin.
 
 ```json
 { "full_name": "owner/repository" }
@@ -621,7 +623,7 @@ Inspect the default branch at one resolved commit. The response includes `revisi
 
 ### Explicit repository context for teammate runs
 
-`POST /api/v1/teammates/{teammate_id}/run` accepts `project_id`, `input_data`, an optional `repository_id`, and up to four optional `repository_paths`. If a repository ID is supplied, it must identify an active GitHub repository connected to the same assigned project. Solvyn fetches a bounded inspection summary and the explicitly selected text files (up to 1,500 characters each) and adds them to the user-level prompt as untrusted repository data; a fixed system instruction says not to follow instructions found there. Private repositories require the active organization GitHub token linked to the repository. Paths must be relative and cannot contain traversal segments. If omitted, no repository fetch occurs. This path provides context for investigation; it does not enable repository edits, sandbox execution, or automatic verification.
+`POST /api/v1/teammates/{teammate_id}/run` accepts `project_id`, `input_data`, an optional `repository_id`, and up to four optional `repository_paths`. If a repository ID is supplied, it must identify an active GitHub repository connected to the same assigned project. Solvyn fetches a bounded inspection summary and the explicitly selected text files (up to 1,500 characters each) and adds them to the user-level prompt as untrusted repository data; a fixed system instruction says not to follow instructions found there. Private repositories require a GitHub App installation linked to that repository. Paths must be relative and cannot contain traversal segments. If omitted, no repository fetch occurs. This path provides context for investigation; it does not enable repository edits, sandbox execution, or automatic verification.
 
 Persistent teammate conversations are available through `POST /api/v1/teammates/{teammate_id}/conversations` with an assigned `project_id`, `GET /api/v1/teammates/{teammate_id}/conversations?project_id=...`, and the conversation `GET`/`POST .../{conversation_id}/messages` endpoints. The conversation is bound to its teammate, project assignment, tenant, and durable session. Each send stores the user message and assistant response in session history and supplies at most the latest 12 messages, capped to 12,000 characters, as context on the next turn. Oversized saved assistant entries are valid JSON preview records marked as truncated; the send response still contains the full result. Conversation messages do not grant workspace tools; delegated task handoffs remain the path for permission-checked workspace operations. Access is revalidated against the organization membership and current teammate/project assignment on every request.
 
@@ -631,7 +633,7 @@ An owner or admin approves/rejects the returned approval through `POST /api/v1/a
 
 ### Seed a delegated task workspace from repository files
 
-`POST /api/v1/workflows/executions/{execution_id}/tasks/{task_id}/workspace` continues to accept caller-supplied `files`. Alternatively, send `repository_id` and one to 50 `repository_paths`; the two modes cannot be combined. Repository seeding requires a signed-in organization member, a delegated child task with a matching `TaskHandoff`, and an active GitHub repository in that handoff's project. Private repositories require the active organization GitHub token linked to the repository. The API resolves the repository's default branch once and reads selected regular files at that commit SHA. Symlinks, submodules, `.git` paths, binary or oversized files, and invalid relative paths are rejected. Files are limited to 1 MB each and 16 MiB total. The response and `TaskWorkspace` record include the repository ID, source commit SHA, and selected paths. This is a selected-file snapshot, not a Git clone or worktree.
+`POST /api/v1/workflows/executions/{execution_id}/tasks/{task_id}/workspace` continues to accept caller-supplied `files`. Alternatively, send `repository_id` and one to 50 `repository_paths`; the two modes cannot be combined. Repository seeding requires a signed-in organization member, a delegated child task with a matching `TaskHandoff`, and an active GitHub repository in that handoff's project. Private repositories require the GitHub App installation linked to the repository. The API resolves the repository's default branch once and reads selected regular files at that commit SHA. Symlinks, submodules, `.git` paths, binary or oversized files, and invalid relative paths are rejected. Files are limited to 1 MB each and 16 MiB total. The response and `TaskWorkspace` record include the repository ID, source commit SHA, and selected paths. This is a selected-file snapshot, not a Git clone or worktree.
 
 ```json
 {
@@ -650,7 +652,7 @@ Search file paths case-insensitively. This endpoint searches paths only; it does
 
 ### `GET /api/v1/repositories/{repository_id}/content/search?query=...`
 
-Search file contents using a case-insensitive literal query (not a regular expression). The default branch is resolved to a commit SHA before the tree and file reads; the response includes that revision and the Git tree SHA. The scan considers a deterministic, path-sorted set of up to 25 regular text/code blobs with supported extensions, reads at most 64 KB per blob and 1 MB total, returns at most 20 matches with 500-character snippets, caps serialized output at 16 KB, and has a 45-second deadline. Unsupported extensions are outside the search scope. Oversized, binary, and invalid UTF-8 candidate blobs are skipped; `truncated` indicates incomplete coverage from skipped candidate blobs or candidate, match, output, or byte limits. `candidate_count`, `files_scanned`, and `fetched_bytes` describe the bounded scan. A request exceeding its deadline returns HTTP 504. `content_trust` is `untrusted_repository_data`. Requires access to the project and, for a private repository, the active organization GitHub token linked to that repository. GitHub rate limits map to HTTP 429.
+Search file contents using a case-insensitive literal query (not a regular expression). The default branch is resolved to a commit SHA before the tree and file reads; the response includes that revision and the Git tree SHA. The scan considers a deterministic, path-sorted set of up to 25 regular text/code blobs with supported extensions, reads at most 64 KB per blob and 1 MB total, returns at most 20 matches with 500-character snippets, caps serialized output at 16 KB, and has a 45-second deadline. Unsupported extensions are outside the search scope. Oversized, binary, and invalid UTF-8 candidate blobs are skipped; `truncated` indicates incomplete coverage from skipped candidate blobs or candidate, match, output, or byte limits. `candidate_count`, `files_scanned`, and `fetched_bytes` describe the bounded scan. A request exceeding its deadline returns HTTP 504. `content_trust` is `untrusted_repository_data`. Requires access to the project and, for a private repository, the active GitHub App installation linked to that repository. GitHub rate limits map to HTTP 429.
 
 ### `GET /api/v1/repositories/{repository_id}/branches`
 
@@ -658,7 +660,7 @@ List up to the first 100 branches and their commit SHAs. When `possibly_truncate
 
 ### `POST /api/v1/repositories/{repository_id}/branches`
 
-Create a `solvyn/...` work branch from the repository default branch or a selected source branch. Requires an organization owner/admin and a connected GitHub token.
+Create a `solvyn/...` work branch from the repository default branch or a selected source branch. Requires an organization owner/admin and a connected GitHub App installation.
 
 ```json
 { "branch_name": "solvyn/task-123", "from_branch": "main" }
@@ -666,7 +668,7 @@ Create a `solvyn/...` work branch from the repository default branch or a select
 
 ### `POST /api/v1/repositories/{repository_id}/commits`
 
-Create one commit containing up to 50 UTF-8 text files (500 KB total) on a `solvyn/...` branch. The request must include the expected current branch head; stale heads return `409`. The API rejects duplicate paths, traversal paths, and `.git` paths. Requires owner/admin access and a connected GitHub token.
+Create one commit containing up to 50 UTF-8 text files (500 KB total) on a `solvyn/...` branch. The request must include the expected current branch head; stale heads return `409`. The API rejects duplicate paths, traversal paths, and `.git` paths. Requires owner/admin access and a connected GitHub App installation.
 
 ```json
 {

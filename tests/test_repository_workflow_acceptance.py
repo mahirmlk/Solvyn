@@ -35,6 +35,7 @@ async def test_repository_task_runs_approved_tool_loop_in_docker_and_delivers_dr
     from solvyn.config import settings
     from solvyn.db.models import (
         Approval,
+        Integration,
         Organization,
         OrganizationMembership,
         PermissionLevel,
@@ -70,9 +71,12 @@ async def test_repository_task_runs_approved_tool_loop_in_docker_and_delivers_dr
             pytest.fail(message)
         pytest.skip(message)
 
-    tenant_id, org_id, project_id, lead_id, engineer_id, repository_id, user_id = (
-        uuid.uuid4() for _ in range(7)
+    tenant_id, org_id, project_id, lead_id, engineer_id, repository_id, user_id, integration_id = (
+        uuid.uuid4() for _ in range(8)
     )
+    github_installation_id = uuid.uuid4().int % (2**63 - 1) or 1
+    github_account_id = uuid.uuid4().int % (2**63 - 1) or 1
+    github_repository_id = uuid.uuid4().int % (2**63 - 1) or 1
     source_sha = "a" * 40
     tree_sha = "b" * 40
     original = "def health():\n    return {'status': 'ok'}\n"
@@ -129,9 +133,21 @@ async def test_repository_task_runs_approved_tool_loop_in_docker_and_delivers_dr
         await bind_tenant_scope(db, tenant.id)
         db.add_all(
             [
+                Integration(
+                    id=integration_id,
+                    organization_id=org_id,
+                    provider="github",
+                    external_id=f"installation:{github_installation_id}",
+                    github_installation_id=github_installation_id,
+                    github_account_id=github_account_id,
+                    github_account_type="Organization",
+                    name="Workflow acceptance",
+                ),
                 Repository(
                     id=repository_id,
                     project_id=project_id,
+                    integration_id=integration_id,
+                    github_repository_id=github_repository_id,
                     provider="github",
                     full_name="solvyn/workflow-acceptance",
                     default_branch="main",
@@ -493,7 +509,22 @@ async def test_repository_task_runs_approved_tool_loop_in_docker_and_delivers_dr
             return self.pull_request
 
     fake_github = FakeGitHub(token="test-github-token")
-    monkeypatch.setattr(verification_api, "load_organization_github_token", AsyncMock(return_value="test-github-token"))
+    class FakeGitHubApp:
+        async def __aenter__(self) -> FakeGitHubApp:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def installation_token(
+            self, installation_id: int, repository_ids: tuple[int, ...], permissions: dict[str, str]
+        ) -> str:
+            assert installation_id == github_installation_id
+            assert repository_ids == (github_repository_id,)
+            assert permissions == {"contents": "write", "metadata": "read", "pull_requests": "write"}
+            return "test-github-token"
+
+    monkeypatch.setattr(verification_api, "GitHubAppClient", lambda: FakeGitHubApp())
     monkeypatch.setattr(verification_api, "GitHubClient", lambda *, token: fake_github)
     preview = await client.get(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{child_task_id}/delivery-preview"

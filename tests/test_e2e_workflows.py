@@ -214,7 +214,7 @@ async def test_repository_workspace_requires_a_delegated_task_handoff(client: As
         json={"repository_id": str(uuid.uuid4()), "repository_paths": ["README.md"]},
     )
 
-    assert response.status_code == 403
+    assert response.status_code == 403, response.text
     assert response.json()["detail"] == "Repository workspaces require an assigned project handoff"
 
 
@@ -231,6 +231,7 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
     from solvyn.config import settings
     from solvyn.db.models import (
         ExecutionGraph,
+        Integration,
         Organization,
         OrganizationMembership,
         Project,
@@ -262,7 +263,10 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
     assert listed.status_code == 200
     parent_id, task_id = (uuid.UUID(row["task_id"]) for row in listed.json()["tasks"][:2])
 
-    user_id, organization_id, project_id, teammate_id, repository_id = (uuid.uuid4() for _ in range(5))
+    user_id, organization_id, project_id, teammate_id, repository_id, integration_id = (uuid.uuid4() for _ in range(6))
+    github_installation_id = uuid.uuid4().int % (2**63 - 1) or 1
+    github_account_id = uuid.uuid4().int % (2**63 - 1) or 1
+    github_repository_id = uuid.uuid4().int % (2**63 - 1) or 1
     source_sha = "a" * 40
     source_tree_sha = "b" * 40
     source_text = "def health():\n    return {'status': 'ok'}\n"
@@ -302,9 +306,21 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
         await bind_tenant_scope(db, tenant.id)
         db.add_all(
             [
+                Integration(
+                    id=integration_id,
+                    organization_id=organization_id,
+                    provider="github",
+                    external_id=f"installation:{github_installation_id}",
+                    github_installation_id=github_installation_id,
+                    github_account_id=github_account_id,
+                    github_account_type="Organization",
+                    name="Repository Acceptance",
+                ),
                 Repository(
                     id=repository_id,
                     project_id=project_id,
+                    integration_id=integration_id,
+                    github_repository_id=github_repository_id,
                     full_name="solvyn/acceptance-fixture",
                     provider="github",
                     default_branch="main",
@@ -553,7 +569,22 @@ async def test_repository_task_delivery_keeps_pinned_source_and_review_evidence(
             assert base == "main"
             return {"number": 12, "title": title, "url": "https://github.com/solvyn/acceptance-fixture/pull/12", "state": "open", "draft": True}
 
-    monkeypatch.setattr(verification_api, "load_organization_github_token", AsyncMock(return_value="test-github-token"))
+    class FakeGitHubApp:
+        async def __aenter__(self) -> FakeGitHubApp:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def installation_token(
+            self, installation_id: int, repository_ids: tuple[int, ...], permissions: dict[str, str]
+        ) -> str:
+            assert installation_id == github_installation_id
+            assert repository_ids == (github_repository_id,)
+            assert permissions == {"contents": "write", "metadata": "read", "pull_requests": "write"}
+            return "test-github-token"
+
+    monkeypatch.setattr(verification_api, "GitHubAppClient", lambda: FakeGitHubApp())
     fake_github = FakeGitHub(token="test-github-token")
     monkeypatch.setattr(verification_api, "GitHubClient", lambda *, token: fake_github)
 
@@ -704,7 +735,7 @@ async def test_task_verification_is_sandboxed_and_durable(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/workspace",
         json={"files": {"test_sample.py": "def test_sample():\n    assert 1 + 1 == 2\n"}},
     )
-    assert workspace.status_code == 201
+    assert workspace.status_code == 201, workspace.text
 
     from solvyn.db.models import (
         Approval,
@@ -799,7 +830,7 @@ async def test_task_verification_is_sandboxed_and_durable(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria",
         json={"criteria": ["The sample test passes"]},
     )
-    assert criteria.status_code == 201
+    assert criteria.status_code == 201, criteria.text
     accepted = await client.post(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/acceptance-criteria/{criteria.json()['acceptance_criteria'][0]['id']}/decision",
         json={"decision": "accepted", "note": "Reviewed the verification requirement"},

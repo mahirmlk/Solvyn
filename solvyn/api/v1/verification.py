@@ -24,6 +24,7 @@ from solvyn.config import settings
 from solvyn.db.models import (
     Approval,
     ExecutionGraph,
+    Integration,
     OrchestrationEvent,
     Organization,
     OrganizationMembership,
@@ -47,10 +48,10 @@ from solvyn.multi_tenant.middleware import SHARED_SECRET_PRINCIPAL_ID, tenant_co
 from solvyn.repositories.credentials import (
     CredentialEncryptionUnavailableError,
     GitHubCredentialNotFoundError,
-    load_organization_github_token,
 )
 from solvyn.repositories.github import GitHubClient, GitHubRepositoryError, _validate_solvyn_branch
-from solvyn.repositories.providers import get_authorized_repository_provider
+from solvyn.repositories.github_app import GitHubAppClient
+from solvyn.repositories.providers import get_authorized_repository_provider, require_github_app_repository_binding
 from solvyn.repositories.worktree import RepositoryWorktreeError, materialize_repository_worktree, validate_repository_tree
 from solvyn.sandbox.factory import create_sandbox_runner
 from solvyn.sandbox.remote import RemoteSandboxResult, RemoteSandboxRunner
@@ -190,9 +191,18 @@ async def _task_delivery_context(
         )
         if project.id != handoff.project_id:
             raise HTTPException(status_code=403, detail="Task repository is outside its assigned project")
-        token = await load_organization_github_token(db, project.organization_id)
+        integration = await db.get(Integration, repository.integration_id) if repository.integration_id else None
+        installation_id, github_repository_id = require_github_app_repository_binding(
+            integration, repository, project.organization_id
+        )
+        async with GitHubAppClient() as app:
+            token = await app.installation_token(
+                installation_id,
+                (github_repository_id,),
+                {"contents": "write", "metadata": "read", "pull_requests": "write"},
+            )
     except GitHubCredentialNotFoundError as exc:
-        raise HTTPException(status_code=409, detail="Connect a GitHub organization token before delivery") from exc
+        raise HTTPException(status_code=409, detail="Reconnect this repository to a GitHub App installation before delivery") from exc
     except CredentialEncryptionUnavailableError as exc:
         raise HTTPException(
             status_code=503,

@@ -5,6 +5,7 @@ from enum import StrEnum
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -801,12 +802,30 @@ class Integration(Base):
     organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True)
     provider: Mapped[str] = mapped_column(String(50), nullable=False)  # github, gitlab, ...
     external_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)  # device id / app id
+    github_installation_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    github_account_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    github_account_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     name: Mapped[str] = mapped_column(String(255), default="")
     is_active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    __table_args__ = (UniqueConstraint("organization_id", "provider", "external_id"),)
+    __table_args__ = (
+        UniqueConstraint("organization_id", "provider", "external_id"),
+        UniqueConstraint("github_installation_id", name="uq_integrations_github_installation_id"),
+        CheckConstraint(
+            "github_installation_id IS NULL OR github_installation_id > 0",
+            name="ck_integrations_github_installation_id_positive",
+        ),
+        CheckConstraint(
+            "(github_installation_id IS NULL) = (github_account_id IS NULL)",
+            name="ck_integrations_github_installation_account_pair",
+        ),
+        CheckConstraint(
+            "github_account_id IS NULL OR github_account_id > 0",
+            name="ck_integrations_github_account_id_positive",
+        ),
+    )
 
 
 class IntegrationCredential(Base):
@@ -995,6 +1014,7 @@ class Repository(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False, index=True)
     integration_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("integrations.id"), nullable=True)
+    github_repository_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)  # owner/repo
     provider: Mapped[str] = mapped_column(String(50), default="github")
     default_branch: Mapped[str] = mapped_column(String(255), default="main")
@@ -1003,7 +1023,17 @@ class Repository(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    __table_args__ = (UniqueConstraint("project_id", "full_name"),)
+    __table_args__ = (
+        UniqueConstraint("project_id", "full_name"),
+        CheckConstraint(
+            "github_repository_id IS NULL OR github_repository_id > 0",
+            name="ck_repositories_github_repository_id_positive",
+        ),
+        CheckConstraint(
+            "github_repository_id IS NULL OR (provider = 'github' AND integration_id IS NOT NULL)",
+            name="ck_repositories_github_repository_binding",
+        ),
+    )
 
 
 class TeammateProfile(Base):

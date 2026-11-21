@@ -1384,12 +1384,17 @@ async def test_background_worker_webhook_and_maintenance_writes_are_tenant_scope
     organization_a, organization_b = uuid.uuid4(), uuid.uuid4()
     project_a, project_b = uuid.uuid4(), uuid.uuid4()
     repository_a, repository_b = uuid.uuid4(), uuid.uuid4()
+    integration_a, integration_b = uuid.uuid4(), uuid.uuid4()
+    installation_a, installation_b = 81201, 81202
+    account_a, account_b = 45601, 45602
+    github_repository_a, github_repository_b = 98765401, 98765402
     schedule_a, schedule_b = uuid.uuid4(), uuid.uuid4()
     delivery_id = str(uuid.uuid4())
     body = json.dumps(
         {
             "action": "completed",
-            "repository": {"full_name": "Shared/Worker-RLS"},
+            "repository": {"id": github_repository_a, "full_name": "Shared/Worker-RLS"},
+            "installation": {"id": installation_a, "account": {"id": account_a, "type": "Organization"}},
             "workflow_run": {
                 "id": 8142,
                 "run_attempt": 1,
@@ -1450,9 +1455,9 @@ async def test_background_worker_webhook_and_maintenance_writes_are_tenant_scope
                     (organization_b, tenant_b, f"worker-rls-{organization_b}", "Worker RLS"),
                 ],
             )
-            for tenant_id, organization_id, project_id, repository_id, schedule_id in (
-                (tenant_a, organization_a, project_a, repository_a, schedule_a),
-                (tenant_b, organization_b, project_b, repository_b, schedule_b),
+            for tenant_id, organization_id, project_id, repository_id, integration_id, installation_id, account_id, github_repository_id, schedule_id in (
+                (tenant_a, organization_a, project_a, repository_a, integration_a, installation_a, account_a, github_repository_a, schedule_a),
+                (tenant_b, organization_b, project_b, repository_b, integration_b, installation_b, account_b, github_repository_b, schedule_b),
             ):
                 await connection.execute(
                     text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
@@ -1472,10 +1477,29 @@ async def test_background_worker_webhook_and_maintenance_writes_are_tenant_scope
                 )
                 await connection.execute(
                     text(
-                        "INSERT INTO repositories (id, project_id, full_name, provider) "
-                        "VALUES (:id, :project_id, 'Shared/Worker-RLS', 'github')"
+                        "INSERT INTO integrations "
+                        "(id, organization_id, provider, external_id, github_installation_id, github_account_id, github_account_type, name) "
+                        "VALUES (:id, :organization_id, 'github', :external_id, :installation_id, :account_id, 'Organization', 'Worker RLS')"
                     ),
-                    {"id": repository_id, "project_id": project_id},
+                    {
+                        "id": integration_id,
+                        "organization_id": organization_id,
+                        "external_id": f"installation:{installation_id}",
+                        "installation_id": installation_id,
+                        "account_id": account_id,
+                    },
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO repositories (id, project_id, integration_id, github_repository_id, full_name, provider) "
+                        "VALUES (:id, :project_id, :integration_id, :github_repository_id, 'Shared/Worker-RLS', 'github')"
+                    ),
+                    {
+                        "id": repository_id,
+                        "project_id": project_id,
+                        "integration_id": integration_id,
+                        "github_repository_id": github_repository_id,
+                    },
                 )
                 await connection.execute(
                     text(
@@ -1490,7 +1514,7 @@ async def test_background_worker_webhook_and_maintenance_writes_are_tenant_scope
         tenant_context.clear()
         async with sessions() as session:
             response = await receive_github_webhook(request, db=session)
-            assert response["created_count"] == 2
+            assert response["created_count"] == 1
             for event_type, key, number in (("issues", "issue", 8143), ("pull_request", "pull_request", 8144)):
                 work_item: dict[str, object] = {
                     "number": number,
@@ -1504,7 +1528,8 @@ async def test_background_worker_webhook_and_maintenance_writes_are_tenant_scope
                 work_item_body = json.dumps(
                     {
                         "action": "opened",
-                        "repository": {"full_name": "Shared/Worker-RLS"},
+                        "repository": {"id": github_repository_a, "full_name": "Shared/Worker-RLS"},
+                        "installation": {"id": installation_a, "account": {"id": account_a, "type": "Organization"}},
                         key: work_item,
                     }
                 ).encode()
@@ -1535,7 +1560,7 @@ async def test_background_worker_webhook_and_maintenance_writes_are_tenant_scope
                     receive_work_item,
                 )
                 result = await receive_github_webhook(work_item_request, db=session)
-                assert result["created_count"] == 2
+                assert result["created_count"] == 1
             assert await _queue_due_maintenance_events(session) >= 2
 
         for tenant_id, project_id, schedule_id in (
@@ -1547,9 +1572,14 @@ async def test_background_worker_webhook_and_maintenance_writes_are_tenant_scope
                 events = (
                     await session.execute(select(ProactiveEvent).order_by(ProactiveEvent.source_event_id))
                 ).scalars().all()
-                assert len(events) == 4
+                expected_event_types = (
+                    {"workflow_run", "issues", "pull_request", "scheduled_maintenance"}
+                    if tenant_id == tenant_a
+                    else {"scheduled_maintenance"}
+                )
+                assert len(events) == len(expected_event_types)
                 assert {event.project_id for event in events} == {project_id}
-                assert {event.event_type for event in events} == {"workflow_run", "issues", "pull_request", "scheduled_maintenance"}
+                assert {event.event_type for event in events} == expected_event_types
                 schedule = await session.get(MaintenanceSchedule, schedule_id)
                 assert schedule is not None
                 assert schedule.next_run_at > datetime.now(UTC) - timedelta(minutes=1)
