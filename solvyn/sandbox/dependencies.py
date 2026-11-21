@@ -6,8 +6,11 @@ import hashlib
 import json
 import io
 import os
+import platform
 import re
 import stat
+import sys
+import sysconfig
 import tarfile
 import tempfile
 import tomllib
@@ -27,6 +30,8 @@ _MAX_UNPACKED_BYTES = 512 * 1024 * 1024
 _MAX_WHEEL_FILES = 50_000
 _MAX_BUNDLE_BYTES = 400 * 1024 * 1024
 _REGISTRY = "https://pypi.org/simple"
+_UV_VERSION = "0.13.7"
+_PIP_VERSION = "26.3"
 _ALLOWED_ARTIFACT_HOSTS = {"files.pythonhosted.org"}
 _WHEEL_NAME = re.compile(r"^[A-Za-z0-9_.+-]+\.whl$")
 _REQUIREMENT = re.compile(
@@ -71,7 +76,21 @@ class DependencyEvidence:
     wheelhouse_sha256: str
     package_count: int
     wheelhouse_bytes: int
+    runtime_fingerprint: str = ""
+    uv_version: str = _UV_VERSION
+    pip_version: str = _PIP_VERSION
 
+def runtime_fingerprint() -> str:
+    identity = {
+        "python": list(sys.version_info[:3]),
+        "implementation": sys.implementation.name,
+        "soabi": sysconfig.get_config_var("SOABI"),
+        "platform": sysconfig.get_platform(),
+        "machine": platform.machine(),
+        "libc": list(platform.libc_ver()),
+    }
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 def _read_regular_file(path: Path, maximum: int) -> bytes:
     try:
@@ -325,6 +344,7 @@ def build_bundle_manifest(
         "wheel_count": len(wheels),
         "wheelhouse_bytes": total_bytes,
         "unpacked_bytes": total_unpacked,
+        "runtime_fingerprint": runtime_fingerprint(),
         "wheels": wheels,
     }
     wheelhouse_digest = hashlib.sha256()
@@ -427,6 +447,10 @@ def extract_bundle_archive(source: BinaryIO, destination: Path, expected_lock_sh
         raise DependencyBlockedError("Dependency bundle manifest is invalid") from exc
     if not isinstance(manifest, dict) or manifest.get("schema") != 1 or manifest.get("lock_sha256") != expected_lock_sha256:
         raise DependencyBlockedError("Dependency bundle does not match the locked workspace")
+    if manifest.get("runtime_fingerprint") != runtime_fingerprint():
+        raise DependencyBlockedError("Fetcher and supervisor Python ABI or platform do not match")
+    if manifest.get("toolchain") != {"uv": _UV_VERSION, "pip": _PIP_VERSION}:
+        raise DependencyBlockedError("Dependency fetcher toolchain version is unsupported")
     logical_requirements = parse_exported_requirements(requirements)
     listed = manifest.get("wheels")
     if (
@@ -455,4 +479,4 @@ def extract_bundle_archive(source: BinaryIO, destination: Path, expected_lock_sh
     wheelhouse_sha = digest.hexdigest()
     if manifest.get("wheelhouse_sha256") != wheelhouse_sha:
         raise DependencyBlockedError("Dependency bundle wheelhouse digest mismatch")
-    return DependencyEvidence(expected_lock_sha256, wheelhouse_sha, len(package_names), total)
+    return DependencyEvidence(expected_lock_sha256, wheelhouse_sha, len(package_names), total, runtime_fingerprint())
