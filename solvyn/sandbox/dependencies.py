@@ -14,6 +14,7 @@ import sysconfig
 import tarfile
 import tomllib
 import zipfile
+from urllib.parse import urlparse
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
@@ -224,8 +225,6 @@ def validate_uv_project(project: dict[str, object], lock: dict[str, object]) -> 
         for wheel in package.get("wheels", []):
             if not isinstance(wheel, dict) or not isinstance(wheel.get("url"), str):
                 raise DependencyBlockedError("uv.lock contains an invalid wheel source")
-            from urllib.parse import urlparse
-
             parsed = urlparse(wheel["url"])
             if parsed.scheme != "https" or parsed.hostname not in _ALLOWED_ARTIFACT_HOSTS:
                 raise DependencyBlockedError("uv.lock contains a wheel outside the trusted artifact host")
