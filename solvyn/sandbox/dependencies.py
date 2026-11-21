@@ -390,7 +390,12 @@ def create_bundle_archive(
 
         add_bytes("requirements.txt", requirements)
         add_bytes("manifest.json", json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode())
-        for item in manifest["wheels"]:
+        manifest_wheels = manifest.get("wheels")
+        if not isinstance(manifest_wheels, list):
+            raise DependencyBlockedError("Dependency bundle wheel list is invalid")
+        for item in manifest_wheels:
+            if not isinstance(item, dict):
+                raise DependencyBlockedError("Dependency bundle wheel list is invalid")
             filename = item["filename"]
             path = wheel_dir / filename
             info = tarfile.TarInfo(f"wheels/{filename}")
