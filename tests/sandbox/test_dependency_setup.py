@@ -177,6 +177,7 @@ def test_dynamic_project_metadata_is_rejected_before_export() -> None:
         "[tool.poetry]\nname='demo'\nversion='1.0'\n[tool.poetry.dev-dependencies]\npytest='^8'\n",
         "[tool.poetry]\nname='demo'\nversion='1.0'\n[tool.poetry.group.test.dependencies]\npytest='^8'\n",
         "[tool.pdm.dev-dependencies]\ntest=['pytest>=8']\n",
+        "[tool.uv]\ndev-dependencies=['pytest>=8']\n",
     ],
 )
 def test_legacy_pyproject_dependencies_require_uv_lock(tmp_path: Path, pyproject: str) -> None:
@@ -192,7 +193,7 @@ def test_legacy_setup_manifests_require_uv_lock(tmp_path: Path, filename: str) -
         encoding="utf-8",
     )
     (tmp_path / filename).write_text("# package metadata may declare dependencies\n", encoding="utf-8")
-    with pytest.raises(DependencyBlockedError, match="manifest is not supported"):
+    with pytest.raises(DependencyBlockedError, match="Python project and dependency manifests require a supported root uv.lock"):
         discover_dependency_inputs(tmp_path, required=False)
 
 
@@ -202,7 +203,7 @@ def test_build_system_requirements_need_uv_lock(tmp_path: Path) -> None:
         "[build-system]\nrequires=['setuptools>=70']\nbuild-backend='setuptools.build_meta'\n",
         encoding="utf-8",
     )
-    with pytest.raises(DependencyBlockedError, match="Build requirements"):
+    with pytest.raises(DependencyBlockedError, match="Python project and dependency manifests require a supported root uv.lock"):
         discover_dependency_inputs(tmp_path, required=False)
 
 
@@ -212,20 +213,18 @@ def test_build_system_requirements_need_uv_lock(tmp_path: Path) -> None:
         "requirements-prod.txt",
         "requirements-ci.in",
         "requirements-prod/ci.in",
+        "ci/requirements.txt",
+        "tools/build/constraints-ci.txt",
         "requirements/ci.txt",
         "constraints-prod.txt",
         "constraints/test.in",
     ],
 )
 def test_requirements_family_requires_uv_lock(tmp_path: Path, relative_path: str) -> None:
-    (tmp_path / "pyproject.toml").write_text(
-        "[project]\nname='demo'\nversion='1.0'\nrequires-python='>=3.12'\n",
-        encoding="utf-8",
-    )
     manifest = tmp_path / relative_path
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text("demo-dep>=1\n", encoding="utf-8")
-    with pytest.raises(DependencyBlockedError, match="Requirements and constraints"):
+    with pytest.raises(DependencyBlockedError, match="Python project and dependency manifests require a supported root uv.lock"):
         discover_dependency_inputs(tmp_path, required=False)
 
 
