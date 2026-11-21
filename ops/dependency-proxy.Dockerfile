@@ -1,5 +1,5 @@
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends squid ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends squid=5.7-2+deb12u6 ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /var/spool/squid/*
 COPY ops/dependency-proxy.conf /etc/squid/squid.conf
