@@ -329,7 +329,7 @@ def build_bundle_manifest(
     }
     wheelhouse_digest = hashlib.sha256()
     for wheel in wheels:
-        wheelhouse_digest.update(str(wheel["filename"]).encode("utf-8") + b"\\0" + bytes.fromhex(str(wheel["sha256"])))
+        wheelhouse_digest.update(str(wheel["filename"]).encode("utf-8") + b"\0" + bytes.fromhex(str(wheel["sha256"])))
     manifest["wheelhouse_sha256"] = wheelhouse_digest.hexdigest()
     return manifest, total_bytes
 
@@ -429,8 +429,14 @@ def extract_bundle_archive(source: BinaryIO, destination: Path, expected_lock_sh
         raise DependencyBlockedError("Dependency bundle does not match the locked workspace")
     logical_requirements = parse_exported_requirements(requirements)
     listed = manifest.get("wheels")
-    if not isinstance(listed, list) or len(listed) != len(logical_requirements) or len(listed) != len(wheel_paths):
-        raise DependencyBlockedError("Dependency bundle package count does not match its lock")
+    if (
+        not isinstance(listed, list)
+        or len(listed) != len(wheel_paths)
+        or manifest.get("package_count") != len(logical_requirements)
+        or manifest.get("wheel_count") != len(wheel_paths)
+    ):
+        raise DependencyBlockedError("Dependency bundle package or wheel count does not match its lock")
+    _validate_wheels_against_requirements(listed, logical_requirements)
     if hashlib.sha256(requirements).hexdigest() != manifest.get("requirements_sha256"):
         raise DependencyBlockedError("Dependency bundle requirements digest mismatch")
     digest = hashlib.sha256()
