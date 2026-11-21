@@ -7,6 +7,7 @@ credentials, caller environment, or network is mounted into the untrusted job.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
 import stat
@@ -19,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, cast
 
-from solvyn.sandbox.dependencies import DependencyBlockedError, DependencyEvidence, create_bundle_archive, discover_dependency_inputs
+from solvyn.sandbox.dependencies import DependencyBlockedError, DependencyEvidence, _PIP_VERSION, _sha256_file, create_bundle_archive, discover_dependency_inputs
 from solvyn.sandbox.dependency_client import DependencyBundle, fetch_dependency_bundle
 from solvyn.sandbox.workspaces import ManagedWorkspace, WorkspaceError, WorkspaceManager, safe_relative_path
 
@@ -205,10 +206,12 @@ class DockerSandboxRunner:
 
             await self._export_workspace(container_id, workspace)
         finally:
-            if cleanup_needed:
-                await self._remove_container(container_name)
-            if dependency_bundle is not None:
-                dependency_bundle.close()
+            try:
+                if cleanup_needed:
+                    await self._remove_container(container_name)
+            finally:
+                if dependency_bundle is not None:
+                    dependency_bundle.close()
 
         return SandboxResult(
             run_id=run_id,
@@ -339,16 +342,18 @@ class DockerSandboxRunner:
 
     async def _stage_dependency_bundle(self, container_id: str, bundle: DependencyBundle) -> None:
         """Copy a locally verified archive into the job's separate /deps tmpfs."""
+        if await self._target_runtime_fingerprint(container_id) != bundle.evidence.runtime_fingerprint:
+            raise SandboxRuntimeError("Dependency wheels do not match the sandbox Python ABI or platform")
         with tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode="w+b") as archive:
             requirements = bundle.requirements_path.read_bytes()
             size = create_bundle_archive(bundle.wheel_dir, requirements, {
                 "schema": 1,
                 "lock_sha256": bundle.evidence.lock_sha256,
-                "requirements_sha256": __import__("hashlib").sha256(requirements).hexdigest(),
+                "requirements_sha256": hashlib.sha256(requirements).hexdigest(),
                 "package_count": bundle.evidence.package_count,
                 "wheelhouse_bytes": bundle.evidence.wheelhouse_bytes,
                 "wheels": [
-                    {"filename": path.name, "sha256": __import__("hashlib").sha256(path.read_bytes()).hexdigest(), "size": path.stat().st_size}
+                    {"filename": path.name, "sha256": _sha256_file(path), "size": path.stat().st_size}
                     for path in sorted(bundle.wheel_dir.iterdir(), key=lambda item: item.name)
                 ],
             }, cast(BinaryIO, archive))
@@ -389,7 +394,29 @@ class DockerSandboxRunner:
                 detail = self._docker_error_detail(stderr)
                 raise SandboxRuntimeError("Docker failed to stage dependency wheels" + (f": {detail}" if detail else ""))
 
+    async def _target_runtime_fingerprint(self, container_id: str) -> str:
+        script = (
+            "import hashlib,json,platform,sys,sysconfig; "
+            "identity={'python':list(sys.version_info[:3]),'implementation':sys.implementation.name,"
+            "'soabi':sysconfig.get_config_var('SOABI'),'platform':sysconfig.get_platform(),"
+            "'machine':platform.machine(),'libc':list(platform.libc_ver())}; "
+            "print(hashlib.sha256(json.dumps(identity,sort_keys=True,separators=(',',':')).encode()).hexdigest())"
+        )
+        result = await self._cli(["exec", container_id, "python", "-c", script], timeout=self.cli_timeout_seconds)
+        if result.returncode != 0 or result.timed_out:
+            raise SandboxRuntimeError("Docker could not verify the sandbox Python runtime")
+        fingerprint = result.stdout.decode("ascii", errors="ignore").strip()
+        if not re.fullmatch(r"[a-f0-9]{64}", fingerprint):
+            raise SandboxRuntimeError("Sandbox Python runtime returned invalid ABI evidence")
+        return fingerprint
+
     async def _install_dependencies(self, container_id: str) -> None:
+        pip_version = await self._cli(
+            ["exec", container_id, "python", "-m", "pip", "--version"],
+            timeout=self.cli_timeout_seconds,
+        )
+        if pip_version.returncode != 0 or not pip_version.stdout.decode("ascii", errors="ignore").startswith(f"pip {_PIP_VERSION} "):
+            raise SandboxRuntimeError("Sandbox pip version does not match the pinned dependency toolchain")
         created = await self._cli(
             ["exec", "--user", "0", container_id, "mkdir", "-p", "/deps/site-packages"],
             timeout=self.cli_timeout_seconds,
