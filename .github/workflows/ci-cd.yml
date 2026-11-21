@@ -100,6 +100,46 @@ jobs:
           API_KEY_SECRET: test-secret-key-for-ci-only
       - name: Build sandbox image for repository workflow acceptance
         run: docker build --file sandbox.Dockerfile --tag solvyn-sandbox:local .
+      - name: Build isolated dependency images
+        run: |
+          docker build --file dependency-fetcher.Dockerfile --tag solvyn-dependency-fetcher:ci .
+          docker build --file ops/dependency-proxy.Dockerfile --tag solvyn-dependency-proxy:ci .
+      - name: Smoke test dependency proxy allowlist
+        run: |
+          set -euo pipefail
+          fetch_network="solvyn-dependency-fetch-ci"
+          egress_network="solvyn-dependency-egress-ci"
+          cleanup() {
+            docker rm --force solvyn-dependency-fetcher-ci solvyn-dependency-proxy-ci >/dev/null 2>&1 || true
+            docker network rm "$fetch_network" "$egress_network" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker network create --internal "$fetch_network"
+          docker network create "$egress_network"
+          docker run --detach --name solvyn-dependency-proxy-ci --network "$egress_network" \
+            --network-alias dependency-proxy solvyn-dependency-proxy:ci
+          docker network connect --alias dependency-proxy "$fetch_network" solvyn-dependency-proxy-ci
+          for attempt in $(seq 1 30); do
+            health="$(docker inspect --format '{{.State.Health.Status}}' solvyn-dependency-proxy-ci)"
+            [ "$health" = healthy ] && break
+            [ "$health" = unhealthy ] && { docker logs solvyn-dependency-proxy-ci; exit 1; }
+            sleep 2
+          done
+          [ "$health" = healthy ] || { docker logs solvyn-dependency-proxy-ci; exit 1; }
+
+          docker run --detach --name solvyn-dependency-fetcher-ci --network "$fetch_network" \
+            --network-alias dependency-fetcher solvyn-dependency-fetcher:ci
+          for attempt in $(seq 1 30); do
+            health="$(docker inspect --format '{{.State.Health.Status}}' solvyn-dependency-fetcher-ci)"
+            [ "$health" = healthy ] && break
+            [ "$health" = unhealthy ] && { docker logs solvyn-dependency-fetcher-ci; exit 1; }
+            sleep 2
+          done
+          [ "$health" = healthy ] || { docker logs solvyn-dependency-fetcher-ci; exit 1; }
+
+          docker exec solvyn-dependency-fetcher-ci python -c "import urllib.request; p=urllib.request.build_opener(urllib.request.ProxyHandler({'https':'http://dependency-proxy:3128'})); r=p.open('https://pypi.org/simple/pip/',timeout=15); assert r.status==200; r.close()"
+          docker exec solvyn-dependency-fetcher-ci python -c "import urllib.error,urllib.request; p=urllib.request.build_opener(urllib.request.ProxyHandler({'https':'http://dependency-proxy:3128'})); exec(\"try:\\n p.open('https://example.com/',timeout=10)\\nexcept urllib.error.URLError:\\n print('blocked as expected')\\nelse:\\n raise SystemExit('unlisted host unexpectedly accessible')\")"
       - name: Run tests
         run: pytest tests/ -v --cov=solvyn
         env:
