@@ -173,6 +173,11 @@ def validate_uv_project(project: dict[str, object], lock: dict[str, object]) -> 
         if not isinstance(package, dict):
             raise DependencyBlockedError("uv.lock contains an invalid package record")
         source = package.get("source", {"registry": _REGISTRY})
+        package_name = package.get("name")
+        project_name = project_data.get("name")
+        if source == {"virtual": "."} and package_name == project_name:
+            # The project's own virtual root package is not installed as a wheel.
+            continue
         if not isinstance(source, dict) or set(source) != {"registry"}:
             raise DependencyBlockedError("Only registry packages from the public PyPI index are supported")
         if source.get("registry") != _REGISTRY:
