@@ -12,7 +12,7 @@ from typing import Any, cast
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import func, select, tuple_
+from sqlalchemy import select, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +20,7 @@ from solvyn.api.v1._rbac import ANY_ROLE, OWNER_ADMIN, require_org_membership
 from solvyn.config import settings
 from solvyn.db.models import (
     GitHubWorkItemState,
+    Integration,
     Organization,
     ProactiveEvent,
     ProactiveEventTransition,
@@ -388,6 +389,28 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
             reason = "not_an_open_security_alert"
         return {"accepted": True, "ignored": True, "reason": reason}
 
+    installation_value = payload.get("installation") if isinstance(payload, dict) else None
+    installation = installation_value if isinstance(installation_value, dict) else {}
+    installation_account_value = installation.get("account")
+    installation_account = installation_account_value if isinstance(installation_account_value, dict) else {}
+    repository_value = payload.get("repository") if isinstance(payload, dict) else None
+    repository_payload = repository_value if isinstance(repository_value, dict) else {}
+    installation_id = installation.get("id")
+    github_account_id = installation_account.get("id")
+    github_repository_id = repository_payload.get("id")
+    if (
+        isinstance(installation_id, bool)
+        or not isinstance(installation_id, int)
+        or installation_id < 1
+        or isinstance(github_account_id, bool)
+        or not isinstance(github_account_id, int)
+        or github_account_id < 1
+        or isinstance(github_repository_id, bool)
+        or not isinstance(github_repository_id, int)
+        or github_repository_id < 1
+    ):
+        return {"accepted": True, "ignored": True, "reason": "missing_installation_repository_identity"}
+
     active_tenants = (
         await db.execute(select(Tenant.id).where(Tenant.is_active == True).order_by(Tenant.id))  # noqa: E712
     ).scalars().all()
@@ -398,15 +421,19 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
             await db.execute(
                 select(Project.id, Project.organization_id, Organization.tenant_id)
                 .join(Repository, Repository.project_id == Project.id)
+                .join(Integration, Integration.id == Repository.integration_id)
                 .join(Organization, Organization.id == Project.organization_id)
                 .where(
                     Repository.provider == "github",
                     Repository.is_active == True,  # noqa: E712
                     Project.is_active == True,  # noqa: E712
                     Organization.is_active == True,  # noqa: E712
+                    Integration.is_active == True,  # noqa: E712
+                    Integration.organization_id == Project.organization_id,
+                    Integration.github_installation_id == installation_id,
+                    Integration.github_account_id == github_account_id,
+                    Repository.github_repository_id == github_repository_id,
                     Project.tenant_id == tenant_id,
-                    # GitHub full names are case-insensitive; equality avoids LIKE wildcards.
-                    func.lower(Repository.full_name) == signal["repository_name"].lower(),
                 )
                 .limit(_MAX_PROJECT_MATCHES + 1)
             )
