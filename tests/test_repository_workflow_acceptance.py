@@ -517,10 +517,11 @@ async def test_repository_task_runs_approved_tool_loop_in_docker_and_delivers_dr
             return None
 
         async def installation_token(
-            self, installation_id: int, repository_ids: tuple[int, ...], _permissions: dict[str, str]
+            self, installation_id: int, repository_ids: tuple[int, ...], permissions: dict[str, str]
         ) -> str:
             assert installation_id == github_installation_id
             assert repository_ids == (github_repository_id,)
+            assert permissions == {"contents": "write", "metadata": "read", "pull_requests": "write"}
             return "test-github-token"
 
     monkeypatch.setattr(verification_api, "GitHubAppClient", lambda: FakeGitHubApp())
