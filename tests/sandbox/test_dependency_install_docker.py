@@ -75,13 +75,16 @@ async def test_locked_wheel_installs_offline_without_changing_source(
             pytest.fail("The required sandbox Docker image is unavailable")
         pytest.skip("Sandbox Docker image is unavailable")
 
-    code = (
-        "import demo_pkg, socket; "
-        "print(demo_pkg.VALUE); "
-        "try: socket.create_connection(('1.1.1.1', 443), timeout=.2); "
-        "raise SystemExit('network unexpectedly available'); "
-        "except OSError: print('network disabled')"
-    )
+    code = """import demo_pkg
+import socket
+print(demo_pkg.VALUE)
+try:
+    socket.create_connection(("1.1.1.1", 443), timeout=.2)
+except OSError:
+    print("network disabled")
+else:
+    raise SystemExit("network unexpectedly available")
+"""
     result = await runner.run(workspace, ["python", "-c", code], install_dependencies=True)
     assert result.exit_code == 0, result.stderr
     assert "installed offline" in result.stdout
