@@ -127,65 +127,33 @@ def _read_regular_file(path: Path, maximum: int) -> bytes:
             os.close(descriptor)
 
 
-def _declares_project_dependencies(pyproject: dict[str, object]) -> bool:
-    project = pyproject.get("project")
-    if isinstance(project, dict) and any(
-        bool(project.get(key)) for key in ("dependencies", "optional-dependencies")
-    ):
-        return True
-    groups = pyproject.get("dependency-groups")
-    if isinstance(groups, dict) and any(bool(value) for value in groups.values()):
-        return True
-    tool = pyproject.get("tool")
-    if isinstance(tool, dict):
-        poetry = tool.get("poetry")
-        if isinstance(poetry, dict):
-            dependencies = poetry.get("dependencies")
-            if isinstance(dependencies, dict) and any(name.casefold() != "python" for name in dependencies):
-                return True
-            if poetry.get("dev-dependencies"):
-                return True
-            groups = poetry.get("group")
-            if isinstance(groups, dict) and any(
-                isinstance(group, dict) and bool(group.get("dependencies"))
-                for group in groups.values()
-            ):
-                return True
-        pdm = tool.get("pdm")
-        if isinstance(pdm, dict) and any(
-            key in pdm and bool(pdm[key]) for key in ("dependencies", "dev-dependencies")
-        ):
-            return True
-    return False
-
-
-def _has_requirements_family(workspace: Path) -> bool:
-    for path in workspace.iterdir():
-        name = path.name.casefold()
-        if not name.startswith(("requirements", "constraints")):
-            continue
-        if path.is_symlink() or path.is_file():
-            return True
-        if path.is_dir() and any(
-            child.is_symlink() or child.is_file()
-            for child in path.rglob("*")
-        ):
-            return True
-    return False
-
-
-def _has_content_dependency_file(path: Path) -> bool:
+def _has_unlocked_python_manifest(workspace: Path) -> bool:
+    """Reject dependency manifests anywhere when no root uv.lock can bind them."""
+    manifest_names = {
+        "pyproject.toml",
+        "setup.cfg",
+        "setup.py",
+        "pipfile",
+        "pipfile.lock",
+        "poetry.lock",
+        "pdm.lock",
+    }
     try:
-        content = _read_regular_file(path, _MAX_REQUIREMENTS_BYTES).decode("utf-8")
-    except FileNotFoundError:
-        return False
-    except (UnicodeDecodeError, DependencyBlockedError):
-        return True
-    return any(line.strip() and not line.lstrip().startswith("#") for line in content.splitlines())
+        for path in workspace.rglob("*"):
+            if path.is_symlink() or path.is_file() or path.is_dir():
+                name = path.name.casefold()
+                if (
+                    name in manifest_names
+                    or name.startswith(("requirements", "constraints"))
+                ):
+                    return True
+    except OSError as exc:
+        raise DependencyBlockedError("Could not inspect dependency manifests safely") from exc
+    return False
 
 
 def discover_dependency_inputs(workspace: Path, *, required: bool) -> DependencyInputs | None:
-    """Return a validated root uv.lock pair, or fail closed for declared unsupported deps."""
+    """Return a validated root uv.lock pair; never infer project dependencies without it."""
     lock_path = workspace / "uv.lock"
     project_path = workspace / "pyproject.toml"
     if lock_path.exists() or lock_path.is_symlink():
@@ -201,29 +169,8 @@ def discover_dependency_inputs(workspace: Path, *, required: bool) -> Dependency
         validate_uv_project(pyproject, lock_data)
         return DependencyInputs(pyproject=pyproject_bytes, lock=lock)
 
-    try:
-        if project_path.exists() or project_path.is_symlink():
-            project_bytes = _read_regular_file(project_path, _MAX_PYPROJECT_BYTES)
-            project = tomllib.loads(project_bytes.decode("utf-8"))
-            build_system = project.get("build-system")
-            if isinstance(build_system, dict) and build_system.get("requires"):
-                raise DependencyBlockedError("Build requirements require a supported root uv.lock")
-            project_data = project.get("project")
-            if isinstance(project_data, dict) and project_data.get("dynamic"):
-                raise DependencyBlockedError("Dynamic project metadata requires a supported root uv.lock")
-            if _declares_project_dependencies(project):
-                raise DependencyBlockedError("Project dependencies require a supported root uv.lock")
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-        raise DependencyBlockedError("pyproject.toml is invalid") from exc
-
-    if _has_requirements_family(workspace):
-        raise DependencyBlockedError("Requirements and constraints manifests require a supported root uv.lock")
-    for name in _PYTHON_DEPENDENCY_MANIFESTS:
-        path = workspace / name
-        if name in {"setup.cfg", "setup.py"} and (path.exists() or path.is_symlink()):
-            raise DependencyBlockedError("This Python dependency manifest is not supported; use uv.lock")
-        if _has_content_dependency_file(path):
-            raise DependencyBlockedError("This Python dependency manifest is not supported; use uv.lock")
+    if _has_unlocked_python_manifest(workspace):
+        raise DependencyBlockedError("Python project and dependency manifests require a supported root uv.lock")
     for name in _OTHER_LOCKFILES:
         if (workspace / name).exists() or (workspace / name).is_symlink():
             raise DependencyBlockedError("This dependency ecosystem is not supported by this verification profile")
