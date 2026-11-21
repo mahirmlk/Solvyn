@@ -13,10 +13,11 @@ import http.server
 import json
 import os
 import selectors
+import signal
 import subprocess
-import time
 import tempfile
 import threading
+import time
 import tomllib
 from pathlib import Path
 from typing import BinaryIO
