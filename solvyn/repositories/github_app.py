@@ -169,6 +169,20 @@ class GitHubAppClient:
         actual_permissions = body.get("permissions") if isinstance(body, dict) else None
         if not isinstance(actual_permissions, dict) or actual_permissions != dict(permission_items):
             raise GitHubRepositoryError(502, "GitHub returned a token with an unexpected permission scope")
+        repository_selection = body.get("repository_selection") if isinstance(body, dict) else None
+        repositories = body.get("repositories") if isinstance(body, dict) else None
+        if repository_selection != "selected" or not isinstance(repositories, list):
+            raise GitHubRepositoryError(502, "GitHub returned an installation token without an exact repository scope")
+        returned_ids: list[int] = []
+        for item in repositories:
+            if not isinstance(item, dict):
+                raise GitHubRepositoryError(502, "GitHub returned an invalid token repository scope")
+            repository_id = item.get("id")
+            if isinstance(repository_id, bool) or not isinstance(repository_id, int) or repository_id < 1:
+                raise GitHubRepositoryError(502, "GitHub returned an invalid token repository identity")
+            returned_ids.append(repository_id)
+        if tuple(sorted(returned_ids)) != repo_ids:
+            raise GitHubRepositoryError(502, "GitHub returned an installation token for unexpected repositories")
         from datetime import datetime
         try:
             expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00")).timestamp()

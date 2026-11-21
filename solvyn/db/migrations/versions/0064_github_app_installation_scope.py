@@ -54,6 +54,20 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute(
+        """DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM integrations
+                WHERE github_installation_id IS NOT NULL OR github_account_id IS NOT NULL
+            ) OR EXISTS (
+                SELECT 1 FROM repositories WHERE github_repository_id IS NOT NULL
+            ) THEN
+                RAISE EXCEPTION 'Cannot downgrade GitHub App identity migration while installation/repository bindings exist';
+            END IF;
+        END
+        $$;"""
+    )
     op.drop_constraint("ck_repositories_github_repository_binding", "repositories", type_="check")
     op.drop_constraint("ck_repositories_github_repository_id_positive", "repositories", type_="check")
     op.drop_index("ix_repositories_github_repository_id", table_name="repositories")

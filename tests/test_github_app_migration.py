@@ -31,3 +31,6 @@ def test_github_app_migration_adds_numeric_identity_pair_constraints() -> None:
     assert "(github_installation_id IS NULL) = (github_account_id IS NULL)" in sql
     assert "ck_repositories_github_repository_binding" in sql
     assert "github_repository_id IS NULL OR (provider = 'github' AND integration_id IS NOT NULL)" in sql
+
+    migration["downgrade"]()
+    assert "Cannot downgrade GitHub App identity migration while installation/repository bindings exist" in output.getvalue()

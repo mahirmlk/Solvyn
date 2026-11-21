@@ -232,6 +232,9 @@ export interface GitHubIntegrationInfo {
   updated_at?: string | null;
   app_slug?: string | null;
   auth_type?: "github_app_installation" | "legacy_token" | null;
+  legacy_token_present?: boolean;
+  legacy_token_removed?: boolean;
+  revoke_previous_personal_access_token_in_github?: boolean;
 }
 
 export interface RepositoryCandidateInfo {

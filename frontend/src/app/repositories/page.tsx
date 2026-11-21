@@ -213,7 +213,12 @@ export default function RepositoriesPage() {
       const result = await api.connectGitHubInstallation(organizationId, id);
       setIntegration(result);
       setInstallationId("");
-      setNotice("Connected GitHub App installation for " + (result.account_login || "the selected account") + ".");
+      setNotice(
+        "Connected GitHub App installation for " + (result.account_login || "the selected account") + "." +
+        (result.revoke_previous_personal_access_token_in_github
+          ? " Solvyn removed the saved personal token; revoke that token in GitHub if it is no longer needed."
+          : ""),
+      );
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not connect the GitHub account.");
     } finally {
@@ -380,6 +385,11 @@ export default function RepositoriesPage() {
                 Solvyn uses its GitHub App. Each repository request receives a short-lived installation token scoped to that repository.
                 Personal access tokens are not used for private repository access.
               </p>
+              {integration?.legacy_token_present && (
+                <p className={styles.helper} role="status">
+                  A previously saved personal token cannot be used for repository access. Connecting the App removes Solvyn’s stored copy; revoke the token in GitHub if it is no longer needed.
+                </p>
+              )}
               {canManage ? (
                 <form className={styles.tokenForm} onSubmit={connectGitHub}>
                   {integration?.app_slug && (

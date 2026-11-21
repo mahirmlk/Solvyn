@@ -15,6 +15,30 @@ from solvyn.repositories.github_app import GitHubAppClient
 from solvyn.repositories.protocols import RepositoryProvider
 
 
+def require_github_app_repository_binding(
+    integration: Integration | None,
+    repository: Repository,
+    organization_id: uuid.UUID,
+) -> tuple[int, int]:
+    """Return the verified installation/repository IDs or fail closed."""
+    installation_id = integration.github_installation_id if integration is not None else None
+    repository_id = getattr(repository, "github_repository_id", None)
+    if (
+        integration is None
+        or integration.organization_id != organization_id
+        or integration.provider != "github"
+        or not integration.is_active
+        or not isinstance(installation_id, int)
+        or installation_id < 1
+        or not isinstance(repository_id, int)
+        or repository_id < 1
+    ):
+        raise GitHubCredentialNotFoundError(
+            "Repository is not bound to an active GitHub App installation for this organization"
+        )
+    return installation_id, repository_id
+
+
 def get_repository_provider(name: str, *, token: str | None = None) -> RepositoryProvider:
     if name == "github":
         return GitHubClient(token=token)
@@ -43,12 +67,13 @@ async def get_authorized_repository_provider(
     ):
         raise GitHubCredentialNotFoundError("Repository credential is unavailable")
     if integration.github_installation_id is not None:
-        if repository.github_repository_id is None:
-            raise GitHubCredentialNotFoundError("Repository is missing its GitHub numeric identity; reconnect it")
+        installation_id, repository_id = require_github_app_repository_binding(
+            integration, repository, organization_id
+        )
         async with GitHubAppClient() as app:
             token = await app.installation_token(
-                integration.github_installation_id,
-                (repository.github_repository_id,),
+                installation_id,
+                (repository_id,),
                 permissions,
             )
         return get_repository_provider(name, token=token)

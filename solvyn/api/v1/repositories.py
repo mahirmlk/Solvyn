@@ -23,7 +23,11 @@ from solvyn.repositories.credentials import (
 from solvyn.repositories.github import GitHubClient, GitHubRepositoryError
 from solvyn.repositories.github_app import GitHubAppClient
 from solvyn.repositories.protocols import RepositoryProvider
-from solvyn.repositories.providers import get_authorized_repository_provider, get_repository_provider
+from solvyn.repositories.providers import (
+    get_authorized_repository_provider,
+    get_repository_provider,
+    require_github_app_repository_binding,
+)
 
 router = APIRouter(tags=["repositories", "repository intelligence"])
 _MAX_REPOSITORY_DISCOVERY_PAGE = 20
@@ -99,20 +103,25 @@ async def _load_github_write_context(
         raise HTTPException(status_code=422, detail="Repository provider does not support GitHub writes")
     repository_integration_id = getattr(repository, "integration_id", None)
     integration = await db.get(Integration, repository_integration_id) if repository_integration_id else None
-    if integration is not None and integration.github_installation_id is not None:
-        if repository.github_repository_id is None:
-            raise HTTPException(status_code=409, detail="Reconnect this repository to bind its GitHub identity")
-        try:
-            async with GitHubAppClient() as app:
-                token = await app.installation_token(
-                    integration.github_installation_id,
-                    (repository.github_repository_id,),
-                    permissions or {"contents": "write", "metadata": "read"},
-                )
-        except GitHubRepositoryError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
-        return repository, project, token
-    raise HTTPException(status_code=409, detail="Connect this repository to a GitHub App installation before writing")
+    try:
+        installation_id, github_repository_id = require_github_app_repository_binding(
+            integration, repository, project.organization_id
+        )
+    except GitHubCredentialNotFoundError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Connect this repository to an active GitHub App installation before writing",
+        ) from exc
+    try:
+        async with GitHubAppClient() as app:
+            token = await app.installation_token(
+                installation_id,
+                (github_repository_id,),
+                permissions or {"contents": "write", "metadata": "read"},
+            )
+    except GitHubRepositoryError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    return repository, project, token
 
 
 @asynccontextmanager

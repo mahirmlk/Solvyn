@@ -22,6 +22,8 @@ async def test_installation_token_is_scoped_to_exact_numeric_repositories(monkey
                 "token": "installation-token",
                 "expires_at": (datetime.now(UTC) + timedelta(minutes=50)).isoformat(),
                 "permissions": {"contents": "read", "metadata": "read"},
+                "repository_selection": "selected",
+                "repositories": [{"id": 41}, {"id": 42}],
             },
         )
 
@@ -68,6 +70,8 @@ async def test_unexpected_token_permissions_are_never_cached_or_returned(monkeyp
                 "token": "overbroad-token",
                 "expires_at": (datetime.now(UTC) + timedelta(minutes=50)).isoformat(),
                 "permissions": {"contents": "write", "metadata": "read"},
+                "repository_selection": "selected",
+                "repositories": [{"id": 41}],
             },
         )
 
@@ -94,6 +98,8 @@ async def test_app_id_and_private_key_rotation_invalidate_token_cache(monkeypatc
                 "token": f"installation-token-{calls}",
                 "expires_at": (datetime.now(UTC) + timedelta(minutes=50)).isoformat(),
                 "permissions": {"contents": "read", "metadata": "read"},
+                "repository_selection": "selected",
+                "repositories": [{"id": 41}],
             },
         )
 
@@ -117,6 +123,30 @@ async def test_app_id_and_private_key_rotation_invalidate_token_cache(monkeypatc
         "installation-token-3",
     )
     assert calls == 3
+
+
+@pytest.mark.asyncio
+async def test_overbroad_repository_token_scope_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            201,
+            json={
+                "token": "overbroad-repository-token",
+                "expires_at": (datetime.now(UTC) + timedelta(minutes=50)).isoformat(),
+                "permissions": {"contents": "read", "metadata": "read"},
+                "repository_selection": "selected",
+                "repositories": [{"id": 41}, {"id": 42}],
+            },
+        )
+
+    monkeypatch.setattr(github_app, "app_jwt", lambda: "signed-app-jwt")
+    monkeypatch.setattr(github_app.settings, "github_app_id", "12345")
+    monkeypatch.setattr(github_app.settings, "github_app_private_key", "fake-pem")
+    monkeypatch.setattr(github_app, "token_cache", InstallationTokenCache())
+    async with httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler)) as http:
+        async with GitHubAppClient(http) as app:
+            with pytest.raises(github_app.GitHubRepositoryError, match="unexpected repositories"):
+                await app.installation_token(812, (41,), {"contents": "read", "metadata": "read"})
 
 
 @pytest.mark.asyncio

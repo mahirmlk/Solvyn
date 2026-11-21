@@ -37,7 +37,7 @@ async def get_github_integration_status(
     organization_id: uuid.UUID,
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
-    await require_org_membership(db, organization_id, roles=ANY_ROLE)
+    membership = await require_org_membership(db, organization_id, roles=ANY_ROLE)
     app_integration = (
         await db.execute(
             select(Integration).where(
@@ -72,7 +72,7 @@ async def get_github_integration_status(
         "updated_at": credential.updated_at.isoformat() if credential and credential.updated_at else None,
         "app_slug": settings.github_app_slug or None,
         "auth_type": None,
-        "legacy_token_present": credential is not None,
+        "legacy_token_present": credential is not None if membership.role in OWNER_ADMIN else False,
     }
 
 
@@ -99,6 +99,8 @@ async def disconnect_github_integration(
             select(Integration).where(
                 Integration.organization_id == organization_id,
                 Integration.provider == "github",
+                (Integration.github_installation_id.is_not(None))
+                | (Integration.external_id == GITHUB_CREDENTIAL_EXTERNAL_ID),
             )
         )
     ).scalars().all()
@@ -169,6 +171,18 @@ async def connect_github_installation(
     integration.is_active = True
     if existing is None:
         db.add(integration)
+    legacy_integration = await _get_github_integration(db, organization_id)
+    legacy_credential_removed = False
+    if legacy_integration is not None:
+        legacy_integration.is_active = False
+        legacy_credential = (
+            await db.execute(
+                select(IntegrationCredential).where(IntegrationCredential.integration_id == legacy_integration.id)
+            )
+        ).scalar_one_or_none()
+        if legacy_credential is not None:
+            await db.delete(legacy_credential)
+            legacy_credential_removed = True
     try:
         await db.commit()
     except IntegrityError as exc:
@@ -182,4 +196,6 @@ async def connect_github_installation(
         "account_id": integration.github_account_id,
         "account_login": login,
         "account_type": integration.github_account_type,
+        "legacy_token_removed": legacy_credential_removed,
+        "revoke_previous_personal_access_token_in_github": legacy_credential_removed,
     }

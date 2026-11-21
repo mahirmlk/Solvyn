@@ -40,7 +40,7 @@ Set the App webhook URL to `https://<api-host>/api/v1/webhooks/github`, enable S
 3. Copy the installation ID from the GitHub installation settings URL and enter it in Solvyn. The API verifies the ID and account using the App private key; only owner/admin members can bind it.
 4. Discover and connect repositories. Each connection stores the numeric GitHub repository ID so renamed repositories and webhook deliveries remain bound to the same repository identity.
 
-The binding API is `PUT /api/v1/organizations/{organization_id}/integrations/github/installation` with `{ "installation_id": 123 }`. The old personal-token endpoint returns `410 Gone`; private repository reads and writes require an App installation. Existing PAT credentials are not used by repository providers. Reconnect private repositories through the App.
+The binding API is `PUT /api/v1/organizations/{organization_id}/integrations/github/installation` with `{ "installation_id": 123 }`. The old personal-token endpoint returns `410 Gone`; private repository reads and writes require an App installation. Existing encrypted PAT credentials are deleted from Solvyn when an owner/admin binds an App installation, and their integration is disabled. Solvyn cannot revoke a personal token in GitHub; the response and UI remind the owner to revoke it there if it is no longer needed. Reconnect private repositories through the App.
 
 ## Access policy
 
