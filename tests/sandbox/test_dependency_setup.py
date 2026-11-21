@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import io
 import zipfile
 from pathlib import Path
+import sys
 
 import pytest
 
+from solvyn.sandbox.fetch_service import _run_tool
 from solvyn.sandbox.dependencies import (
     DependencyBlockedError,
     build_bundle_manifest,
@@ -94,3 +97,18 @@ def test_wheelhouse_rejects_hash_not_allowed_by_locked_requirement(tmp_path: Pat
 def test_requirements_reject_unsafe_forms(line: str) -> None:
     with pytest.raises(DependencyBlockedError):
         parse_exported_requirements((line + "\n").encode())
+
+
+def test_fetch_subprocess_can_write_wheels_larger_than_two_megabytes(tmp_path: Path) -> None:
+    artifact = tmp_path / "large-wheel.bin"
+    _run_tool(
+        [
+            sys.executable,
+            "-c",
+            "from pathlib import Path; Path('large-wheel.bin').write_bytes(b'x' * (3 * 1024 * 1024))",
+        ],
+        cwd=tmp_path,
+        env=os.environ.copy(),
+        capture_stdout=False,
+    )
+    assert artifact.stat().st_size == 3 * 1024 * 1024
