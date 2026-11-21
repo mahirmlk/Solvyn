@@ -108,7 +108,7 @@ async def test_signed_dependabot_update_signal_is_persisted_and_replay_deduplica
         def __init__(self) -> None:
             self.execute_count = 0
             self.repository_match_query: Any | None = None
-            self.added: list[Any] =
+            self.added: list[Any] = []
             self.persisted_event: ProactiveEvent | None = None
             self.persisted_state: GitHubWorkItemState | None = None
 
