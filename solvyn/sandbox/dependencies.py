@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import io
-import os
+import json
 import platform
 import re
 import stat
 import sys
 import sysconfig
 import tarfile
-import tempfile
 import tomllib
 import zipfile
 from dataclasses import dataclass
@@ -38,7 +36,6 @@ _REQUIREMENT = re.compile(
     r"^(?P<name>[A-Za-z0-9][A-Za-z0-9_.-]*)==(?P<version>[A-Za-z0-9][A-Za-z0-9_.+!-]*)"
     r"(?P<extras>\[[A-Za-z0-9_,.-]+\])?(?:\s*;\s*[A-Za-z0-9_.'<>=! ()-]+)?$"
 )
-_HASH = re.compile(r"--hash=sha256:([a-f0-9]{64})$")
 _PYTHON_DEPENDENCY_MANIFESTS = {
     "requirements.txt",
     "requirements-dev.txt",
