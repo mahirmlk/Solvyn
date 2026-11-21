@@ -20,7 +20,7 @@ import threading
 import time
 import tomllib
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, cast
 
 from solvyn.sandbox.dependencies import (
     _MAX_BUNDLE_BYTES,
@@ -82,7 +82,7 @@ def _run_tool(
                 if remaining <= 0:
                     raise TimeoutError
                 for key, _ in selector.select(min(0.25, remaining)):
-                    chunk = os.read(key.fileobj.fileno(), min(64 * 1024, output_limit + 1 - len(output)))
+                    chunk = os.read(stdout_fd, min(64 * 1024, output_limit + 1 - len(output)))
                     if not chunk:
                         selector.unregister(key.fileobj)
                         continue
@@ -160,7 +160,7 @@ def _render_export_pyproject(project_data: dict[str, object]) -> bytes:
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
-def _build_wheelhouse(pyproject_bytes: bytes, lock_bytes: bytes) -> tuple[BinaryIO, int]:
+def _build_wheelhouse(pyproject_bytes: bytes, lock_bytes: bytes) -> tuple[_OwnedBundle, int]:
     project = tomllib.loads(pyproject_bytes.decode("utf-8"))
     lock = tomllib.loads(lock_bytes.decode("utf-8"))
     validate_uv_project(project, lock)
@@ -221,12 +221,12 @@ def _build_wheelhouse(pyproject_bytes: bytes, lock_bytes: bytes) -> tuple[Binary
         manifest, _ = build_bundle_manifest(wheel_dir, lock_sha256=lock_sha, requirements=requirements)
         manifest["toolchain"] = {"uv": _UV_VERSION, "pip": _PIP_VERSION}
         bundle = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode="w+b")
-        size = create_bundle_archive(wheel_dir, requirements, manifest, bundle)
+        size = create_bundle_archive(wheel_dir, requirements, manifest, cast(BinaryIO, bundle))
         if size > _MAX_BUNDLE_BYTES:
             bundle.close()
             raise DependencyBlockedError("Dependency bundle exceeds its transfer limit")
         bundle.seek(0)
-        return _OwnedBundle(bundle, temporary), size
+        return _OwnedBundle(cast(BinaryIO, bundle), temporary), size
     except Exception:
         temporary.cleanup()
         raise
@@ -263,7 +263,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if not _slots.acquire(blocking=False):
             self._reply(429, b'{"detail":"Fetcher capacity is full"}', "application/json")
             return
-        bundle: _OwnedBundle | None = None
+        owned_bundle: _OwnedBundle | None = None
         try:
             if self.headers.get("Transfer-Encoding") is not None:
                 raise ValueError("Chunked request bodies are not accepted")
@@ -287,13 +287,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             if not pyproject or len(pyproject) > _MAX_PYPROJECT_BYTES or not lock or len(lock) > _MAX_LOCK_BYTES:
                 self._reply(413, b'{"detail":"Dependency input exceeds its configured limit"}', "application/json")
                 return
-            bundle, size = _build_wheelhouse(pyproject, lock)
+            owned_bundle, size = _build_wheelhouse(pyproject, lock)
             self.send_response(200)
             self.send_header("Content-Type", "application/x-tar")
             self.send_header("Content-Length", str(size))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            while chunk := bundle.read(1024 * 1024):
+            while chunk := owned_bundle.read(1024 * 1024):
                 self.wfile.write(chunk)
             self.wfile.flush()
         except (ValueError, TypeError, binascii.Error, json.JSONDecodeError, tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
@@ -302,8 +302,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         except Exception:
             self._reply(502, b'{"detail":"Dependency retrieval failed"}', "application/json")
         finally:
-            if bundle is not None:
-                bundle.close()
+            if owned_bundle is not None:
+                owned_bundle.close()
             _slots.release()
 
     def _reply(self, status: int, body: bytes, content_type: str) -> None:
