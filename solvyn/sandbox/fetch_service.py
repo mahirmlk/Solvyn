@@ -157,7 +157,7 @@ def _render_export_pyproject(project_data: dict[str, object]) -> bytes:
             if not isinstance(key, str):
                 raise DependencyBlockedError("Dependency group names must be strings")
             lines.append(f"{_toml_key(key)} = {_toml_value(value)}")
-    return ("\\n".join(lines) + "\\n").encode("utf-8")
+    return ("\n".join(lines) + "\n").encode("utf-8")
 
 
 def _build_wheelhouse(pyproject_bytes: bytes, lock_bytes: bytes) -> tuple[BinaryIO, int]:
