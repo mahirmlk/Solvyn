@@ -20,15 +20,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, cast
 
-from solvyn.sandbox.dependency_client import DependencyBundle, fetch_dependency_bundle
 from solvyn.sandbox.dependencies import (
+    _PIP_VERSION,
     DependencyBlockedError,
     DependencyEvidence,
-    _PIP_VERSION,
     _sha256_file,
     create_bundle_archive,
     discover_dependency_inputs,
 )
+from solvyn.sandbox.dependency_client import DependencyBundle, fetch_dependency_bundle
 from solvyn.sandbox.workspaces import (
     ManagedWorkspace,
     WorkspaceError,
