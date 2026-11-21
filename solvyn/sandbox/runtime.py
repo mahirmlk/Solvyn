@@ -337,6 +337,90 @@ class DockerSandboxRunner:
         archive.seek(0)
         return size
 
+    async def _stage_dependency_bundle(self, container_id: str, bundle: DependencyBundle) -> None:
+        """Copy a locally verified archive into the job's separate /deps tmpfs."""
+        with tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode="w+b") as archive:
+            requirements = bundle.requirements_path.read_bytes()
+            size = create_bundle_archive(bundle.wheel_dir, requirements, {
+                "schema": 1,
+                "lock_sha256": bundle.evidence.lock_sha256,
+                "requirements_sha256": __import__("hashlib").sha256(requirements).hexdigest(),
+                "package_count": bundle.evidence.package_count,
+                "wheelhouse_bytes": bundle.evidence.wheelhouse_bytes,
+                "wheels": [
+                    {"filename": path.name, "sha256": __import__("hashlib").sha256(path.read_bytes()).hexdigest(), "size": path.stat().st_size}
+                    for path in sorted(bundle.wheel_dir.iterdir(), key=lambda item: item.name)
+                ],
+            }, cast(BinaryIO, archive))
+            if size > 400 * 1024 * 1024:
+                raise SandboxRuntimeError("Verified dependency archive exceeds its transfer limit")
+            archive.seek(0)
+            proc = await asyncio.create_subprocess_exec(
+                *self.docker_command,
+                "exec", "--user", "0", "-i", container_id,
+                "tar", "-x", "--no-same-owner", "--no-same-permissions", "-C", "/deps",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env={"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "")},
+            )
+            assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+            stdout_task = asyncio.create_task(self._read_bounded(proc.stdout, 16 * 1024))
+            stderr_task = asyncio.create_task(self._read_bounded(proc.stderr, 16 * 1024))
+            copy_task = asyncio.create_task(self._copy_archive(archive, proc.stdin))
+            try:
+                await asyncio.wait_for(copy_task, timeout=self.cli_timeout_seconds)
+                proc.stdin.close()
+                try:
+                    await proc.stdin.wait_closed()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                await asyncio.wait_for(proc.wait(), timeout=self.cli_timeout_seconds)
+            except (TimeoutError, asyncio.CancelledError) as exc:
+                proc.kill()
+                await proc.wait()
+                await asyncio.gather(copy_task, stdout_task, stderr_task, return_exceptions=True)
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                raise SandboxRuntimeError("Dependency bundle staging timed out") from exc
+            _, _ = await stdout_task
+            stderr, _ = await stderr_task
+            if proc.returncode != 0:
+                detail = self._docker_error_detail(stderr)
+                raise SandboxRuntimeError("Docker failed to stage dependency wheels" + (f": {detail}" if detail else ""))
+
+    async def _install_dependencies(self, container_id: str) -> None:
+        created = await self._cli(
+            ["exec", "--user", "0", container_id, "mkdir", "-p", "/deps/site-packages"],
+            timeout=self.cli_timeout_seconds,
+        )
+        if created.returncode != 0 or created.timed_out:
+            raise SandboxRuntimeError("Docker failed to prepare the dependency target")
+        owned = await self._cli(
+            ["exec", "--user", "0", container_id, "chown", "10001:10001", "/deps/site-packages"],
+            timeout=self.cli_timeout_seconds,
+        )
+        if owned.returncode != 0 or owned.timed_out:
+            raise SandboxRuntimeError("Docker failed to secure the dependency target")
+        installed = await self._cli(
+            [
+                "exec", "--user", "10001",
+                "--env", "PIP_CONFIG_FILE=/dev/null",
+                "--env", "PIP_NO_INDEX=1",
+                "--env", "PIP_NO_INPUT=1",
+                "--env", "PIP_DISABLE_PIP_VERSION_CHECK=1",
+                container_id, "python", "-m", "pip", "install",
+                "--disable-pip-version-check", "--no-input", "--no-index",
+                "--require-hashes", "--only-binary=:all:", "--no-deps", "--no-cache-dir",
+                "--find-links", "/deps/wheels", "--target", "/deps/site-packages",
+                "-r", "/deps/requirements.txt",
+            ],
+            timeout=self.limits.timeout_seconds,
+            output_limit=self.limits.output_bytes,
+        )
+        if installed.returncode != 0 or installed.timed_out:
+            raise SandboxRuntimeError("Offline dependency installation failed")
+
     async def _stage_workspace(self, container_id: str, workspace: ManagedWorkspace) -> None:
         """Stream workspace bytes to tar in the container without using docker cp."""
         with tempfile.TemporaryFile() as archive:
