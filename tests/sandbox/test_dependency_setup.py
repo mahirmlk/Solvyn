@@ -228,6 +228,25 @@ def test_requirements_family_requires_uv_lock(tmp_path: Path, relative_path: str
         discover_dependency_inputs(tmp_path, required=False)
 
 
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "ci/tox.ini",
+        "tools/noxfile.py",
+        "ci/environment.yml",
+        "frontend/package.json",
+        "nested/package-lock.json",
+        "vendor/pnpm-lock.yaml",
+    ],
+)
+def test_other_dependency_manifests_block_no_lock_fallback(tmp_path: Path, relative_path: str) -> None:
+    manifest = tmp_path / relative_path
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text("{}\n", encoding="utf-8")
+    with pytest.raises(DependencyBlockedError, match="manifests require a supported root uv.lock"):
+        discover_dependency_inputs(tmp_path, required=False)
+
+
 def test_fetch_subprocess_can_write_wheels_larger_than_two_megabytes(tmp_path: Path) -> None:
     artifact = tmp_path / "large-wheel.bin"
     _run_tool(
