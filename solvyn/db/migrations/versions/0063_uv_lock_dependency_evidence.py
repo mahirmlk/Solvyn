@@ -48,7 +48,9 @@ def upgrade() -> None:
             AND length(dependency_runtime_fingerprint) = 64
             AND dependency_uv_version IS NOT NULL
             AND dependency_pip_version IS NOT NULL
+            AND dependency_package_count IS NOT NULL
             AND dependency_package_count > 0
+            AND dependency_wheelhouse_bytes IS NOT NULL
             AND dependency_wheelhouse_bytes > 0
         )""",
     )
