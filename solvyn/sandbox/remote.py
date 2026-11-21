@@ -92,8 +92,20 @@ class RemoteSandboxRunner:
         if evidence_payload is not None:
             if (
                 not isinstance(evidence_payload, dict)
-                or set(evidence_payload) != {"lock_sha256", "wheelhouse_sha256", "package_count", "wheelhouse_bytes", "runtime_fingerprint", "uv_version", "pip_version"}
-                or any(not isinstance(evidence_payload.get(key), str) or len(evidence_payload[key]) != 64 for key in ("lock_sha256", "wheelhouse_sha256", "runtime_fingerprint"))
+                or set(evidence_payload)
+                != {
+                    "lock_sha256",
+                    "wheelhouse_sha256",
+                    "package_count",
+                    "wheelhouse_bytes",
+                    "runtime_fingerprint",
+                    "uv_version",
+                    "pip_version",
+                }
+                or any(
+                    not isinstance(evidence_payload.get(key), str) or len(evidence_payload[key]) != 64
+                    for key in ("lock_sha256", "wheelhouse_sha256", "runtime_fingerprint")
+                )
                 or any(char not in "0123456789abcdef" for key in ("lock_sha256", "wheelhouse_sha256", "runtime_fingerprint") for char in evidence_payload[key])
                 or type(evidence_payload.get("package_count")) is not int
                 or type(evidence_payload.get("wheelhouse_bytes")) is not int
