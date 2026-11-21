@@ -1528,7 +1528,8 @@ async def test_background_worker_webhook_and_maintenance_writes_are_tenant_scope
                 work_item_body = json.dumps(
                     {
                         "action": "opened",
-                        "repository": {"full_name": "Shared/Worker-RLS"},
+                        "repository": {"id": github_repository_a, "full_name": "Shared/Worker-RLS"},
+                        "installation": {"id": installation_a, "account": {"id": account_a, "type": "Organization"}},
                         key: work_item,
                     }
                 ).encode()
