@@ -127,10 +127,11 @@ def _read_regular_file(path: Path, maximum: int) -> bytes:
             os.close(descriptor)
 
 
-def _has_unlocked_python_manifest(workspace: Path) -> bool:
+def _has_unlocked_python_manifest(workspace: Path, *, allow_root_project_pair: bool = False) -> bool:
     """Reject dependency manifests anywhere when no root uv.lock can bind them."""
     manifest_names = {
         "pyproject.toml",
+        "uv.lock",
         "setup.cfg",
         "setup.py",
         "pipfile",
@@ -148,6 +149,9 @@ def _has_unlocked_python_manifest(workspace: Path) -> bool:
     }
     try:
         for path in workspace.rglob("*"):
+            relative = path.relative_to(workspace)
+            if allow_root_project_pair and relative in {Path("pyproject.toml"), Path("uv.lock")}:
+                continue
             if path.is_symlink() or path.is_file() or path.is_dir():
                 name = path.name.casefold()
                 if (
@@ -170,6 +174,10 @@ def discover_dependency_inputs(workspace: Path, *, required: bool) -> Dependency
     lock_path = workspace / "uv.lock"
     project_path = workspace / "pyproject.toml"
     if lock_path.exists() or lock_path.is_symlink():
+        if _has_unlocked_python_manifest(workspace, allow_root_project_pair=True):
+            raise DependencyBlockedError(
+                "Nested project and dependency manifests are unsupported; use only the root uv.lock project"
+            )
         if not project_path.exists():
             raise DependencyBlockedError("uv.lock requires a root pyproject.toml")
         try:
