@@ -254,20 +254,24 @@ def _wheel_identity(filename: str) -> tuple[str, str]:
     return _canonical_name(parts[0]), parts[1].lower()
 
 
-def _validate_wheels_against_requirements(wheels: list[dict[str, object]], requirements: list[str]) -> None:
-    expected = {_requirement_identity(line)[:2]: _requirement_identity(line)[2] for line in requirements}
-    seen: set[tuple[str, str]] = set()
+def _validate_wheels_against_requirements(wheels: list[dict[str, object]], requirements: list[str]) -> set[str]:
+    expected: dict[str, dict[str, set[str]]] = {}
+    for line in requirements:
+        name, version, hashes = _requirement_identity(line)
+        expected.setdefault(name, {}).setdefault(version, set()).update(hashes)
+    seen: set[str] = set()
     for wheel in wheels:
         filename = wheel.get("filename")
         checksum = wheel.get("sha256")
         if not isinstance(filename, str) or not isinstance(checksum, str):
             raise DependencyBlockedError("Wheelhouse manifest contains an invalid record")
-        identity = _wheel_identity(filename)
-        if identity not in expected or checksum not in expected[identity]:
+        name, version = _wheel_identity(filename)
+        if name not in expected or version not in expected[name] or checksum not in expected[name][version]:
             raise DependencyBlockedError("A wheel is not pinned by the exported requirements")
-        seen.add(identity)
+        seen.add(name)
     if seen != set(expected):
         raise DependencyBlockedError("Wheelhouse is missing a locked package wheel")
+    return seen
 
 
 def build_bundle_manifest(
@@ -317,7 +321,7 @@ def build_bundle_manifest(
         "schema": 1,
         "lock_sha256": lock_sha256,
         "requirements_sha256": hashlib.sha256(requirements).hexdigest(),
-        "package_count": len(required),
+        "package_count": len({_requirement_identity(line)[0] for line in required}),
         "wheel_count": len(wheels),
         "wheelhouse_bytes": total_bytes,
         "unpacked_bytes": total_unpacked,
@@ -432,7 +436,9 @@ def extract_bundle_archive(source: BinaryIO, destination: Path, expected_lock_sh
         or manifest.get("wheel_count") != len(wheel_paths)
     ):
         raise DependencyBlockedError("Dependency bundle package or wheel count does not match its lock")
-    _validate_wheels_against_requirements(listed, logical_requirements)
+    package_names = _validate_wheels_against_requirements(listed, logical_requirements)
+    if manifest.get("package_count") != len(package_names):
+        raise DependencyBlockedError("Dependency bundle package count is invalid")
     if hashlib.sha256(requirements).hexdigest() != manifest.get("requirements_sha256"):
         raise DependencyBlockedError("Dependency bundle requirements digest mismatch")
     digest = hashlib.sha256()
@@ -450,4 +456,4 @@ def extract_bundle_archive(source: BinaryIO, destination: Path, expected_lock_sh
     wheelhouse_sha = digest.hexdigest()
     if manifest.get("wheelhouse_sha256") != wheelhouse_sha:
         raise DependencyBlockedError("Dependency bundle wheelhouse digest mismatch")
-    return DependencyEvidence(expected_lock_sha256, wheelhouse_sha, len(listed), total)
+    return DependencyEvidence(expected_lock_sha256, wheelhouse_sha, len(package_names), total)
