@@ -14,10 +14,10 @@ import sysconfig
 import tarfile
 import tomllib
 import zipfile
-from urllib.parse import urlparse
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
+from urllib.parse import urlparse
 
 _MAX_LOCK_BYTES = 1 * 1024 * 1024
 _MAX_PYPROJECT_BYTES = 1 * 1024 * 1024
