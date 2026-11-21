@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     # Comma-separated Fernet keys; first key encrypts new credentials and all listed keys can decrypt.
     integration_encryption_keys: str = ""
     github_webhook_secret: str = ""
+    github_app_id: str = ""
+    github_app_slug: str = ""
+    github_app_private_key: str = ""
     # Local dev only: allows booting without real secrets.
     # Must remain False in any networked deployment.
     allow_insecure_dev: bool = False

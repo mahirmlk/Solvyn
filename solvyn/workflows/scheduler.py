@@ -131,7 +131,11 @@ async def _reconcile_dependabot_schedule(db: AsyncSession, schedule: Maintenance
     for repository in repositories:
         try:
             provider = await get_authorized_repository_provider(
-                repository.provider, db, repository, schedule.organization_id
+                repository.provider,
+                db,
+                repository,
+                schedule.organization_id,
+                permissions={"metadata": "read", "vulnerability_alerts": "read"},
             )
             async with provider:
                 alerts, complete = await provider.list_dependabot_alerts(repository.full_name)

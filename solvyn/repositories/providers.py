@@ -9,9 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from solvyn.db.models import Integration, Repository
 from solvyn.repositories.credentials import (
     GitHubCredentialNotFoundError,
-    load_organization_github_token,
 )
 from solvyn.repositories.github import GitHubClient, GitHubRepositoryError
+from solvyn.repositories.github_app import GitHubAppClient
 from solvyn.repositories.protocols import RepositoryProvider
 
 
@@ -26,6 +26,8 @@ async def get_authorized_repository_provider(
     db: AsyncSession,
     repository: Repository,
     organization_id: uuid.UUID,
+    *,
+    permissions: dict[str, str] | None = None,
 ) -> RepositoryProvider:
     """Build a GitHub client using only the credential explicitly linked to this repository."""
     if name != "github":
@@ -40,7 +42,18 @@ async def get_authorized_repository_provider(
         or not integration.is_active
     ):
         raise GitHubCredentialNotFoundError("Repository credential is unavailable")
-    if integration.external_id != "organization-token":
+    if integration.github_installation_id is not None:
+        if repository.github_repository_id is None:
+            raise GitHubCredentialNotFoundError("Repository is missing its GitHub numeric identity; reconnect it")
+        async with GitHubAppClient() as app:
+            token = await app.installation_token(
+                integration.github_installation_id,
+                (repository.github_repository_id,),
+                permissions,
+            )
+        return get_repository_provider(name, token=token)
+    if integration.external_id == "public-api":
         return get_repository_provider(name)
-    token = await load_organization_github_token(db, organization_id)
-    return get_repository_provider(name, token=token)
+    raise GitHubCredentialNotFoundError(
+        "Repository is not bound to a GitHub App installation; reconnect it with installation-scoped access"
+    )

@@ -226,8 +226,12 @@ export interface TaskWorkspaceCreated {
 export interface GitHubIntegrationInfo {
   connected: boolean;
   integration_id: string | null;
+  installation_id?: number | null;
+  account_id?: number | null;
   account_login?: string | null;
   updated_at?: string | null;
+  app_slug?: string | null;
+  auth_type?: "github_app_installation" | "legacy_token" | null;
 }
 
 export interface RepositoryCandidateInfo {
@@ -687,6 +691,12 @@ export const api = {
     request<GitHubIntegrationInfo>(`/organizations/${organizationId}/integrations/github`, {
       method: "PUT",
       body: JSON.stringify({ access_token: accessToken }),
+    }),
+
+  connectGitHubInstallation: (organizationId: string, installationId: number) =>
+    request<GitHubIntegrationInfo>(`/organizations/${organizationId}/integrations/github/installation`, {
+      method: "PUT",
+      body: JSON.stringify({ installation_id: installationId }),
     }),
 
   listProjectRepositories: (projectId: string) =>

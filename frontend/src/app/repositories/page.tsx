@@ -23,7 +23,7 @@ export default function RepositoriesPage() {
   const [inspection, setInspection] = useState<RepositoryInspection | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<RepositoryContentSearch | null>(null);
-  const [token, setToken] = useState("");
+  const [installationId, setInstallationId] = useState("");
   const [repositoryName, setRepositoryName] = useState("");
   const [loadingOrganizations, setLoadingOrganizations] = useState(true);
   const [loadingOrganization, setLoadingOrganization] = useState(false);
@@ -51,7 +51,7 @@ export default function RepositoriesPage() {
     setCandidatePage(1);
     setCandidateHasMore(false);
     setCandidateMayBeTruncated(false);
-    setToken("");
+    setInstallationId("");
     setRepositoryName("");
     setError(null);
     setNotice(null);
@@ -91,7 +91,7 @@ export default function RepositoriesPage() {
       setCandidateHasMore(false);
       setCandidateMayBeTruncated(false);
       setLoadingCandidates(false);
-      setToken("");
+      setInstallationId("");
       setRepositoryName("");
       setNotice(null);
       return;
@@ -103,7 +103,7 @@ export default function RepositoriesPage() {
     setProjectId("");
     setIntegration(null);
     setCanManage(false);
-    setToken("");
+    setInstallationId("");
     setRepositoryName("");
     setNotice(null);
     setRepositories([]);
@@ -204,15 +204,16 @@ export default function RepositoriesPage() {
 
   async function connectGitHub(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!organizationId || !canManage || !token.trim()) return;
+    const id = Number(installationId);
+    if (!organizationId || !canManage || !Number.isSafeInteger(id) || id < 1) return;
     setSaving(true);
     setError(null);
     setNotice(null);
     try {
-      const result = await api.connectGitHubIntegration(organizationId, token.trim());
+      const result = await api.connectGitHubInstallation(organizationId, id);
       setIntegration(result);
-      setToken("");
-      setNotice("Connected GitHub as " + (result.account_login || "the configured account") + ".");
+      setInstallationId("");
+      setNotice("Connected GitHub App installation for " + (result.account_login || "the selected account") + ".");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not connect the GitHub account.");
     } finally {
@@ -243,7 +244,7 @@ export default function RepositoriesPage() {
 
   async function connectCandidate() {
     const candidate = repositoryCandidates.find((item) => item.full_name === selectedCandidateName);
-    if (!canManage || !integration?.connected || !projectId || !candidate?.connectable || candidate.is_connected || saving) return;
+    if (!canManage || !integration?.connected || !projectId || !candidate?.connectable || saving) return;
     setSaving(true);
     setError(null);
     setNotice(null);
@@ -376,29 +377,35 @@ export default function RepositoriesPage() {
                 )}
               </div>
               <p className={styles.muted}>
-                Use an organization-owned GitHub token with access to the repositories you want Solvyn to inspect.
-                The token is sent directly to Solvyn and stored encrypted; it is never shown again.
+                Solvyn uses its GitHub App. Each repository request receives a short-lived installation token scoped to that repository.
+                Personal access tokens are not used for private repository access.
               </p>
               {canManage ? (
                 <form className={styles.tokenForm} onSubmit={connectGitHub}>
+                  {integration?.app_slug && (
+                    <a className="action-button secondary" href={`https://github.com/apps/${encodeURIComponent(integration.app_slug)}/installations/new`} rel="noreferrer" target="_blank">
+                      Install or configure the GitHub App
+                    </a>
+                  )}
                   <label className="field">
-                    <span className="field-label">{integration?.connected ? "Replace GitHub token" : "GitHub token"}</span>
+                    <span className="field-label">GitHub installation ID</span>
                     <input
-                      autoComplete="new-password"
                       className="editorial-input mono"
-                      onChange={(event) => setToken(event.target.value)}
-                      placeholder="Paste a GitHub token"
+                      inputMode="numeric"
+                      onChange={(event) => setInstallationId(event.target.value)}
+                      placeholder="For example, 12345678"
                       required
-                      type="password"
-                      value={token}
+                      type="number"
+                      min="1"
+                      value={installationId}
                     />
                   </label>
-                  <button className="action-button" disabled={saving || searching || !token.trim()} type="submit">
-                    {saving ? "Verifying…" : integration?.connected ? "Replace token" : "Connect GitHub"}
+                  <button className="action-button" disabled={saving || searching || !installationId.trim()} type="submit">
+                    {saving ? "Verifying…" : integration?.connected ? "Connect installation" : "Connect GitHub App"}
                   </button>
                 </form>
               ) : (
-                <p className={styles.helper}>Only organization owners and admins can connect or replace GitHub credentials.</p>
+                <p className={styles.helper}>Only organization owners and admins can connect a GitHub App installation.</p>
               )}
             </section>
           )}
@@ -426,16 +433,16 @@ export default function RepositoriesPage() {
                         <span className="field-label">Discover from connected GitHub account</span>
                         <select className="editorial-input mono" disabled={loadingCandidates || !repositoryCandidates.length || saving} onChange={(event) => setSelectedCandidateName(event.target.value)} value={selectedCandidateName}>
                           <option value="">{loadingCandidates ? "Loading repositories…" : "Choose a repository"}</option>
-                          {repositoryCandidates.map((candidate) => (
-                            <option disabled={!candidate.connectable || candidate.is_connected} key={candidate.id} value={candidate.full_name}>
+          {repositoryCandidates.map((candidate) => (
+                            <option disabled={!candidate.connectable} key={candidate.id} value={candidate.full_name}>
                               {candidate.full_name} · {candidate.private ? "Private" : "Public"}{candidate.is_connected ? " · Connected" : !candidate.connectable ? " · Empty repository" : ""}
                             </option>
                           ))}
                         </select>
                       </label>
                       <div className={styles.discoveryActions}>
-                        <button className="action-button" disabled={saving || loadingCandidates || !selectedCandidateName || !repositoryCandidates.find((item) => item.full_name === selectedCandidateName)?.connectable || repositoryCandidates.find((item) => item.full_name === selectedCandidateName)?.is_connected} onClick={() => void connectCandidate()} type="button">
-                          {saving ? "Connecting…" : "Connect selected"}
+                        <button className="action-button" disabled={saving || loadingCandidates || !selectedCandidateName || !repositoryCandidates.find((item) => item.full_name === selectedCandidateName)?.connectable} onClick={() => void connectCandidate()} type="button">
+                          {saving ? "Connecting…" : repositoryCandidates.find((item) => item.full_name === selectedCandidateName)?.is_connected ? "Reconnect access" : "Connect selected"}
                         </button>
                         <button className="action-button secondary" disabled={saving || loadingCandidates || candidatePage <= 1} onClick={() => setCandidatePage((page) => page - 1)} type="button">Previous</button>
                         <button className="action-button secondary" disabled={saving || loadingCandidates || !candidateHasMore} onClick={() => setCandidatePage((page) => page + 1)} type="button">Next page</button>
@@ -445,7 +452,7 @@ export default function RepositoriesPage() {
                       ) : candidateMayBeTruncated ? (
                         <p className={styles.helper}>GitHub reports another page of repositories.</p>
                       ) : null}
-                      <p className={styles.helper}>Discovery shows repositories visible to the organization credential. The credential is never returned.</p>
+                      <p className={styles.helper}>Discovery lists repositories enabled for the connected App installation. Content requests use a token scoped to the selected repository.</p>
                     </div>
                   )}
                   <form className={styles.repositoryForm} onSubmit={connectRepository}>
@@ -468,7 +475,7 @@ export default function RepositoriesPage() {
                 <p className={styles.helper}>Only organization owners and admins can connect repositories to projects.</p>
               )}
               {!integration?.connected && (
-                <p className={styles.helper}>Public repositories can be connected without a token. Private repositories require the organization GitHub token above.</p>
+                <p className={styles.helper}>Public repositories can be connected without an installation. Private repositories must be enabled for the connected GitHub App.</p>
               )}
 
               {loadingRepositories ? (

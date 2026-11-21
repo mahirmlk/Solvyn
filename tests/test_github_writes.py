@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
 from solvyn.api.v1 import repositories as repository_api
 from solvyn.api.v1._rbac import OWNER_ADMIN
@@ -224,24 +225,20 @@ def test_commit_validation_enforces_file_and_total_byte_caps() -> None:
 
 
 @pytest.mark.asyncio
-async def test_write_context_requires_owner_admin_and_uses_organization_token() -> None:
+async def test_write_context_requires_owner_admin_and_rejects_unbound_legacy_repository() -> None:
     from types import SimpleNamespace
 
-    repository = cast(Repository, SimpleNamespace(provider="github"))
+    repository = cast(Repository, SimpleNamespace(provider="github", integration_id=None))
     organization_id = uuid.uuid4()
     repository_id = uuid.uuid4()
     project = cast(Project, SimpleNamespace(organization_id=organization_id))
     db = object()
     with (
         patch.object(repository_api, "_load_authorized_repository", new_callable=AsyncMock) as authorize,
-        patch.object(repository_api, "load_organization_github_token", new_callable=AsyncMock) as load_token,
+        pytest.raises(HTTPException) as exc,
     ):
         authorize.return_value = (repository, project)
-        load_token.return_value = "secret-token"
-        result = await repository_api._load_github_write_context(repository_id, db)  # type: ignore[arg-type]
+        await repository_api._load_github_write_context(repository_id, db)  # type: ignore[arg-type]
 
     authorize.assert_awaited_once_with(repository_id, db, roles=OWNER_ADMIN)
-    load_token.assert_awaited_once_with(db, organization_id)
-    assert result[0] is repository
-    assert result[1] is project
-    assert result[2] == "secret-token"
+    assert exc.value.status_code == 409

@@ -19,10 +19,9 @@ from solvyn.db.session import get_session
 from solvyn.repositories.credentials import (
     CredentialEncryptionUnavailableError,
     GitHubCredentialNotFoundError,
-    load_organization_github_connection,
-    load_organization_github_token,
 )
 from solvyn.repositories.github import GitHubClient, GitHubRepositoryError
+from solvyn.repositories.github_app import GitHubAppClient
 from solvyn.repositories.protocols import RepositoryProvider
 from solvyn.repositories.providers import get_authorized_repository_provider, get_repository_provider
 
@@ -90,18 +89,30 @@ async def _load_authorized_repository(
 
 
 async def _load_github_write_context(
-    repository_id: uuid.UUID, db: AsyncSession
+    repository_id: uuid.UUID,
+    db: AsyncSession,
+    *,
+    permissions: dict[str, str] | None = None,
 ) -> tuple[Repository, Project, str]:
     repository, project = await _load_authorized_repository(repository_id, db, roles=OWNER_ADMIN)
     if repository.provider != "github":
         raise HTTPException(status_code=422, detail="Repository provider does not support GitHub writes")
-    try:
-        token = await load_organization_github_token(db, project.organization_id)
-    except GitHubCredentialNotFoundError as exc:
-        raise HTTPException(status_code=409, detail="Connect a GitHub organization token before writing") from exc
-    except CredentialEncryptionUnavailableError as exc:
-        raise HTTPException(status_code=503, detail="GitHub credential cannot be decrypted with current configuration") from exc
-    return repository, project, token
+    repository_integration_id = getattr(repository, "integration_id", None)
+    integration = await db.get(Integration, repository_integration_id) if repository_integration_id else None
+    if integration is not None and integration.github_installation_id is not None:
+        if repository.github_repository_id is None:
+            raise HTTPException(status_code=409, detail="Reconnect this repository to bind its GitHub identity")
+        try:
+            async with GitHubAppClient() as app:
+                token = await app.installation_token(
+                    integration.github_installation_id,
+                    (repository.github_repository_id,),
+                    permissions or {"contents": "write", "metadata": "read"},
+                )
+        except GitHubRepositoryError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+        return repository, project, token
+    raise HTTPException(status_code=409, detail="Connect this repository to a GitHub App installation before writing")
 
 
 @asynccontextmanager
@@ -138,21 +149,41 @@ async def connect_repository(
 
     token_integration = None
     token = None
+    github_repository_id: int | None = None
     try:
-        try:
-            token_integration, token = await load_organization_github_connection(db, project.organization_id)
-        except GitHubCredentialNotFoundError:
-            pass
-        if token:
-            try:
+        app_integrations = (
+            await db.execute(
+                select(Integration).where(
+                    Integration.organization_id == project.organization_id,
+                    Integration.provider == "github",
+                    Integration.github_installation_id.is_not(None),
+                    Integration.is_active == True,  # noqa: E712
+                )
+            )
+        ).scalars().all()
+        for app_integration in app_integrations:
+            async with GitHubAppClient() as app:
+                installed = await app.list_installation_repositories(app_integration.github_installation_id)
+                match = next(
+                    (item for item in installed if isinstance(item.get("full_name"), str)
+                     and item["full_name"].casefold() == payload.full_name.casefold()),
+                    None,
+                )
+                if match is None:
+                    continue
+                numeric_id = match.get("id")
+                if isinstance(numeric_id, bool) or not isinstance(numeric_id, int) or numeric_id < 1:
+                    raise HTTPException(status_code=502, detail="GitHub returned invalid repository identity")
+                token = await app.installation_token(
+                    app_integration.github_installation_id,
+                    (numeric_id,),
+                )
                 async with GitHubClient(token=token) as github:
                     metadata = await github.repository_metadata(payload.full_name)
-            except GitHubRepositoryError as exc:
-                if exc.status_code != 404:
-                    raise
-                async with get_repository_provider("github") as github:
-                    metadata = await github.repository_metadata(payload.full_name)
-        else:
+                token_integration = app_integration
+                github_repository_id = numeric_id
+                break
+        if token_integration is None:
             async with get_repository_provider("github") as github:
                 metadata = await github.repository_metadata(payload.full_name)
     except CredentialEncryptionUnavailableError as exc:
@@ -161,14 +192,14 @@ async def connect_repository(
         if exc.status_code == 404 and token_integration is None:
             raise HTTPException(
                 status_code=409,
-                detail="Connect an organization GitHub token with repository access before connecting this repository",
+                detail="Install and connect the Solvyn GitHub App with access to this repository before connecting it",
             ) from exc
         raise _provider_error(exc) from exc
 
     if metadata["private"] and token_integration is None:
         raise HTTPException(
             status_code=409,
-            detail="Connect an organization GitHub token with repository access before connecting this repository",
+            detail="Install and connect the Solvyn GitHub App with access to this private repository",
         )
 
     duplicate = (
@@ -180,7 +211,16 @@ async def connect_repository(
         )
     ).scalar_one_or_none()
     if duplicate is not None:
-        raise HTTPException(status_code=409, detail="Repository is already connected to this project")
+        if token_integration is None or github_repository_id is None:
+            raise HTTPException(status_code=409, detail="Repository is already connected to this project")
+        duplicate.integration_id = token_integration.id
+        duplicate.github_repository_id = github_repository_id
+        duplicate.full_name = metadata["full_name"]
+        duplicate.default_branch = metadata["default_branch"]
+        duplicate.url = metadata["url"]
+        await db.commit()
+        await db.refresh(duplicate)
+        return _repository_dict(duplicate)
 
     integration = token_integration if metadata["private"] else (
         await db.execute(
@@ -216,6 +256,7 @@ async def connect_repository(
         provider="github",
         default_branch=metadata["default_branch"],
         url=metadata["url"],
+        github_repository_id=github_repository_id or metadata.get("id"),
     )
     db.add(repository)
     try:
@@ -266,11 +307,39 @@ async def list_repository_candidates(
         raise HTTPException(status_code=404, detail="Project not found")
     await require_org_membership(db, project.organization_id, roles=OWNER_ADMIN)
     try:
-        _integration, token = await load_organization_github_connection(db, project.organization_id)
-        async with GitHubClient(token=token) as github:
-            candidates, github_has_next = await github.accessible_repository_page(page=page)
-    except GitHubCredentialNotFoundError as exc:
-        raise HTTPException(status_code=409, detail="Connect an organization GitHub token before discovering repositories") from exc
+        app_integrations = (
+            await db.execute(
+                select(Integration).where(
+                    Integration.organization_id == project.organization_id,
+                    Integration.provider == "github",
+                    Integration.github_installation_id.is_not(None),
+                    Integration.is_active.is_(True),
+                )
+            )
+        ).scalars().all()
+        if app_integrations:
+            async with GitHubAppClient() as app:
+                all_candidates = []
+                for app_integration in app_integrations:
+                    installed = await app.list_installation_repositories(app_integration.github_installation_id)
+                    all_candidates.extend(
+                        {
+                            "id": item["id"],
+                            "full_name": item["full_name"],
+                            "default_branch": item.get("default_branch") or "",
+                            "private": bool(item.get("private", False)),
+                            "url": item.get("html_url") or "",
+                            "installation_id": app_integration.github_installation_id,
+                        }
+                        for item in installed
+                        if isinstance(item.get("id"), int)
+                        and isinstance(item.get("full_name"), str)
+                        and not isinstance(item.get("id"), bool)
+                    )
+            candidates = all_candidates[(page - 1) * _REPOSITORIES_PER_DISCOVERY_PAGE:page * _REPOSITORIES_PER_DISCOVERY_PAGE]
+            github_has_next = len(all_candidates) > page * _REPOSITORIES_PER_DISCOVERY_PAGE
+        else:
+            raise HTTPException(status_code=409, detail="Install and connect the Solvyn GitHub App before discovering repositories")
     except CredentialEncryptionUnavailableError as exc:
         raise HTTPException(status_code=503, detail="GitHub credential cannot be decrypted with current configuration") from exc
     except GitHubRepositoryError as exc:
@@ -406,7 +475,9 @@ async def create_repository_pull_request(
     payload: PullRequestCreate,
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
-    repository, _, token = await _load_github_write_context(repository_id, db)
+    repository, _, token = await _load_github_write_context(
+        repository_id, db, permissions={"metadata": "read", "pull_requests": "write"}
+    )
     try:
         async with GitHubClient(token=token) as github:
             result = await github.create_pull_request(
