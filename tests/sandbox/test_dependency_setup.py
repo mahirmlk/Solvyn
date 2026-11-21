@@ -196,6 +196,39 @@ def test_legacy_setup_manifests_require_uv_lock(tmp_path: Path, filename: str) -
         discover_dependency_inputs(tmp_path, required=False)
 
 
+def test_build_system_requirements_need_uv_lock(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='demo'\nversion='1.0'\nrequires-python='>=3.12'\n"
+        "[build-system]\nrequires=['setuptools>=70']\nbuild-backend='setuptools.build_meta'\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(DependencyBlockedError, match="Build requirements"):
+        discover_dependency_inputs(tmp_path, required=False)
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "requirements-prod.txt",
+        "requirements-ci.in",
+        "requirements-prod/ci.in",
+        "requirements/ci.txt",
+        "constraints-prod.txt",
+        "constraints/test.in",
+    ],
+)
+def test_requirements_family_requires_uv_lock(tmp_path: Path, relative_path: str) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='demo'\nversion='1.0'\nrequires-python='>=3.12'\n",
+        encoding="utf-8",
+    )
+    manifest = tmp_path / relative_path
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text("demo-dep>=1\n", encoding="utf-8")
+    with pytest.raises(DependencyBlockedError, match="Requirements and constraints"):
+        discover_dependency_inputs(tmp_path, required=False)
+
+
 def test_fetch_subprocess_can_write_wheels_larger_than_two_megabytes(tmp_path: Path) -> None:
     artifact = tmp_path / "large-wheel.bin"
     _run_tool(
