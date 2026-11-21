@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from solvyn.sandbox.dependencies import DependencyEvidence, DependencyInputs
+from solvyn.sandbox.dependencies import DependencyEvidence, DependencyInputs, runtime_fingerprint
 from solvyn.sandbox.runtime import DockerSandboxRunner
 from solvyn.sandbox.workspaces import WorkspaceManager
 
@@ -59,7 +59,7 @@ async def test_locked_wheel_installs_offline_without_changing_source(
     requirements = tmp_path / "requirements.txt"
     requirements.write_text(f"demo-pkg==0.1.0 --hash=sha256:{digest}\n", encoding="utf-8")
     temporary = tempfile.TemporaryDirectory(prefix="solvyn-test-bundle-")
-    evidence = DependencyEvidence("a" * 64, "b" * 64, 1, wheel.stat().st_size)
+    evidence = DependencyEvidence("a" * 64, "b" * 64, 1, wheel.stat().st_size, runtime_fingerprint())
 
     async def fake_fetch(_inputs: DependencyInputs, *, base_url: str):
         from solvyn.sandbox.dependency_client import DependencyBundle
