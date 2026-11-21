@@ -233,12 +233,54 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _canonical_name(value: str) -> str:
+    return re.sub(r"[-_.]+", "-", value).lower()
+
+
+def _requirement_identity(line: str) -> tuple[str, str, set[str]]:
+    match = _REQUIREMENT.fullmatch(line)
+    if not match:
+        raise DependencyBlockedError("Exported requirements contain an unsupported pin")
+    hashes = set(re.findall(r"(?<!\\S)--hash=sha256:([a-f0-9]{64})(?=\\s|$)", line))
+    requirement = re.sub(r"\\s+--hash=sha256:[a-f0-9]{64}(?=\\s|$)", "", line).strip()
+    match = _REQUIREMENT.fullmatch(requirement)
+    if not match or not hashes:
+        raise DependencyBlockedError("Every requirement must have a pinned version and SHA-256 hash")
+    return _canonical_name(match.group("name")), match.group("version").lower(), hashes
+
+
+def _wheel_identity(filename: str) -> tuple[str, str]:
+    if not filename.endswith(".whl"):
+        raise DependencyBlockedError("Wheelhouse contains a non-wheel artifact")
+    parts = filename[:-4].rsplit("-", 4)
+    if len(parts) != 5 or not parts[0] or not parts[1]:
+        raise DependencyBlockedError("Wheelhouse contains a malformed wheel filename")
+    return _canonical_name(parts[0]), parts[1].lower()
+
+
+def _validate_wheels_against_requirements(wheels: list[dict[str, object]], requirements: list[str]) -> None:
+    expected = {_requirement_identity(line)[:2]: _requirement_identity(line)[2] for line in requirements}
+    seen: set[tuple[str, str]] = set()
+    for wheel in wheels:
+        filename = wheel.get("filename")
+        checksum = wheel.get("sha256")
+        if not isinstance(filename, str) or not isinstance(checksum, str):
+            raise DependencyBlockedError("Wheelhouse manifest contains an invalid record")
+        identity = _wheel_identity(filename)
+        if identity not in expected or checksum not in expected[identity]:
+            raise DependencyBlockedError("A wheel is not pinned by the exported requirements")
+        seen.add(identity)
+    if seen != set(expected):
+        raise DependencyBlockedError("Wheelhouse is missing a locked package wheel")
+
+
 def build_bundle_manifest(
     wheel_dir: Path,
     *,
     lock_sha256: str,
     requirements: bytes,
 ) -> tuple[dict[str, object], int]:
+    required = parse_exported_requirements(requirements)
     wheels: list[dict[str, object]] = []
     total_bytes = 0
     total_unpacked = 0
@@ -262,7 +304,7 @@ def build_bundle_manifest(
             raise DependencyBlockedError("Wheelhouse contains an empty wheel")
         for entry in entries:
             member = PurePosixPath(entry.filename)
-            if member.is_absolute() or ".." in member.parts or entry.is_dir() and member.parts == ():
+            if member.is_absolute() or ".." in member.parts:
                 raise DependencyBlockedError("Wheel contains an unsafe path")
             mode = entry.external_attr >> 16
             if stat.S_ISLNK(mode):
@@ -274,13 +316,13 @@ def build_bundle_manifest(
         wheels.append({"filename": path.name, "sha256": _sha256_file(path), "size": size})
         if len(wheels) > _MAX_WHEELS:
             raise DependencyBlockedError("Wheelhouse contains too many wheels")
-    if len(wheels) != len(parse_exported_requirements(requirements)):
-        raise DependencyBlockedError("The wheelhouse does not contain exactly one wheel per locked package")
+    _validate_wheels_against_requirements(wheels, required)
     manifest: dict[str, object] = {
         "schema": 1,
         "lock_sha256": lock_sha256,
         "requirements_sha256": hashlib.sha256(requirements).hexdigest(),
-        "package_count": len(wheels),
+        "package_count": len(required),
+        "wheel_count": len(wheels),
         "wheelhouse_bytes": total_bytes,
         "unpacked_bytes": total_unpacked,
         "wheels": wheels,
@@ -290,7 +332,6 @@ def build_bundle_manifest(
         wheelhouse_digest.update(str(wheel["filename"]).encode("utf-8") + b"\\0" + bytes.fromhex(str(wheel["sha256"])))
     manifest["wheelhouse_sha256"] = wheelhouse_digest.hexdigest()
     return manifest, total_bytes
-
 
 def create_bundle_archive(
     wheel_dir: Path,
