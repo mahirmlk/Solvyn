@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
 from solvyn.api.v1 import repositories as repository_api
 from solvyn.api.v1._rbac import OWNER_ADMIN
-from solvyn.db.models import Project, Repository
+from solvyn.db.models import Integration, Project, Repository
 from solvyn.repositories.github import GitHubClient, GitHubRepositoryError
 
 
@@ -224,24 +226,57 @@ def test_commit_validation_enforces_file_and_total_byte_caps() -> None:
 
 
 @pytest.mark.asyncio
-async def test_write_context_requires_owner_admin_and_uses_organization_token() -> None:
+async def test_write_context_requires_owner_admin_and_rejects_unbound_legacy_repository() -> None:
     from types import SimpleNamespace
 
-    repository = cast(Repository, SimpleNamespace(provider="github"))
+    repository = cast(Repository, SimpleNamespace(provider="github", integration_id=None))
     organization_id = uuid.uuid4()
     repository_id = uuid.uuid4()
     project = cast(Project, SimpleNamespace(organization_id=organization_id))
     db = object()
     with (
         patch.object(repository_api, "_load_authorized_repository", new_callable=AsyncMock) as authorize,
-        patch.object(repository_api, "load_organization_github_token", new_callable=AsyncMock) as load_token,
+        pytest.raises(HTTPException) as exc,
     ):
         authorize.return_value = (repository, project)
-        load_token.return_value = "secret-token"
-        result = await repository_api._load_github_write_context(repository_id, db)  # type: ignore[arg-type]
+        await repository_api._load_github_write_context(repository_id, db)  # type: ignore[arg-type]
 
     authorize.assert_awaited_once_with(repository_id, db, roles=OWNER_ADMIN)
-    load_token.assert_awaited_once_with(db, organization_id)
-    assert result[0] is repository
-    assert result[1] is project
-    assert result[2] == "secret-token"
+    assert exc.value.status_code == 409
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["disconnected", "cross_org", "wrong_provider"])
+async def test_write_context_rejects_inactive_or_foreign_installation(failure: str) -> None:
+    org_id = uuid.uuid4()
+    integration = Integration(
+        id=uuid.uuid4(),
+        organization_id=org_id,
+        provider="github",
+        external_id="installation:812",
+        github_installation_id=812,
+        github_account_id=456,
+        is_active=True,
+    )
+    if failure == "disconnected":
+        integration.is_active = False
+    elif failure == "cross_org":
+        integration.organization_id = uuid.uuid4()
+    else:
+        integration.provider = "gitlab"
+    repository = cast(
+        Repository,
+        SimpleNamespace(provider="github", integration_id=integration.id, github_repository_id=41),
+    )
+    project = cast(Project, SimpleNamespace(organization_id=org_id))
+    db = AsyncMock()
+    db.get.return_value = integration
+    with (
+        patch.object(repository_api, "_load_authorized_repository", new_callable=AsyncMock, return_value=(repository, project)),
+        patch.object(repository_api, "GitHubAppClient") as app_client,
+        pytest.raises(HTTPException) as error,
+    ):
+        await repository_api._load_github_write_context(uuid.uuid4(), db)
+
+    assert error.value.status_code == 409
+    app_client.assert_not_called()
