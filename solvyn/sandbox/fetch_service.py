@@ -36,7 +36,7 @@ from solvyn.sandbox.dependencies import (
 
 _MAX_REQUEST_BYTES = 3 * 1024 * 1024
 _PROCESS_TIMEOUT = 180
-_MAX_ACTIVE_REQUESTS = 2
+_MAX_ACTIVE_REQUESTS = 1
 _PROXY = "http://dependency-proxy:3128"
 _slots = threading.BoundedSemaphore(_MAX_ACTIVE_REQUESTS)
 
