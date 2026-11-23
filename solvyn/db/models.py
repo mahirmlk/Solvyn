@@ -854,6 +854,12 @@ class GitHubDependabotAlertState(Base):
             name="uq_github_dependabot_alert_states_identity",
         ),
         CheckConstraint("alert_number > 0", name="ck_github_dependabot_alert_states_number"),
+        Index(
+            "ix_github_dependabot_alert_states_project_updated",
+            "organization_id",
+            "project_id",
+            "updated_at",
+        ),
         CheckConstraint(
             "lifecycle_state IN ('open', 'dismissed', 'fixed')",
             name="ck_github_dependabot_alert_states_state",
