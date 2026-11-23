@@ -311,10 +311,11 @@ async def test_dependency_schedule_records_open_alerts_and_marks_partial_scan_in
         next_run_at=now - timedelta(days=1),
         enabled=True,
     )
-    repository = SimpleNamespace(provider="github", full_name="octo/repo")
+    repository = SimpleNamespace(id=uuid.uuid4(), provider="github", full_name="octo/repo")
     alert = {
         "number": 73,
         "state": "open",
+        "updated_at": "2026-11-21T10:00:00Z",
         "security_advisory": {
             "summary": "Prototype pollution in widget",
             "severity": "high",
@@ -399,7 +400,7 @@ async def test_dependency_schedule_permission_denial_is_not_reported_as_zero_ale
         project_id=project_id, maintenance_type="dependency_review", title="Dependabot",
         interval_days=7, next_run_at=now - timedelta(days=1), enabled=True,
     )
-    repository = SimpleNamespace(provider="github", full_name="octo/private")
+    repository = SimpleNamespace(id=uuid.uuid4(), provider="github", full_name="octo/private")
 
     class Results:
         def __init__(self, values: list[object]) -> None:
@@ -471,7 +472,7 @@ async def test_dependency_schedule_empty_success_reports_zero_only_after_complet
         project_id=project_id, maintenance_type="dependency_review", title="Dependabot",
         interval_days=7, next_run_at=now - timedelta(days=1), enabled=True,
     )
-    repository = SimpleNamespace(provider="github", full_name="octo/empty")
+    repository = SimpleNamespace(id=uuid.uuid4(), provider="github", full_name="octo/empty")
 
     class Results:
         def __init__(self, values: list[object]) -> None:
@@ -544,8 +545,9 @@ async def test_dependency_schedule_deduplicates_alert_already_recorded_by_webhoo
         project_id=project_id, maintenance_type="dependency_review", title="Dependabot",
         interval_days=7, next_run_at=now - timedelta(days=1), enabled=True,
     )
-    repository = SimpleNamespace(provider="github", full_name="octo/repo")
-    alert = {"number": 73, "state": "open", "security_advisory": {"severity": "high"}}
+    repository = SimpleNamespace(id=uuid.uuid4(), provider="github", full_name="octo/repo")
+    alert = {"number": 73, "state": "open",
+        "updated_at": "2026-11-21T10:00:00Z", "security_advisory": {"severity": "high"}}
     webhook_source_id = "dependabot_alert:octo/repo:73:created"
 
     class Results:
@@ -615,7 +617,7 @@ async def test_dependency_schedule_repository_cap_is_incomplete_and_skips_partia
         project_id=project_id, maintenance_type="dependency_review", title="Dependabot",
         interval_days=7, next_run_at=now - timedelta(days=1), enabled=True,
     )
-    repositories = [SimpleNamespace(provider="github", full_name=f"octo/repo-{index}") for index in range(11)]
+    repositories = [SimpleNamespace(id=uuid.uuid4(), provider="github", full_name=f"octo/repo-{index}") for index in range(11)]
 
     class Results:
         def __init__(self, values: list[object]) -> None:
