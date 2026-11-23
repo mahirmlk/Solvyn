@@ -103,6 +103,9 @@ async def test_github_work_item_state_rls_and_transition_history_are_enforced() 
     tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
     organization_a, organization_b = uuid.uuid4(), uuid.uuid4()
     project_a, project_b = uuid.uuid4(), uuid.uuid4()
+    integration_a, integration_b = uuid.uuid4(), uuid.uuid4()
+    repository_a, repository_b = uuid.uuid4(), uuid.uuid4()
+    alert_state_a = uuid.uuid4()
     state_a, transition_a = uuid.uuid4(), uuid.uuid4()
     try:
         async with engine.connect() as connection:
@@ -129,9 +132,9 @@ async def test_github_work_item_state_rls_and_transition_history_are_enforced() 
                         (organization_b, tenant_b, f"lifecycle-{organization_b}", "Lifecycle B"),
                     ],
                 )
-                for tenant_id, organization_id, project_id in (
-                    (tenant_a, organization_a, project_a),
-                    (tenant_b, organization_b, project_b),
+                for tenant_id, organization_id, project_id, integration_id, repository_id, installation_id, account_id, github_repo_id in (
+                    (tenant_a, organization_a, project_a, integration_a, repository_a, 991001, 992001, 993001),
+                    (tenant_b, organization_b, project_b, integration_b, repository_b, 991002, 992002, 993002),
                 ):
                     await connection.execute(
                         text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
@@ -149,8 +152,52 @@ async def test_github_work_item_state_rls_and_transition_history_are_enforced() 
                             "slug": f"lifecycle-{project_id}",
                         },
                     )
+                    await connection.execute(
+                        text(
+                            "INSERT INTO integrations "
+                            "(id, organization_id, provider, external_id, github_installation_id, github_account_id, github_account_type, name) "
+                            "VALUES (:id, :org, 'github', :external_id, :installation_id, :account_id, 'Organization', 'Lifecycle App')"
+                        ),
+                        {
+                            "id": integration_id,
+                            "org": organization_id,
+                            "external_id": f"installation:{installation_id}",
+                            "installation_id": installation_id,
+                            "account_id": account_id,
+                        },
+                    )
+                    await connection.execute(
+                        text(
+                            "INSERT INTO repositories "
+                            "(id, project_id, integration_id, github_repository_id, provider, full_name) "
+                            "VALUES (:id, :project, :integration, :github_repo, 'github', :full_name)"
+                        ),
+                        {
+                            "id": repository_id,
+                            "project": project_id,
+                            "integration": integration_id,
+                            "github_repo": github_repo_id,
+                            "full_name": f"lifecycle/repo-{tenant_id}",
+                        },
+                    )
 
                 await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
+                await connection.execute(
+                    text(
+                        "INSERT INTO github_dependabot_alert_states "
+                        "(id, organization_id, project_id, repository_id, repository_key, repository_name, alert_number, "
+                        "title, severity, lifecycle_state, provider_updated_at, last_delivery_id) "
+                        "VALUES (:id, :org, :project, :repository, 'lifecycle/repo-a', 'lifecycle/repo-a', 73, "
+                        "'Lifecycle alert', 'high', 'open', '2026-11-20T10:00:00Z', :delivery)"
+                    ),
+                    {
+                        "id": alert_state_a,
+                        "org": organization_a,
+                        "project": project_a,
+                        "repository": repository_a,
+                        "delivery": str(uuid.uuid4()),
+                    },
+                )
                 await connection.execute(
                     text(
                         "INSERT INTO github_work_item_states "
@@ -184,6 +231,9 @@ async def test_github_work_item_state_rls_and_transition_history_are_enforced() 
                 assert await connection.scalar(
                     text("SELECT count(*) FROM proactive_event_transitions WHERE id = :id"), {"id": transition_a}
                 ) == 0
+                assert await connection.scalar(
+                    text("SELECT count(*) FROM github_dependabot_alert_states WHERE id = :id"), {"id": alert_state_a}
+                ) == 0
 
                 savepoint = await connection.begin_nested()
                 with pytest.raises(DBAPIError):
@@ -199,6 +249,27 @@ async def test_github_work_item_state_rls_and_transition_history_are_enforced() 
                             "id": uuid.uuid4(),
                             "org": organization_a,
                             "project": project_a,
+                            "delivery": str(uuid.uuid4()),
+                        },
+                    )
+                await savepoint.rollback()
+
+                await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
+                savepoint = await connection.begin_nested()
+                with pytest.raises(DBAPIError):
+                    await connection.execute(
+                        text(
+                            "INSERT INTO github_dependabot_alert_states "
+                            "(id, organization_id, project_id, repository_id, repository_key, repository_name, alert_number, "
+                            "title, severity, lifecycle_state, provider_updated_at, last_delivery_id) "
+                            "VALUES (:id, :org, :project, :repository, 'forged/repo', 'forged/repo', 74, "
+                            "'Forged alert', 'high', 'open', '2026-11-20T10:00:00Z', :delivery)"
+                        ),
+                        {
+                            "id": uuid.uuid4(),
+                            "org": organization_a,
+                            "project": project_a,
+                            "repository": repository_b,
                             "delivery": str(uuid.uuid4()),
                         },
                     )

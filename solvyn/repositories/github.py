@@ -215,9 +215,13 @@ class GitHubClient(RepositoryProvider):
         return (payload, response.headers.get("link", "")) if include_link else payload
 
     async def list_dependabot_alerts(
-        self, full_name: str, *, max_pages: int = _MAX_DEPENDABOT_PAGES
+        self,
+        full_name: str,
+        *,
+        max_pages: int = _MAX_DEPENDABOT_PAGES,
+        states: tuple[str, ...] = ("open",),
     ) -> tuple[list[dict[str, Any]], bool]:
-        """Return open Dependabot alerts and whether the bounded result is complete.
+        """Return bounded Dependabot alert states and whether the result is complete.
 
         The GitHub alerts endpoint is paginated. A visible ``next`` link after
         the page cap means the result is partial and must not be presented as a
@@ -226,12 +230,19 @@ class GitHubClient(RepositoryProvider):
         """
         owner, repo = validate_full_name(full_name)
         page_limit = max(1, min(int(max_pages), _MAX_DEPENDABOT_PAGES))
+        allowed_states = {"auto_dismissed", "dismissed", "fixed", "open"}
+        if not states or any(state not in allowed_states for state in states):
+            raise ValueError("Unsupported Dependabot alert state filter")
         path = f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/dependabot/alerts"
         alerts: list[dict[str, Any]] = []
         for page in range(1, page_limit + 1):
             result = await self._get_json_payload(
                 path,
-                params={"state": "open", "per_page": str(_DEPENDABOT_ALERTS_PER_PAGE), "page": str(page)},
+                params={
+                    "state": ",".join(states),
+                    "per_page": str(_DEPENDABOT_ALERTS_PER_PAGE),
+                    "page": str(page),
+                },
                 include_link=True,
                 preserve_forbidden=True,
             )

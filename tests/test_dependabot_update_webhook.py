@@ -118,7 +118,7 @@ async def test_signed_dependabot_update_signal_is_persisted_and_replay_deduplica
                 return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [tenant_id]))
             if self.execute_count == 2:
                 self.repository_match_query = _query
-                return SimpleNamespace(all=lambda: [(project_id, organization_id, tenant_id)])
+                return SimpleNamespace(all=lambda: [(project_id, organization_id, tenant_id, uuid.uuid4())])
             if self.execute_count == 4:
                 return SimpleNamespace(scalar_one_or_none=lambda: self.persisted_state)
             if self.execute_count == 5:

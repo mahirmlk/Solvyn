@@ -26,7 +26,7 @@ from solvyn.api.v1.webhooks import (
     list_proactive_events,
     receive_github_webhook,
 )
-from solvyn.db.models import GitHubWorkItemState, ProactiveEvent, ProactiveEventTransition
+from solvyn.db.models import GitHubDependabotAlertState, GitHubWorkItemState, ProactiveEvent, ProactiveEventTransition
 from solvyn.multi_tenant.auth import RateLimitMiddleware
 
 
@@ -458,7 +458,7 @@ async def test_webhook_persists_one_triage_event_per_connected_project() -> None
                 return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: list(self.tenant_ids)))
             if self.execute_count in {2, 3}:
                 tenant_id = self.tenant_ids[self.execute_count - 2]
-                matches = [(uuid.uuid4(), uuid.uuid4(), tenant_id)]
+                matches = [(uuid.uuid4(), uuid.uuid4(), tenant_id, uuid.uuid4())]
                 return SimpleNamespace(all=lambda: matches)
             return SimpleNamespace(scalar_one_or_none=lambda: None)
 
@@ -527,7 +527,7 @@ async def test_signed_security_alert_is_persisted_without_secret_material() -> N
                 self.tenant_id = uuid.uuid4()
                 return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [self.tenant_id]))
             if self.execute_count == 2:
-                return SimpleNamespace(all=lambda: [(uuid.uuid4(), uuid.uuid4(), self.tenant_id)])
+                return SimpleNamespace(all=lambda: [(uuid.uuid4(), uuid.uuid4(), self.tenant_id, uuid.uuid4())])
             return SimpleNamespace(scalar_one_or_none=lambda: None)
 
         def add(self, event: ProactiveEvent) -> None:
@@ -574,6 +574,7 @@ async def test_signed_dependabot_alert_persists_once_and_deduplicates_replay() -
             "alert": {
                 "number": 73,
                 "state": "open",
+                "updated_at": "2026-11-21T10:00:00Z",
                 "security_advisory": {
                     "summary": "Prototype pollution in widget",
                     "severity": "high",
@@ -593,22 +594,29 @@ async def test_signed_dependabot_alert_persists_once_and_deduplicates_replay() -
             self.tenant_id = uuid.uuid4()
             self.project_id = uuid.uuid4()
             self.organization_id = uuid.uuid4()
+            self.repository_id = uuid.uuid4()
+            self.state: GitHubDependabotAlertState | None = None
             self.added: list[ProactiveEvent] = []
 
         async def execute(self, _query: object) -> SimpleNamespace:
             self.execute_count += 1
-            query_step = (self.execute_count - 1) % 3
+            query_step = (self.execute_count - 1) % 4
             if query_step == 0:
                 return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [self.tenant_id]))
             if query_step == 1:
-                return SimpleNamespace(all=lambda: [(self.project_id, self.organization_id, self.tenant_id)])
-            existing = self.added[-1] if self.added else None
-            return SimpleNamespace(scalar_one_or_none=lambda: existing)
+                return SimpleNamespace(all=lambda: [(self.project_id, self.organization_id, self.tenant_id, self.repository_id)])
+            if query_step == 2:
+                return SimpleNamespace(scalar_one_or_none=lambda: self.state)
+            return SimpleNamespace(scalar_one_or_none=lambda: self.added[-1] if self.added else None)
 
-        def add(self, event: ProactiveEvent) -> None:
-            if event.id is None:
-                event.id = uuid.uuid4()
-            self.added.append(event)
+        def add(self, item: object) -> None:
+            if isinstance(item, GitHubDependabotAlertState):
+                self.state = item
+                return
+            assert isinstance(item, ProactiveEvent)
+            if item.id is None:
+                item.id = uuid.uuid4()
+            self.added.append(item)
 
         async def commit(self) -> None:
             return None
@@ -661,6 +669,7 @@ def test_dependabot_reopened_webhook_uses_polling_compatible_source_id() -> None
     alert = {
         "number": 73,
         "state": "open",
+        "updated_at": "2026-11-21T10:00:00Z",
         "security_advisory": {"summary": "Prototype pollution", "severity": "high"},
     }
     reopened = _parse_security_alert(
@@ -694,34 +703,44 @@ async def test_dependabot_reopen_rearms_acknowledged_event_once_per_delivery() -
         details_url="https://github.com/octo/repo/security/dependabot/73",
         status="acknowledged",
     )
-    body = json.dumps(
-        {
-            "action": "reopened",
-            "repository": {"full_name": "octo/repo"},
-            "alert": {
-                "number": 73,
-                "state": "open",
-                "security_advisory": {"summary": "Prototype pollution", "severity": "high"},
-                "html_url": "https://github.com/octo/repo/security/dependabot/73",
-            },
-        }
-    ).encode()
+
+    def make_body(updated_at: str) -> bytes:
+        return json.dumps(
+            {
+                "action": "reopened",
+                "repository": {"full_name": "octo/repo"},
+                "alert": {
+                    "number": 73,
+                    "state": "open",
+                    "updated_at": updated_at,
+                    "security_advisory": {"summary": "Prototype pollution", "severity": "high"},
+                    "html_url": "https://github.com/octo/repo/security/dependabot/73",
+                },
+            }
+        ).encode()
 
     class StubDB:
         def __init__(self) -> None:
             self.execute_count = 0
             self.commits = 0
+            self.repository_id = uuid.uuid4()
+            self.state: GitHubDependabotAlertState | None = None
 
         async def execute(self, _query: object) -> SimpleNamespace:
             self.execute_count += 1
-            query_step = (self.execute_count - 1) % 3
+            query_step = (self.execute_count - 1) % 4
             if query_step == 0:
                 return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [tenant_id]))
             if query_step == 1:
-                return SimpleNamespace(all=lambda: [(project_id, organization_id, tenant_id)])
+                return SimpleNamespace(all=lambda: [(project_id, organization_id, tenant_id, self.repository_id)])
+            if query_step == 2:
+                return SimpleNamespace(scalar_one_or_none=lambda: self.state)
             return SimpleNamespace(scalar_one_or_none=lambda: event)
 
-        def add(self, _item: object) -> None:
+        def add(self, item: object) -> None:
+            if isinstance(item, GitHubDependabotAlertState):
+                self.state = item
+                return
             raise AssertionError("reopen should update the existing alert row")
 
         async def flush(self) -> None:
@@ -735,17 +754,14 @@ async def test_dependabot_reopen_rearms_acknowledged_event_once_per_delivery() -
 
     db = StubDB()
     first_reopen_delivery = str(uuid.uuid4())
+    first_body = make_body("2026-11-21T10:00:00Z")
     with (
         patch("solvyn.api.v1.webhooks.settings.github_webhook_secret", "webhook-secret"),
         patch("solvyn.api.v1.webhooks.bind_tenant_scope", new_callable=AsyncMock),
     ):
         first = await receive_github_webhook(
-            _request(
-                body,
-                event="dependabot_alert",
-                delivery=first_reopen_delivery,
-                signature=_signature("webhook-secret", body),
-            ),
+            _request(first_body, event="dependabot_alert", delivery=first_reopen_delivery,
+                     signature=_signature("webhook-secret", first_body)),
             db=cast(AsyncSession, db),
         )
         assert first["duplicate_count"] == 1
@@ -753,30 +769,20 @@ async def test_dependabot_reopen_rearms_acknowledged_event_once_per_delivery() -
         assert event.action == "reopened"
         assert event.delivery_id == first_reopen_delivery
 
-        # Once the reopened item has been acknowledged, replaying this same
-        # delivery must not reopen it again.
         event.status = "acknowledged"
         replay = await receive_github_webhook(
-            _request(
-                body,
-                event="dependabot_alert",
-                delivery=first_reopen_delivery,
-                signature=_signature("webhook-secret", body),
-            ),
+            _request(first_body, event="dependabot_alert", delivery=first_reopen_delivery,
+                     signature=_signature("webhook-secret", first_body)),
             db=cast(AsyncSession, db),
         )
         assert replay["duplicate_count"] == 1
         assert event.status == "acknowledged"
 
-        # A later, distinct GitHub reopen delivery rearms the same stable row.
         next_reopen_delivery = str(uuid.uuid4())
+        later_body = make_body("2026-11-22T10:00:00Z")
         later = await receive_github_webhook(
-            _request(
-                body,
-                event="dependabot_alert",
-                delivery=next_reopen_delivery,
-                signature=_signature("webhook-secret", body),
-            ),
+            _request(later_body, event="dependabot_alert", delivery=next_reopen_delivery,
+                     signature=_signature("webhook-secret", later_body)),
             db=cast(AsyncSession, db),
         )
 
@@ -785,7 +791,6 @@ async def test_dependabot_reopen_rearms_acknowledged_event_once_per_delivery() -
     assert event.action == "reopened"
     assert event.delivery_id == next_reopen_delivery
     assert db.commits == 3
-
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
@@ -821,7 +826,7 @@ async def test_signed_github_work_item_is_persisted_as_triage_signal(
                 self.tenant_id = uuid.uuid4()
                 return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [self.tenant_id]))
             if self.execute_count == 2:
-                return SimpleNamespace(all=lambda: [(uuid.uuid4(), uuid.uuid4(), self.tenant_id)])
+                return SimpleNamespace(all=lambda: [(uuid.uuid4(), uuid.uuid4(), self.tenant_id, uuid.uuid4())])
             return SimpleNamespace(scalar_one_or_none=lambda: None)
 
         def add(self, event: Any) -> None:
@@ -885,7 +890,7 @@ async def test_github_work_item_lifecycle_history_is_idempotent_and_does_not_res
             if self.execute_count == 1:
                 return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [tenant_id]))
             if self.execute_count == 2:
-                return SimpleNamespace(all=lambda: [(project_id, organization_id, tenant_id)])
+                return SimpleNamespace(all=lambda: [(project_id, organization_id, tenant_id, uuid.uuid4())])
             if self.execute_count == 3:
                 existing = deliveries.get(self.delivery_id)
                 return SimpleNamespace(scalar_one_or_none=lambda: existing.id if existing else None)
@@ -1005,7 +1010,7 @@ async def test_replayed_workflow_run_with_new_delivery_id_is_deduplicated() -> N
                 self.tenant_id = uuid.uuid4()
                 return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [self.tenant_id]))
             if self.execute_count == 2:
-                return SimpleNamespace(all=lambda: [(uuid.uuid4(), uuid.uuid4(), self.tenant_id)])
+                return SimpleNamespace(all=lambda: [(uuid.uuid4(), uuid.uuid4(), self.tenant_id, uuid.uuid4())])
             return SimpleNamespace(scalar_one_or_none=lambda: self.existing)
 
         def add(self, _event: ProactiveEvent) -> None:
@@ -1061,7 +1066,7 @@ async def test_unique_race_retries_missing_project_event_after_rollback() -> Non
                 self.tenant_id = uuid.uuid4()
                 return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [self.tenant_id]))
             if self.execute_count == 2:
-                return SimpleNamespace(all=lambda: [(project_a, organization_a, self.tenant_id), (project_b, organization_b, self.tenant_id)])
+                return SimpleNamespace(all=lambda: [(project_a, organization_a, self.tenant_id, uuid.uuid4()), (project_b, organization_b, self.tenant_id, uuid.uuid4())])
             if self.execute_count in {3, 4, 5}:
                 return SimpleNamespace(scalar_one_or_none=lambda: None)
             if self.execute_count == 6:

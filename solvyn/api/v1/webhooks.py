@@ -30,6 +30,7 @@ from solvyn.db.models import (
 )
 from solvyn.db.session import bind_tenant_scope, get_session
 from solvyn.proactive_dependabot import dependabot_alert_signal
+from solvyn.proactive_dependabot_state import record_dependabot_alert
 from solvyn.repositories.github import GitHubRepositoryError, validate_full_name
 
 router = APIRouter(tags=["webhooks", "proactive engineering"])
@@ -414,12 +415,12 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
     active_tenants = (
         await db.execute(select(Tenant.id).where(Tenant.is_active == True).order_by(Tenant.id))  # noqa: E712
     ).scalars().all()
-    project_matches: list[tuple[uuid.UUID, uuid.UUID, uuid.UUID]] = []
+    project_matches: list[tuple[uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID]] = []
     for tenant_id in active_tenants:
         await bind_tenant_scope(db, tenant_id)
         tenant_matches = (
             await db.execute(
-                select(Project.id, Project.organization_id, Organization.tenant_id)
+                select(Project.id, Project.organization_id, Organization.tenant_id, Repository.id)
                 .join(Repository, Repository.project_id == Project.id)
                 .join(Integration, Integration.id == Repository.integration_id)
                 .join(Organization, Organization.id == Project.organization_id)
@@ -438,15 +439,15 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
                 .limit(_MAX_PROJECT_MATCHES + 1)
             )
         ).all()
-        project_matches.extend((match[0], match[1], match[2]) for match in tenant_matches)
+        project_matches.extend((match[0], match[1], match[2], match[3]) for match in tenant_matches)
         if len(project_matches) > _MAX_PROJECT_MATCHES:
             raise HTTPException(status_code=413, detail="Repository is connected to too many projects for webhook fan-out")
     if not project_matches:
         return {"accepted": True, "ignored": True, "reason": "repository_not_connected"}
 
-    matches_by_tenant: dict[uuid.UUID, list[tuple[uuid.UUID, uuid.UUID]]] = {}
-    for project_id, organization_id, tenant_id in project_matches:
-        matches_by_tenant.setdefault(tenant_id, []).append((project_id, organization_id))
+    matches_by_tenant: dict[uuid.UUID, list[tuple[uuid.UUID, uuid.UUID, uuid.UUID]]] = {}
+    for project_id, organization_id, tenant_id, repository_id in project_matches:
+        matches_by_tenant.setdefault(tenant_id, []).append((project_id, organization_id, repository_id))
 
     async def _record_events() -> tuple[list[tuple[uuid.UUID, ProactiveEvent]], int, int]:
         events: list[tuple[uuid.UUID, ProactiveEvent]] = []
@@ -454,7 +455,7 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
         processed_transitions = 0
         for tenant_id, matches in matches_by_tenant.items():
             await bind_tenant_scope(db, tenant_id)
-            for project_id, organization_id in matches:
+            for project_id, organization_id, repository_id in matches:
                 if event_type in {"issues", "pull_request"}:
                     provider_updated_at = cast(datetime, signal["provider_updated_at"])
                     existing_transition = (
@@ -542,6 +543,22 @@ async def receive_github_webhook(request: Request, db: AsyncSession = Depends(ge
                     processed_transitions += 1
                     if signal["action"] not in {"opened", "reopened"} or not applied_to_current:
                         continue
+
+                if event_type == "dependabot_alert":
+                    alert_event, created = await record_dependabot_alert(
+                        db,
+                        organization_id=organization_id,
+                        project_id=project_id,
+                        repository_id=repository_id,
+                        signal=signal,
+                        delivery_id=normalized_delivery_id,
+                        source="webhook",
+                    )
+                    if alert_event is not None:
+                        events.append((tenant_id, alert_event))
+                        if not created:
+                            duplicates += 1
+                    continue
 
                 existing = (
                     await db.execute(

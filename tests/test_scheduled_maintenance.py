@@ -311,10 +311,11 @@ async def test_dependency_schedule_records_open_alerts_and_marks_partial_scan_in
         next_run_at=now - timedelta(days=1),
         enabled=True,
     )
-    repository = SimpleNamespace(provider="github", full_name="octo/repo")
+    repository = SimpleNamespace(id=uuid.uuid4(), provider="github", full_name="octo/repo")
     alert = {
         "number": 73,
         "state": "open",
+        "updated_at": "2026-11-21T10:00:00Z",
         "security_advisory": {
             "summary": "Prototype pollution in widget",
             "severity": "high",
@@ -332,6 +333,9 @@ async def test_dependency_schedule_records_open_alerts_and_marks_partial_scan_in
         def all(self) -> list[object]:
             return self.values
 
+        def scalar_one_or_none(self) -> object | None:
+            return self.values[0] if self.values else None
+
     class StubDB:
         def __init__(self) -> None:
             self.execute_count = 0
@@ -348,8 +352,9 @@ async def test_dependency_schedule_records_open_alerts_and_marks_partial_scan_in
                 return Results([repository])
             return Results([])
 
-        def add(self, event: ProactiveEvent) -> None:
-            self.added.append(event)
+        def add(self, event: object) -> None:
+            if isinstance(event, ProactiveEvent):
+                self.added.append(event)
 
         async def commit(self) -> None:
             self.commits += 1
@@ -361,7 +366,7 @@ async def test_dependency_schedule_records_open_alerts_and_marks_partial_scan_in
         async def __aexit__(self, *_: object) -> None:
             return None
 
-        async def list_dependabot_alerts(self, _full_name: str) -> tuple[list[dict[str, object]], bool]:
+        async def list_dependabot_alerts(self, _full_name: str, *, states: tuple[str, ...] = ("open",)) -> tuple[list[dict[str, object]], bool]:
             return [alert], False
 
     db = StubDB()
@@ -399,7 +404,7 @@ async def test_dependency_schedule_permission_denial_is_not_reported_as_zero_ale
         project_id=project_id, maintenance_type="dependency_review", title="Dependabot",
         interval_days=7, next_run_at=now - timedelta(days=1), enabled=True,
     )
-    repository = SimpleNamespace(provider="github", full_name="octo/private")
+    repository = SimpleNamespace(id=uuid.uuid4(), provider="github", full_name="octo/private")
 
     class Results:
         def __init__(self, values: list[object]) -> None:
@@ -437,7 +442,7 @@ async def test_dependency_schedule_permission_denial_is_not_reported_as_zero_ale
         async def __aexit__(self, *_: object) -> None:
             return None
 
-        async def list_dependabot_alerts(self, _full_name: str) -> tuple[list[dict[str, object]], bool]:
+        async def list_dependabot_alerts(self, _full_name: str, *, states: tuple[str, ...] = ("open",)) -> tuple[list[dict[str, object]], bool]:
             from solvyn.repositories.github import GitHubRepositoryError
 
             raise GitHubRepositoryError(403, "GitHub denied access to Dependabot alerts")
@@ -471,7 +476,7 @@ async def test_dependency_schedule_empty_success_reports_zero_only_after_complet
         project_id=project_id, maintenance_type="dependency_review", title="Dependabot",
         interval_days=7, next_run_at=now - timedelta(days=1), enabled=True,
     )
-    repository = SimpleNamespace(provider="github", full_name="octo/empty")
+    repository = SimpleNamespace(id=uuid.uuid4(), provider="github", full_name="octo/empty")
 
     class Results:
         def __init__(self, values: list[object]) -> None:
@@ -513,7 +518,7 @@ async def test_dependency_schedule_empty_success_reports_zero_only_after_complet
         async def __aexit__(self, *_: object) -> None:
             return None
 
-        async def list_dependabot_alerts(self, _full_name: str) -> tuple[list[dict[str, object]], bool]:
+        async def list_dependabot_alerts(self, _full_name: str, *, states: tuple[str, ...] = ("open",)) -> tuple[list[dict[str, object]], bool]:
             return [], True
 
     db = StubDB()
@@ -544,9 +549,25 @@ async def test_dependency_schedule_deduplicates_alert_already_recorded_by_webhoo
         project_id=project_id, maintenance_type="dependency_review", title="Dependabot",
         interval_days=7, next_run_at=now - timedelta(days=1), enabled=True,
     )
-    repository = SimpleNamespace(provider="github", full_name="octo/repo")
-    alert = {"number": 73, "state": "open", "security_advisory": {"severity": "high"}}
+    repository = SimpleNamespace(id=uuid.uuid4(), provider="github", full_name="octo/repo")
+    alert = {"number": 73, "state": "open",
+        "updated_at": "2026-11-21T10:00:00Z", "security_advisory": {"severity": "high"}}
     webhook_source_id = "dependabot_alert:octo/repo:73:created"
+    webhook_event = ProactiveEvent(
+        id=uuid.uuid4(),
+        organization_id=organization_id,
+        project_id=project_id,
+        delivery_id=str(uuid.uuid4()),
+        source_event_id=webhook_source_id,
+        event_type="dependabot_alert",
+        action="created",
+        repository_name="octo/repo",
+        workflow_name="Existing alert",
+        conclusion="high",
+        branch="",
+        details_url="https://github.com/octo/repo/security/dependabot/73",
+        status="pending",
+    )
 
     class Results:
         def __init__(self, values: list[object]) -> None:
@@ -557,6 +578,9 @@ async def test_dependency_schedule_deduplicates_alert_already_recorded_by_webhoo
 
         def all(self) -> list[object]:
             return self.values
+
+        def scalar_one_or_none(self) -> object | None:
+            return self.values[0] if self.values else None
 
     class StubDB:
         def __init__(self) -> None:
@@ -571,10 +595,15 @@ async def test_dependency_schedule_deduplicates_alert_already_recorded_by_webhoo
                 return Results([schedule])
             if self.execute_count == 3:
                 return Results([repository])
-            return Results([webhook_source_id])
+            if self.execute_count == 4:
+                return Results([])
+            if self.execute_count == 5:
+                return Results([webhook_event])
+            return Results([])
 
-        def add(self, event: ProactiveEvent) -> None:
-            self.added.append(event)
+        def add(self, event: object) -> None:
+            if isinstance(event, ProactiveEvent):
+                self.added.append(event)
 
         async def commit(self) -> None:
             return None
@@ -586,7 +615,7 @@ async def test_dependency_schedule_deduplicates_alert_already_recorded_by_webhoo
         async def __aexit__(self, *_: object) -> None:
             return None
 
-        async def list_dependabot_alerts(self, _full_name: str) -> tuple[list[dict[str, object]], bool]:
+        async def list_dependabot_alerts(self, _full_name: str, *, states: tuple[str, ...] = ("open",)) -> tuple[list[dict[str, object]], bool]:
             return [alert], True
 
     db = StubDB()
@@ -615,7 +644,7 @@ async def test_dependency_schedule_repository_cap_is_incomplete_and_skips_partia
         project_id=project_id, maintenance_type="dependency_review", title="Dependabot",
         interval_days=7, next_run_at=now - timedelta(days=1), enabled=True,
     )
-    repositories = [SimpleNamespace(provider="github", full_name=f"octo/repo-{index}") for index in range(11)]
+    repositories = [SimpleNamespace(id=uuid.uuid4(), provider="github", full_name=f"octo/repo-{index}") for index in range(11)]
 
     class Results:
         def __init__(self, values: list[object]) -> None:

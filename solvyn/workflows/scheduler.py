@@ -10,7 +10,7 @@ import socket
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from typing import Any, cast
 
 from opentelemetry.trace import Status, StatusCode
 from sqlalchemy import and_, delete, func, or_, select, update
@@ -39,6 +39,7 @@ from solvyn.db.session import async_session_factory, bind_tenant_scope
 from solvyn.multi_tenant.middleware import tenant_context
 from solvyn.observability.opentelemetry import get_tracer
 from solvyn.proactive_dependabot import dependabot_alert_signal
+from solvyn.proactive_dependabot_state import polling_delivery_id, record_dependabot_alert
 from solvyn.repositories.credentials import CredentialEncryptionUnavailableError, GitHubCredentialNotFoundError
 from solvyn.repositories.github import GitHubRepositoryError
 from solvyn.repositories.providers import get_authorized_repository_provider
@@ -123,7 +124,7 @@ async def _reconcile_dependabot_schedule(db: AsyncSession, schedule: Maintenance
     if exceeded_repository_limit:
         # A partial repository set cannot establish an organization-wide zero.
         repositories = []
-    signals: dict[str, dict[str, str]] = {}
+    signals: dict[str, tuple[uuid.UUID, dict[str, Any]]] = {}
     incomplete_reason = "repository_limit_reached" if exceeded_repository_limit else ""
     incomplete_action = "incomplete" if incomplete_reason else ""
     incomplete_status = "blocked" if incomplete_reason else ""
@@ -138,7 +139,10 @@ async def _reconcile_dependabot_schedule(db: AsyncSession, schedule: Maintenance
                 permissions={"metadata": "read", "vulnerability_alerts": "read"},
             )
             async with provider:
-                alerts, complete = await provider.list_dependabot_alerts(repository.full_name)
+                alerts, complete = await provider.list_dependabot_alerts(
+                    repository.full_name,
+                    states=("auto_dismissed", "dismissed", "fixed", "open"),
+                )
         except Exception as exc:
             logger.warning(
                 "Dependabot reconciliation unavailable for repository %s (schedule %s): %s",
@@ -156,41 +160,21 @@ async def _reconcile_dependabot_schedule(db: AsyncSession, schedule: Maintenance
         for alert in alerts:
             signal = dependabot_alert_signal(repository.full_name, alert, action="created")
             if signal is not None:
-                signals[signal["source_event_id"]] = signal
+                signals[signal["source_event_id"]] = (repository.id, signal)
             elif not incomplete_reason:
                 incomplete_reason = "invalid_alert_data"
                 incomplete_action, incomplete_status = "incomplete", "failed"
 
-    if signals:
-        existing_sources = set((
-            await db.execute(
-                select(ProactiveEvent.source_event_id).where(
-                    ProactiveEvent.organization_id == schedule.organization_id,
-                    ProactiveEvent.project_id == schedule.project_id,
-                    ProactiveEvent.source_event_id.in_(list(signals)),
-                )
-            )
-        ).scalars().all())
-        for source_event_id, signal in signals.items():
-            if source_event_id in existing_sources:
-                continue
-            stable_delivery = "dependabot-poll:" + hashlib.sha256(source_event_id.encode("utf-8")).hexdigest()
-            db.add(
-                ProactiveEvent(
-                    organization_id=schedule.organization_id,
-                    project_id=schedule.project_id,
-                    delivery_id=stable_delivery[:128],
-                    source_event_id=source_event_id,
-                    event_type="dependabot_alert",
-                    action=signal["action"],
-                    repository_name=signal["repository_name"],
-                    workflow_name=signal["workflow_name"],
-                    conclusion=signal["conclusion"],
-                    branch=signal["branch"],
-                    details_url=signal["details_url"],
-                    status="pending",
-                )
-            )
+    for repository_id, signal in signals.values():
+        await record_dependabot_alert(
+            db,
+            organization_id=schedule.organization_id,
+            project_id=schedule.project_id,
+            repository_id=repository_id,
+            signal=signal,
+            delivery_id=polling_delivery_id(signal["source_event_id"], signal["provider_updated_at"]),
+            source="poll",
+        )
 
     scheduled_for = schedule.next_run_at.isoformat()
     if incomplete_reason:
@@ -198,7 +182,8 @@ async def _reconcile_dependabot_schedule(db: AsyncSession, schedule: Maintenance
     elif not repositories:
         action, conclusion, status = "completed", "no_connected_repositories", "pending"
     else:
-        action, conclusion, status = "completed", f"open_alerts:{len(signals)}", "pending"
+        open_alert_count = sum(1 for _, signal in signals.values() if signal["notify"])
+        action, conclusion, status = "completed", f"open_alerts:{open_alert_count}", "pending"
     reconciliation_id = f"dependabot-reconciliation:{schedule.id}:{scheduled_for}"[:320]
     db.add(
         ProactiveEvent(
