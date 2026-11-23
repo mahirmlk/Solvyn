@@ -27,7 +27,7 @@ RUN groupadd --system --gid 10002 dependency-fetcher \
     && useradd --system --uid 10002 --gid dependency-fetcher --no-create-home --shell /usr/sbin/nologin dependency-fetcher
 WORKDIR /app
 COPY --chown=10002:10002 solvyn/__init__.py ./solvyn/__init__.py
-COPY --chown=10002:10002 solvyn/sandbox/dependencies.py solvyn/sandbox/fetch_service.py ./solvyn/sandbox/
+COPY --chown=10002:10002 solvyn/sandbox/dependencies.py solvyn/sandbox/fetch_service.py solvyn/sandbox/npm_dependencies.py ./solvyn/sandbox/
 USER 10002:10002
 EXPOSE 8002
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

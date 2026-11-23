@@ -381,6 +381,47 @@ class VerificationRun(Base):
             )""",
             name="ck_verification_runs_dependency_evidence_pair",
         ),
+        CheckConstraint(
+            """(
+                dependency_ecosystem IS NULL
+                AND dependency_lockfile_sha256 IS NULL
+                AND dependency_artifact_sha256 IS NULL
+                AND dependency_artifact_bytes IS NULL
+                AND dependency_artifact_package_count IS NULL
+                AND dependency_environment_fingerprint IS NULL
+                AND dependency_runtime_version IS NULL
+                AND dependency_installer_version IS NULL
+                AND dependency_runtime_platform IS NULL
+                AND dependency_runtime_architecture IS NULL
+                AND (dependency_lock_sha256 IS NULL OR dependency_wheelhouse_sha256 IS NOT NULL)
+            ) OR (
+                dependency_ecosystem = 'npm'
+                AND dependency_lockfile_sha256 IS NOT NULL
+                AND length(dependency_lockfile_sha256) = 64
+                AND dependency_artifact_sha256 IS NOT NULL
+                AND length(dependency_artifact_sha256) = 64
+                AND dependency_artifact_bytes IS NOT NULL
+                AND dependency_artifact_bytes > 0
+                AND dependency_artifact_package_count IS NOT NULL
+                AND dependency_artifact_package_count > 0
+                AND dependency_environment_fingerprint IS NOT NULL
+                AND length(dependency_environment_fingerprint) = 64
+                AND dependency_runtime_version IS NOT NULL
+                AND dependency_installer_version IS NOT NULL
+                AND dependency_runtime_platform IS NOT NULL
+                AND dependency_runtime_platform = 'linux'
+                AND dependency_runtime_architecture IS NOT NULL
+                AND dependency_runtime_architecture IN ('x64', 'arm64')
+                AND dependency_lock_sha256 IS NULL
+                AND dependency_wheelhouse_sha256 IS NULL
+                AND dependency_runtime_fingerprint IS NULL
+                AND dependency_uv_version IS NULL
+                AND dependency_pip_version IS NULL
+                AND dependency_package_count IS NULL
+                AND dependency_wheelhouse_bytes IS NULL
+            )""",
+            name="ck_verification_runs_generic_dependency_evidence",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -411,6 +452,16 @@ class VerificationRun(Base):
     dependency_pip_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     dependency_package_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     dependency_wheelhouse_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    dependency_ecosystem: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    dependency_lockfile_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dependency_artifact_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dependency_artifact_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    dependency_artifact_package_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    dependency_environment_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dependency_runtime_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    dependency_installer_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    dependency_runtime_platform: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    dependency_runtime_architecture: Mapped[str | None] = mapped_column(String(16), nullable=True)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     attempt_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     lease_owner: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)

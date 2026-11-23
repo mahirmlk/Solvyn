@@ -33,12 +33,30 @@ from solvyn.sandbox.dependencies import (
     create_bundle_archive,
     validate_uv_project,
 )
+from solvyn.sandbox.npm_dependencies import (
+    MAX_LOCK_BYTES as _MAX_NPM_LOCK_BYTES,
+)
+from solvyn.sandbox.npm_dependencies import (
+    MAX_MANIFEST_BYTES as _MAX_NPM_MANIFEST_BYTES,
+)
+from solvyn.sandbox.npm_dependencies import (
+    fetch_npm_bundle,
+    validate_npm_pair,
+)
 
-_MAX_REQUEST_BYTES = 3 * 1024 * 1024
+_MAX_REQUEST_BYTES = 8 * 1024 * 1024
 _PROCESS_TIMEOUT = 180
 _MAX_ACTIVE_REQUESTS = 1
 _PROXY = "http://dependency-proxy:3128"
 _slots = threading.BoundedSemaphore(_MAX_ACTIVE_REQUESTS)
+
+
+def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
+    kill_group = getattr(os, "killpg", None)
+    if callable(kill_group):
+        kill_group(process.pid, getattr(signal, "SIGKILL", 9))
+    else:  # pragma: no cover - production dependency image is Linux
+        process.kill()
 
 
 def _run_tool(
@@ -65,7 +83,7 @@ def _run_tool(
         try:
             return_code = process.wait(timeout=_PROCESS_TIMEOUT)
         except subprocess.TimeoutExpired as exc:
-            os.killpg(process.pid, signal.SIGKILL)
+            _kill_process_group(process)
             process.wait()
             raise DependencyBlockedError("Dependency resolution exceeded its time limit") from exc
         if return_code != 0:
@@ -91,7 +109,7 @@ def _run_tool(
                     if len(output) > output_limit:
                         raise DependencyBlockedError("Dependency tooling exceeded its output limit")
         except (TimeoutError, DependencyBlockedError) as exc:
-            os.killpg(process.pid, signal.SIGKILL)
+            _kill_process_group(process)
             process.wait()
             if isinstance(exc, DependencyBlockedError):
                 raise
@@ -233,6 +251,18 @@ def _build_wheelhouse(pyproject_bytes: bytes, lock_bytes: bytes) -> tuple[_Owned
         raise
 
 
+def _build_npm_bundle(manifest_bytes: bytes, lock_bytes: bytes) -> tuple[_OwnedBundle, int]:
+    inputs = validate_npm_pair(manifest_bytes, lock_bytes)
+    bundle, _manifest, temporary = fetch_npm_bundle(inputs, proxy=_PROXY)
+    size = bundle.seek(0, os.SEEK_END)
+    bundle.seek(0)
+    if size > _MAX_BUNDLE_BYTES:
+        bundle.close()
+        temporary.cleanup()
+        raise DependencyBlockedError("npm dependency bundle exceeds its transfer limit")
+    return _OwnedBundle(bundle, temporary), size
+
+
 class _OwnedBundle:
     def __init__(self, file: BinaryIO, temporary: tempfile.TemporaryDirectory[str]) -> None:
         self.file = file
@@ -279,16 +309,28 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             if len(body) != length:
                 raise ValueError("Request body was truncated")
             payload = json.loads(body)
-            if not isinstance(payload, dict) or set(payload) != {"pyproject", "uv_lock"}:
-                raise ValueError("Only pyproject and uv.lock are accepted")
-            if not isinstance(payload["pyproject"], str) or not isinstance(payload["uv_lock"], str):
-                raise ValueError("Dependency fields must be base64 text")
-            pyproject = base64.b64decode(payload["pyproject"], validate=True)
-            lock = base64.b64decode(payload["uv_lock"], validate=True)
-            if not pyproject or len(pyproject) > _MAX_PYPROJECT_BYTES or not lock or len(lock) > _MAX_LOCK_BYTES:
-                self._reply(413, b'{"detail":"Dependency input exceeds its configured limit"}', "application/json")
-                return
-            owned_bundle, size = _build_wheelhouse(pyproject, lock)
+            if not isinstance(payload, dict):
+                raise ValueError("Dependency request must be an object")
+            if set(payload) == {"pyproject", "uv_lock"}:
+                if not isinstance(payload["pyproject"], str) or not isinstance(payload["uv_lock"], str):
+                    raise ValueError("Dependency fields must be base64 text")
+                project_bytes = base64.b64decode(payload["pyproject"], validate=True)
+                lock_bytes = base64.b64decode(payload["uv_lock"], validate=True)
+                if not project_bytes or len(project_bytes) > _MAX_PYPROJECT_BYTES or not lock_bytes or len(lock_bytes) > _MAX_LOCK_BYTES:
+                    self._reply(413, b'{"detail":"Dependency input exceeds its configured limit"}', "application/json")
+                    return
+                owned_bundle, size = _build_wheelhouse(project_bytes, lock_bytes)
+            elif set(payload) == {"package_json", "package_lock"}:
+                if not isinstance(payload["package_json"], str) or not isinstance(payload["package_lock"], str):
+                    raise ValueError("Dependency fields must be base64 text")
+                manifest = base64.b64decode(payload["package_json"], validate=True)
+                lock_bytes = base64.b64decode(payload["package_lock"], validate=True)
+                if not manifest or len(manifest) > _MAX_NPM_MANIFEST_BYTES or not lock_bytes or len(lock_bytes) > _MAX_NPM_LOCK_BYTES:
+                    self._reply(413, b'{"detail":"Dependency input exceeds its configured limit"}', "application/json")
+                    return
+                owned_bundle, size = _build_npm_bundle(manifest, lock_bytes)
+            else:
+                raise ValueError("Only supported root npm or Python dependency pairs are accepted")
             self.send_response(200)
             self.send_header("Content-Type", "application/x-tar")
             self.send_header("Content-Length", str(size))

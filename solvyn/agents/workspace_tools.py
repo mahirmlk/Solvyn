@@ -15,6 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from solvyn.config import settings
 from solvyn.db.models import Approval, Project, Task, TaskHandoff, TaskWorkspace, TeammatePermission, TeammateProfile, TeammateToolInvocation, VerificationRun
 from solvyn.llm.providers.base import LLMResponse
+from solvyn.sandbox.profiles import PYTHON_COMMANDS as _DEFAULT_VERIFICATION_COMMANDS
+from solvyn.sandbox.profiles import command_for_profile
 from solvyn.sandbox.workspaces import ManagedWorkspace, WorkspaceError, WorkspaceManager, safe_relative_path
 from solvyn.workflows.task_completion import refresh_task_completion_state, require_task_review
 
@@ -23,35 +25,6 @@ _MAX_READ_BYTES = 64 * 1024
 _MAX_WRITE_BYTES = 256 * 1024
 _MAX_LIST_FILES = 200
 _MAX_SEARCH_QUERY_CHARS = 200
-_DEFAULT_VERIFICATION_COMMANDS = {
-    "test": ["pytest", "-q"],
-    "build": ["python", "-m", "compileall", "-q", "."],
-    "lint": ["ruff", "check", "."],
-    "typecheck": ["mypy", "."],
-    "security": [
-        "python",
-        "/opt/solvyn/scan_secrets.py",
-        "gitleaks",
-        "dir",
-        "--config",
-        "/opt/solvyn/gitleaks.toml",
-        "--gitleaks-ignore-path",
-        "/opt/solvyn/gitleaks.ignore",
-        "--ignore-gitleaks-allow",
-        "--redact=100",
-        "--no-banner",
-        "--no-color",
-        "--max-target-megabytes",
-        "128",
-        "--timeout",
-        "90",
-        "--exit-code",
-        "1",
-        "/workspace",
-    ],
-    "documentation": ["python", "/opt/solvyn/verify_markdown.py", "/workspace"],
-}
-
 GenerateOnce = Callable[..., Awaitable[Any]]
 
 
@@ -517,7 +490,10 @@ class TeammateWorkspaceToolRuntime:
                 await self.db.commit()
 
     async def _run_verification(self, kind: str, workspace: ManagedWorkspace) -> dict[str, Any]:
-        command = _DEFAULT_VERIFICATION_COMMANDS[kind]
+        try:
+            command = command_for_profile(workspace.path, kind)
+        except Exception as exc:
+            raise ToolDeniedError("verification_profile_unsupported") from exc
         task_result = await self.db.execute(
             select(Task).where(Task.id == self.task_id, Task.tenant_id == self.tenant_id)
         )

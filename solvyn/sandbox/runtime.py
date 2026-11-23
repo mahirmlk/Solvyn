@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import re
 import stat
@@ -29,6 +30,7 @@ from solvyn.sandbox.dependencies import (
     discover_dependency_inputs,
 )
 from solvyn.sandbox.dependency_client import DependencyBundle, fetch_dependency_bundle
+from solvyn.sandbox.npm_dependencies import MAX_BUNDLE_BYTES as _MAX_NPM_BUNDLE_BYTES
 from solvyn.sandbox.workspaces import (
     ManagedWorkspace,
     WorkspaceError,
@@ -37,10 +39,20 @@ from solvyn.sandbox.workspaces import (
 )
 
 _CONTAINER_ID = re.compile(r"^[a-f0-9]{12,64}$")
+_NODE_VERSION = "v22.23.3"
+_NPM_VERSION = "10.9.9"
+_NODE_TOOLCHAIN_COMMANDS = {"node", "nodejs", "npm", "npx", "corepack"}
 
 
 class SandboxRuntimeError(RuntimeError):
     """The isolated runtime could not safely start or complete a job."""
+
+
+def _uses_node_toolchain(argv: Sequence[str]) -> bool:
+    """Detect direct Node/npm launchers before an unverified workspace can run."""
+    executable = argv[0].replace("\\", "/").casefold()
+    basename = executable.rsplit("/", 1)[-1].removesuffix(".exe")
+    return basename in _NODE_TOOLCHAIN_COMMANDS or "/node_modules/.bin/" in f"/{executable}"
 
 
 @dataclass(frozen=True)
@@ -157,6 +169,9 @@ class DockerSandboxRunner:
         if size > self.limits.workspace_bytes:
             raise WorkspaceError("Workspace exceeds the execution size limit")
 
+        # Keep the review digest bound to the exact workspace tree, including
+        # any caller-provided node_modules files; npm execution never stages
+        # those files and receives only the verified dependency bundle.
         source_fingerprint = self.workspaces.fingerprint(workspace)
         dependency_bundle: DependencyBundle | None = None
         if install_dependencies:
@@ -170,6 +185,12 @@ class DockerSandboxRunner:
             except (DependencyBlockedError, OSError, ValueError) as exc:
                 raise SandboxRuntimeError(f"Dependency setup is blocked: {exc}") from exc
 
+        is_npm = dependency_bundle is not None and dependency_bundle.node_modules_dir is not None
+        if _uses_node_toolchain(argv) and not is_npm:
+            if dependency_bundle is not None:
+                dependency_bundle.close()
+            raise SandboxRuntimeError("Node/npm commands require a verified root package.json/package-lock.json bundle")
+
         run_id = uuid.uuid4()
         container_name = f"solvyn-sandbox-{run_id.hex}"
         started = time.monotonic()
@@ -177,7 +198,14 @@ class DockerSandboxRunner:
         cleanup_needed = False
         exec_result = _CommandResult(125, b"", b"Sandbox did not run")
         try:
-            created = await self._cli(self._create_args(container_name, install_dependencies=dependency_bundle is not None), timeout=self.cli_timeout_seconds)
+            created = await self._cli(
+                self._create_args(
+                    container_name,
+                    install_dependencies=dependency_bundle is not None,
+                    npm_dependencies=is_npm,
+                ),
+                timeout=self.cli_timeout_seconds,
+            )
             cleanup_needed = created.returncode == 0 or created.timed_out
             container_id = created.stdout.decode("ascii", errors="ignore").strip()
             if created.returncode != 0 or not _CONTAINER_ID.fullmatch(container_id):
@@ -189,21 +217,56 @@ class DockerSandboxRunner:
 
             await self._stage_workspace(container_id, workspace)
             if dependency_bundle is not None:
-                await self._stage_dependency_bundle(container_id, dependency_bundle)
-                await self._install_dependencies(container_id)
+                if is_npm:
+                    await self._stage_npm_dependencies(container_id, dependency_bundle)
+                    evidence = dependency_bundle.evidence
+                    node_identity = await self._target_node_identity(container_id)
+                    dependency_bundle.evidence = DependencyEvidence(
+                        evidence.lock_sha256,
+                        evidence.wheelhouse_sha256,
+                        evidence.package_count,
+                        evidence.wheelhouse_bytes,
+                        node_identity["runtime_fingerprint"],
+                        evidence.uv_version,
+                        evidence.pip_version,
+                        "npm",
+                        node_identity["runtime_version"],
+                        node_identity["installer_version"],
+                        node_identity["runtime_platform"],
+                        node_identity["runtime_architecture"],
+                    )
+                    await self._validate_npm_dependency_tree(container_id)
+                else:
+                    await self._stage_dependency_bundle(container_id, dependency_bundle)
+                    await self._install_dependencies(container_id)
                 if self.workspaces.fingerprint(workspace) != source_fingerprint:
                     raise SandboxRuntimeError("Dependency setup changed the source workspace")
 
-            permissions_set = await self._cli(
-                ["exec", "--user", "0", container_id, "chmod", "-R", "a+rwX", "/workspace"],
-                timeout=self.cli_timeout_seconds,
-            )
+            if is_npm:
+                permission_command = [
+                    "exec", "--user", "0", container_id, "find", "/workspace",
+                    "-path", "/workspace/node_modules", "-prune", "-o",
+                    "-exec", "chmod", "a+rwX", "{}", "+",
+                ]
+            else:
+                permission_command = ["exec", "--user", "0", container_id, "chmod", "-R", "a+rwX", "/workspace"]
+            permissions_set = await self._cli(permission_command, timeout=self.cli_timeout_seconds)
             if permissions_set.returncode != 0:
                 raise SandboxRuntimeError("Docker failed to prepare the workspace")
 
             run_arguments = ["exec"]
             if dependency_bundle is not None:
-                run_arguments.extend(["--env", "PYTHONPATH=/deps/site-packages:/workspace"])
+                if is_npm:
+                    run_arguments.extend([
+                        "--env", "NODE_PATH=/workspace/node_modules",
+                        "--env", "npm_config_offline=true",
+                        "--env", "npm_config_ignore_scripts=true",
+                        "--env", "npm_config_audit=false",
+                        "--env", "npm_config_fund=false",
+                        "--env", "npm_config_cache=/tmp/npm-cache",
+                    ])
+                else:
+                    run_arguments.extend(["--env", "PYTHONPATH=/deps/site-packages:/workspace"])
             run_arguments.extend([container_id, *argv])
             exec_result = await self._cli(
                 run_arguments,
@@ -236,7 +299,7 @@ class DockerSandboxRunner:
             dependency_evidence=dependency_bundle.evidence if dependency_bundle is not None else None,
         )
 
-    def _create_args(self, name: str, *, install_dependencies: bool = False) -> list[str]:
+    def _create_args(self, name: str, *, install_dependencies: bool = False, npm_dependencies: bool = False) -> list[str]:
         limits = self.limits
         tmp_size = f"{limits.tmp_bytes}"
         workspace_size = f"{limits.workspace_bytes}"
@@ -272,7 +335,8 @@ class DockerSandboxRunner:
             f"/tmp:rw,noexec,nosuid,nodev,size={tmp_size},nr_inodes=2048",
             "--tmpfs",
             f"/workspace:rw,nosuid,nodev,size={workspace_size},nr_inodes=10000",
-            *(["--tmpfs", "/deps:rw,nosuid,nodev,size=1536m,uid=10001,gid=10001,nr_inodes=100000"] if install_dependencies else []),
+            *(["--tmpfs", "/deps:rw,nosuid,nodev,size=1536m,uid=10001,gid=10001,nr_inodes=100000"] if install_dependencies and not npm_dependencies else []),
+            *(["--tmpfs", "/workspace/node_modules:rw,nosuid,nodev,size=768m,uid=10001,gid=10001,nr_inodes=100000"] if npm_dependencies else []),
             "--workdir",
             "/workspace",
             "--env",
@@ -310,7 +374,11 @@ class DockerSandboxRunner:
                 detail = detail.replace(path, "<workspace>")
         return detail[:300]
 
-    def _create_workspace_archive(self, workspace: ManagedWorkspace, archive: BinaryIO) -> int:
+    def _create_workspace_archive(
+        self,
+        workspace: ManagedWorkspace,
+        archive: BinaryIO,
+    ) -> int:
         """Build a bounded tar containing only validated regular workspace files."""
         bounded = _BoundedArchiveWriter(
             archive,
@@ -318,6 +386,9 @@ class DockerSandboxRunner:
         )
         with tarfile.open(fileobj=cast(BinaryIO, bounded), mode="w") as tar:
             for path in sorted(workspace.path.rglob("*")):
+                relative = path.relative_to(workspace.path).as_posix()
+                if "node_modules" in path.relative_to(workspace.path).parts:
+                    continue
                 metadata = path.lstat()
                 if stat.S_ISLNK(metadata.st_mode):
                     raise SandboxRuntimeError("Workspace contains an unsupported filesystem entry")
@@ -325,7 +396,6 @@ class DockerSandboxRunner:
                     continue
                 if not stat.S_ISREG(metadata.st_mode):
                     raise SandboxRuntimeError("Workspace contains an unsupported filesystem entry")
-                relative = path.relative_to(workspace.path).as_posix()
                 safe_relative_path(relative)
                 flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
                 descriptor = os.open(path, flags)
@@ -353,6 +423,8 @@ class DockerSandboxRunner:
 
     async def _stage_dependency_bundle(self, container_id: str, bundle: DependencyBundle) -> None:
         """Copy a locally verified archive into the job's separate /deps tmpfs."""
+        if bundle.wheel_dir is None or bundle.requirements_path is None:
+            raise SandboxRuntimeError("Python dependency bundle is incomplete")
         if await self._target_runtime_fingerprint(container_id) != bundle.evidence.runtime_fingerprint:
             raise SandboxRuntimeError("Dependency wheels do not match the sandbox Python ABI or platform")
         with tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode="w+b") as archive:
@@ -405,6 +477,122 @@ class DockerSandboxRunner:
                 detail = self._docker_error_detail(stderr)
                 raise SandboxRuntimeError("Docker failed to stage dependency wheels" + (f": {detail}" if detail else ""))
 
+    async def _target_node_identity(self, container_id: str) -> dict[str, str]:
+        node = await self._cli(["exec", container_id, "node", "--version"], timeout=self.cli_timeout_seconds)
+        npm = await self._cli(["exec", container_id, "npm", "--version"], timeout=self.cli_timeout_seconds)
+        platform_result = await self._cli(
+            ["exec", container_id, "node", "-p", "process.platform + ' ' + process.arch"],
+            timeout=self.cli_timeout_seconds,
+        )
+        node_version = node.stdout.decode("ascii", errors="ignore").strip()
+        npm_version = npm.stdout.decode("ascii", errors="ignore").strip()
+        platform_parts = platform_result.stdout.decode("ascii", errors="ignore").strip().split()
+        if (
+            node.returncode != 0 or npm.returncode != 0 or platform_result.returncode != 0
+            or node.timed_out or npm.timed_out or platform_result.timed_out
+            or node_version != _NODE_VERSION or npm_version != _NPM_VERSION
+            or len(platform_parts) != 2 or platform_parts[0] != "linux"
+            or platform_parts[1] not in {"x64", "arm64"}
+        ):
+            raise SandboxRuntimeError("Sandbox Node/npm runtime or platform does not match the pinned profile")
+        identity = {
+            "node": node_version,
+            "npm": npm_version,
+            "platform": platform_parts[0],
+            "architecture": platform_parts[1],
+        }
+        fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        return {
+            "runtime_fingerprint": fingerprint,
+            "runtime_version": node_version,
+            "installer_version": npm_version,
+            "runtime_platform": platform_parts[0],
+            "runtime_architecture": platform_parts[1],
+        }
+
+    async def _stage_npm_dependencies(self, container_id: str, bundle: DependencyBundle) -> None:
+        """Stage verified package files into a bounded, non-exported node_modules tmpfs."""
+        if bundle.node_modules_dir is None:
+            raise SandboxRuntimeError("npm dependency bundle is incomplete")
+        await self._target_node_identity(container_id)
+        archive = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode="w+b")
+        total = 0
+        try:
+            with tarfile.open(fileobj=archive, mode="w") as tar:
+                for path in sorted(bundle.node_modules_dir.rglob("*"), key=lambda item: item.as_posix()):
+                    info = path.lstat()
+                    if stat.S_ISDIR(info.st_mode):
+                        continue
+                    if not stat.S_ISREG(info.st_mode):
+                        raise SandboxRuntimeError("Verified npm bundle contains an unsupported filesystem entry")
+                    relative = path.relative_to(bundle.node_modules_dir).as_posix()
+                    safe_relative_path(relative)
+                    member = tarfile.TarInfo(f"node_modules/{relative}")
+                    member.type = tarfile.REGTYPE
+                    member.mode = stat.S_IMODE(info.st_mode)
+                    member.size = info.st_size
+                    total += info.st_size
+                    if total > 512 * 1024 * 1024:
+                        raise SandboxRuntimeError("Verified npm dependencies exceed the staging limit")
+                    with path.open("rb") as source:
+                        tar.addfile(member, source)
+            if archive.tell() > _MAX_NPM_BUNDLE_BYTES:
+                raise SandboxRuntimeError("Verified npm archive exceeds its transfer limit")
+            archive.seek(0)
+            proc = await asyncio.create_subprocess_exec(
+                *self.docker_command,
+                "exec", "-i", container_id, "tar", "-x", "--no-same-owner", "--no-same-permissions", "-C", "/workspace",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env={"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "")},
+            )
+            assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+            stdout_task = asyncio.create_task(self._read_bounded(proc.stdout, 16 * 1024))
+            stderr_task = asyncio.create_task(self._read_bounded(proc.stderr, 16 * 1024))
+            copy_task = asyncio.create_task(self._copy_archive(cast(BinaryIO, archive), proc.stdin))
+            try:
+                await asyncio.wait_for(copy_task, timeout=self.cli_timeout_seconds)
+                proc.stdin.close()
+                try:
+                    await proc.stdin.wait_closed()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                await asyncio.wait_for(proc.wait(), timeout=self.cli_timeout_seconds)
+            except (TimeoutError, asyncio.CancelledError) as exc:
+                proc.kill()
+                await proc.wait()
+                await asyncio.gather(copy_task, stdout_task, stderr_task, return_exceptions=True)
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                raise SandboxRuntimeError("npm dependency staging timed out") from exc
+            _, _ = await stdout_task
+            stderr, _ = await stderr_task
+            if proc.returncode != 0:
+                detail = self._docker_error_detail(stderr)
+                raise SandboxRuntimeError("Docker failed to stage npm dependencies" + (f": {detail}" if detail else ""))
+        finally:
+            archive.close()
+
+    async def _validate_npm_dependency_tree(self, container_id: str) -> None:
+        """Use pinned npm's semver resolver offline before running the approved script."""
+        result = await self._cli(
+            [
+                "exec", "--workdir", "/workspace",
+                "--env", "npm_config_offline=true",
+                "--env", "npm_config_ignore_scripts=true",
+                "--env", "npm_config_audit=false",
+                "--env", "npm_config_fund=false",
+                "--env", "npm_config_cache=/tmp/npm-cache",
+                container_id,
+                "npm", "ls", "--all", "--json", "--offline", "--ignore-scripts", "--no-audit", "--no-fund",
+            ],
+            timeout=30,
+            output_limit=1024 * 1024,
+        )
+        if result.returncode != 0 or result.timed_out or result.truncated:
+            raise SandboxRuntimeError("npm dependency graph is incomplete or does not satisfy its locked manifest")
+
     async def _target_runtime_fingerprint(self, container_id: str) -> str:
         script = (
             "import hashlib,json,platform,sys,sysconfig; "
@@ -456,10 +644,17 @@ class DockerSandboxRunner:
         if installed.returncode != 0 or installed.timed_out:
             raise SandboxRuntimeError("Offline dependency installation failed")
 
-    async def _stage_workspace(self, container_id: str, workspace: ManagedWorkspace) -> None:
+    async def _stage_workspace(
+        self,
+        container_id: str,
+        workspace: ManagedWorkspace,
+    ) -> None:
         """Stream workspace bytes to tar in the container without using docker cp."""
         with tempfile.TemporaryFile() as archive:
-            self._create_workspace_archive(workspace, cast(BinaryIO, archive))
+            self._create_workspace_archive(
+                workspace,
+                cast(BinaryIO, archive),
+            )
             proc = await asyncio.create_subprocess_exec(
                 *self.docker_command,
                 "exec",
@@ -481,7 +676,7 @@ class DockerSandboxRunner:
             assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
             stdout_task = asyncio.create_task(self._read_bounded(proc.stdout, 16 * 1024))
             stderr_task = asyncio.create_task(self._read_bounded(proc.stderr, 16 * 1024))
-            copy_task = asyncio.create_task(self._copy_archive(archive, proc.stdin))
+            copy_task = asyncio.create_task(self._copy_archive(cast(BinaryIO, archive), proc.stdin))
             try:
                 try:
                     await asyncio.wait_for(copy_task, timeout=self.cli_timeout_seconds)
@@ -571,7 +766,11 @@ class DockerSandboxRunner:
                 truncated = True
         return bytes(chunks), truncated
 
-    async def _export_workspace(self, container_id: str, workspace: ManagedWorkspace) -> None:
+    async def _export_workspace(
+        self,
+        container_id: str,
+        workspace: ManagedWorkspace,
+    ) -> None:
         proc = await asyncio.create_subprocess_exec(
             *self.docker_command,
             "exec",
@@ -581,6 +780,8 @@ class DockerSandboxRunner:
             "-c",
             "-C",
             "/workspace",
+            "--exclude=node_modules",
+            "--exclude=./node_modules",
             ".",
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,

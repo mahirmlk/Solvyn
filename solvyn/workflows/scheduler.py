@@ -328,18 +328,20 @@ async def _queue_due_maintenance_events(db: AsyncSession) -> int:
                     action = "blocked"
                 else:
                     task, workspace_record, handoff, teammate = target
-                    from solvyn.api.v1.verification import _DEFAULT_VERIFICATION_COMMANDS, VerificationKind, _workspace_manager
+                    from solvyn.api.v1.verification import VerificationKind, _workspace_manager
                     from solvyn.config import settings
+                    from solvyn.sandbox.dependencies import DependencyBlockedError
+                    from solvyn.sandbox.profiles import command_for_profile
                     from solvyn.sandbox.workspaces import WorkspaceError
 
                     # The API validator and database constraint bound this persisted value.
                     verification_kind = cast(VerificationKind, schedule.verification_kind)
-                    command = _DEFAULT_VERIFICATION_COMMANDS[verification_kind]
                     manager = _workspace_manager()
                     try:
                         workspace = manager.get(workspace_record.id)
                         source_digest = manager.fingerprint(workspace)
-                    except (WorkspaceError, OSError, ValueError):
+                        command = command_for_profile(workspace.path, verification_kind)
+                    except (WorkspaceError, DependencyBlockedError, OSError, ValueError):
                         outcome = "workspace_unavailable"
                         status = "blocked"
                         action = "blocked"

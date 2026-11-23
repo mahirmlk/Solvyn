@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
@@ -708,6 +709,7 @@ async def test_dependency_schedule_repository_cap_is_incomplete_and_skips_partia
 )
 async def test_due_verification_schedule_requests_profile_with_real_approval(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     maintenance_type: str,
     verification_kind: str,
 ) -> None:
@@ -777,7 +779,7 @@ async def test_due_verification_schedule_requests_profile_with_real_approval(
 
     class WorkspaceManager:
         def get(self, _workspace_id: uuid.UUID) -> object:
-            return object()
+            return SimpleNamespace(path=tmp_path)
 
         def fingerprint(self, _workspace: object) -> str:
             return digest

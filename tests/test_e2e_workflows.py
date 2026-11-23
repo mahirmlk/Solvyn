@@ -1378,6 +1378,28 @@ async def test_task_verification_is_sandboxed_and_durable(
     assert child_run.redriven_from_run_id == dead_letter_id
     assert child_attempts == [("finished", "passed"), ("started", "running")]
 
+    npm_manifest = {
+        "name": "profile-fixture", "version": "1.0.0",
+        "scripts": {"test": "node test.js"},
+    }
+    npm_lock = {
+        "name": "profile-fixture", "version": "1.0.0", "lockfileVersion": 3,
+        "packages": {"": {"name": "profile-fixture", "version": "1.0.0"}},
+    }
+    manager.write_file(managed_workspace, "package.json", json.dumps(npm_manifest).encode())
+    manager.write_file(managed_workspace, "package-lock.json", json.dumps(npm_lock).encode())
+    custom_npm_command = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs",
+        json={"kind": "test", "command": ["pytest", "-q"]},
+    )
+    assert custom_npm_command.status_code == 422
+    npm_profile = await client.post(
+        f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs",
+        json={"kind": "test"},
+    )
+    assert npm_profile.status_code == 202, npm_profile.text
+    assert npm_profile.json()["verification_run"]["command"] == ["npm", "run", "test"]
+
     async with async_session_factory() as db:
         await bind_tenant_scope(db, tenant.id)
         source_task = await db.get(Task, uuid.UUID(task_id))
