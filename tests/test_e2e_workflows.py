@@ -1386,8 +1386,8 @@ async def test_task_verification_is_sandboxed_and_durable(
         "name": "profile-fixture", "version": "1.0.0", "lockfileVersion": 3,
         "packages": {"": {"name": "profile-fixture", "version": "1.0.0"}},
     }
-    workspace_manager.write_file(managed, "package.json", json.dumps(npm_manifest).encode())
-    workspace_manager.write_file(managed, "package-lock.json", json.dumps(npm_lock).encode())
+    manager.write_file(managed_workspace, "package.json", json.dumps(npm_manifest).encode())
+    manager.write_file(managed_workspace, "package-lock.json", json.dumps(npm_lock).encode())
     custom_npm_command = await client.post(
         f"/api/v1/workflows/executions/{execution_id}/tasks/{task_id}/verification-runs",
         json={"kind": "test", "command": ["pytest", "-q"]},

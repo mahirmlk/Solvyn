@@ -227,7 +227,11 @@ class DockerSandboxRunner:
                     raise SandboxRuntimeError("Dependency setup changed the source workspace")
 
             permissions_set = await self._cli(
-                ["exec", "--user", "0", container_id, "chmod", "-R", "a+rwX", "/workspace"],
+                [
+                    "exec", "--user", "0", container_id, "find", "/workspace",
+                    "-path", "/workspace/node_modules", "-prune", "-o",
+                    "-exec", "chmod", "a+rwX", "{}", "+",
+                ],
                 timeout=self.cli_timeout_seconds,
             )
             if permissions_set.returncode != 0:
