@@ -98,7 +98,7 @@ async def test_npm_profile_runs_offline_and_keeps_node_modules_out_of_workspace(
     assert "passed" in (workspace.path / "profile-result.txt").read_text(encoding="utf-8")
     injected = workspace.path / "node_modules" / "demo" / "injected.js"
     assert injected.read_text(encoding="utf-8") == "module.exports='unverified injected file';\n"
-    assert sorted(path.name for path in injected.parent.iterdir()) == ["injected.js"]
+    assert sorted(path.name for path in injected.parent.iterdir()) == ["injected.js", "package.json"]
     assert result.dependency_evidence is not None
     assert result.dependency_evidence.ecosystem == "npm"
     assert result.dependency_evidence.runtime_version == "v22.23.3"

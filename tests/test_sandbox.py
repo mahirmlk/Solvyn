@@ -284,7 +284,10 @@ async def test_runner_applies_container_policy_and_returns_workspace_changes(tmp
     ]
     assert calls[3] == ["exec", "--user", "0", "a" * 64, "chmod", "-R", "a+rwX", "/workspace"]
     assert calls[4] == ["exec", "a" * 64, "python", "-c", "print('safe')"]
-    assert calls[5] == ["exec", "-i", "a" * 64, "tar", "-c", "-C", "/workspace", "."]
+    assert calls[5] == [
+        "exec", "-i", "a" * 64, "tar", "-c", "-C", "/workspace",
+        "--exclude=node_modules", "--exclude=./node_modules", ".",
+    ]
     assert not any(call[0] == "cp" for call in calls)
     assert calls[-1][:2] == ["rm", "--force"]
     assert calls[-1][2].startswith("solvyn-sandbox-")
