@@ -458,7 +458,7 @@ async def test_webhook_persists_one_triage_event_per_connected_project() -> None
                 return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: list(self.tenant_ids)))
             if self.execute_count in {2, 3}:
                 tenant_id = self.tenant_ids[self.execute_count - 2]
-                matches = [(uuid.uuid4(), uuid.uuid4(), tenant_id)]
+                matches = [(uuid.uuid4(), uuid.uuid4(), tenant_id, uuid.uuid4())]
                 return SimpleNamespace(all=lambda: matches)
             return SimpleNamespace(scalar_one_or_none=lambda: None)
 
