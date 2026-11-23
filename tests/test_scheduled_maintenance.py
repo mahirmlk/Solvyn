@@ -333,6 +333,9 @@ async def test_dependency_schedule_records_open_alerts_and_marks_partial_scan_in
         def all(self) -> list[object]:
             return self.values
 
+        def scalar_one_or_none(self) -> object | None:
+            return self.values[0] if self.values else None
+
     class StubDB:
         def __init__(self) -> None:
             self.execute_count = 0
@@ -349,8 +352,9 @@ async def test_dependency_schedule_records_open_alerts_and_marks_partial_scan_in
                 return Results([repository])
             return Results([])
 
-        def add(self, event: ProactiveEvent) -> None:
-            self.added.append(event)
+        def add(self, event: object) -> None:
+            if isinstance(event, ProactiveEvent):
+                self.added.append(event)
 
         async def commit(self) -> None:
             self.commits += 1
@@ -549,6 +553,21 @@ async def test_dependency_schedule_deduplicates_alert_already_recorded_by_webhoo
     alert = {"number": 73, "state": "open",
         "updated_at": "2026-11-21T10:00:00Z", "security_advisory": {"severity": "high"}}
     webhook_source_id = "dependabot_alert:octo/repo:73:created"
+    webhook_event = ProactiveEvent(
+        id=uuid.uuid4(),
+        organization_id=organization_id,
+        project_id=project_id,
+        delivery_id=str(uuid.uuid4()),
+        source_event_id=webhook_source_id,
+        event_type="dependabot_alert",
+        action="created",
+        repository_name="octo/repo",
+        workflow_name="Existing alert",
+        conclusion="high",
+        branch="",
+        details_url="https://github.com/octo/repo/security/dependabot/73",
+        status="pending",
+    )
 
     class Results:
         def __init__(self, values: list[object]) -> None:
@@ -559,6 +578,9 @@ async def test_dependency_schedule_deduplicates_alert_already_recorded_by_webhoo
 
         def all(self) -> list[object]:
             return self.values
+
+        def scalar_one_or_none(self) -> object | None:
+            return self.values[0] if self.values else None
 
     class StubDB:
         def __init__(self) -> None:
@@ -573,10 +595,15 @@ async def test_dependency_schedule_deduplicates_alert_already_recorded_by_webhoo
                 return Results([schedule])
             if self.execute_count == 3:
                 return Results([repository])
-            return Results([webhook_source_id])
+            if self.execute_count == 4:
+                return Results([])
+            if self.execute_count == 5:
+                return Results([webhook_event])
+            return Results([])
 
-        def add(self, event: ProactiveEvent) -> None:
-            self.added.append(event)
+        def add(self, event: object) -> None:
+            if isinstance(event, ProactiveEvent):
+                self.added.append(event)
 
         async def commit(self) -> None:
             return None
