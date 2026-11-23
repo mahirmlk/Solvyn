@@ -13,7 +13,11 @@ class RepositoryProvider(Protocol):
     async def repository_metadata(self, full_name: str) -> dict[str, Any]: ...
 
     async def list_dependabot_alerts(
-        self, full_name: str, *, max_pages: int = 5
+        self,
+        full_name: str,
+        *,
+        max_pages: int = 5,
+        states: tuple[str, ...] = ("open",),
     ) -> tuple[list[dict[str, Any]], bool]: ...
 
     async def branch_commit(self, full_name: str, branch: str) -> str: ...
