@@ -1115,4 +1115,3 @@ class GitHubClient(RepositoryProvider):
             "sqlalchemy": "SQLAlchemy",
         }
         return sorted({label for name, label in known.items() if name in names})
-

@@ -690,4 +690,3 @@ async def acknowledge_proactive_event(
     await db.refresh(event)
     states = await _work_item_state_for_events(db, organization_id, [event])
     return _event_dict_with_state(event, states)
-

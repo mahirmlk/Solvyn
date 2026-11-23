@@ -119,4 +119,3 @@ def dependabot_alert_signal(
         "provider_updated_at": provider_updated_at,
         "notify": lifecycle_state == "open",
     }
-

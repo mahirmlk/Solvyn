@@ -725,4 +725,3 @@ async def run_scheduled_workflows() -> None:
             await _write_worker_heartbeat("stopped")
         except Exception:
             logger.exception("Unable to mark workflow worker as stopped")
-
