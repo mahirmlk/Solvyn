@@ -157,7 +157,13 @@ async def record_dependabot_alert(
         and marker >= state.provider_updated_at
         and (last_reopen_marker is None or marker > last_reopen_marker)
     )
-    recovered_reopen = source == "poll" and newer_marker and event.status in {"acknowledged", "resolved"}
+    recovered_reopen = (
+        source == "poll"
+        and newer_marker
+        and previous_lifecycle_state is not None
+        and previous_lifecycle_state != "open"
+        and event.status in {"acknowledged", "resolved"}
+    )
     distinct_reopen = explicit_reopen or recovered_reopen
     if distinct_reopen:
         state.last_reopen_marker = marker
@@ -187,4 +193,3 @@ def polling_delivery_id(source_event_id: str, marker: datetime) -> str:
     revision = marker.isoformat()
     digest = hashlib.sha256(f"{source_event_id}:{revision}".encode()).hexdigest()
     return f"dependabot-poll:{digest}"
-
