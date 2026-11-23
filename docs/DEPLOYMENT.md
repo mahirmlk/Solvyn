@@ -453,30 +453,25 @@ curl -X POST http://prometheus:9090/-/reload
 ### Pipeline Stages
 
 ```
-Push/PR to main
+Pull request
     │
-    ├──► 1. lint (parallel)
-    │       ├── ruff check solvyn/
-    │       └── mypy solvyn/ --ignore-missing-imports
+    ├──► lint + frontend audit + tests + tracing smoke
+    └──► build API and frontend images (without publishing)
+
+Main push / workflow dispatch from main
     │
-    ├──► 2. test (parallel with lint, needs lint to pass)
-    │       ├── PostgreSQL service container (pgvector/pgvector:pg16)
-    │       ├── Redis service container (redis:7-alpine)
-    │       └── pytest tests/ -v --cov=solvyn
-    │
-    ├──► 3. build (main branch only)
-    │       ├── Docker build + push API image → ghcr.io
-    │       └── Docker build + push Frontend image → ghcr.io
-    │
-    ├──► 4. deploy-staging (main branch only)
-    │       ├── Environment: staging
-    │       ├── kubectl set image (API + Frontend)
-    │       └── kubectl rollout status (5min timeout)
-    │
-    └──► 5. deploy-prod (manual workflow dispatch + protected environment)
-            ├── Environment: production
-            ├── kubectl set image (API + Frontend, prod namespace)
-            └── kubectl rollout status (5min timeout)
+    ├──► lint + frontend audit + tests + tracing smoke
+    ├──► build and publish API + frontend images
+    └──► deploy-staging (workflow dispatch only, when deploy_staging=true)
+            ├── run migrations, then update API + Frontend
+            └── wait for both rollouts (5min timeout)
+
+Production deployment
+    └──► deploy-prod (workflow dispatch only, when both deployment inputs are true)
+            ├── requires deploy-staging to succeed in the same run
+            ├── Environment: production (configure required reviewers)
+            ├── run migrations, then update API + Frontend
+            └── wait for both rollouts (5min timeout)
 ```
 
 ### Image Tagging
@@ -503,13 +498,13 @@ Create the kubeconfig secret for each GitHub Environment with a command such as 
 
 | Aspect | Staging | Production |
 |--------|---------|------------|
-| **Trigger** | Automatic on main push | Manual workflow dispatch with `deploy_production` enabled, after staging succeeds |
+| **Trigger** | Manual workflow dispatch from `main` with `deploy_staging` enabled | Same dispatch with both `deploy_staging` and `deploy_production` enabled; requires staging to succeed in that run |
 | **Environment** | `staging` | `production` |
 | **Namespace** | `solvyn` | `solvyn-prod` |
 | **Deployment** | `kubectl set image` + `rollout status` | `kubectl set image` + `rollout status` |
-| **Approval** | None (auto-deploy) | Configure required reviewers and deployment branch restrictions in the GitHub `production` Environment settings |
+| **Approval** | Workflow dispatch is required; GitHub Environment reviewers are optional | Configure required reviewers and deployment branch restrictions in the GitHub `production` Environment settings |
 
-The workflow does not implement approval by printing a message. Production runs only when a maintainer manually dispatches the workflow from `main` with `deploy_production` enabled. GitHub Environment protection rules must be configured separately to require human approval before the production job receives its secret and starts.
+Main pushes still run lint, frontend audit, tests, tracing smoke, and image publication; they do not deploy. Staging runs only when a maintainer manually dispatches the workflow from `main` with `deploy_staging` enabled. Production additionally requires both dispatch inputs to be enabled, staging to succeed in that same run, and the protected production environment. GitHub Environment protection rules must be configured separately to require human approval before the production job receives its secret and starts.
 
 > **⚠️ HUMAN INPUT NEEDED**: The CI/CD file assumes separate staging and production Kubernetes namespaces (`solvyn` for staging, `solvyn-prod` for production). Ensure both namespaces exist and have the correct RBAC configured.
 
