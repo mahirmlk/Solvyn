@@ -388,7 +388,7 @@ script_location = solvyn/db/migrations
 sqlalchemy.url = postgresql+asyncpg://solvyn_runtime:solvyn_runtime@localhost:5432/solvyn
 ```
 
-> **⚠️ HUMAN INPUT NEEDED**: No migration is run automatically at startup. For production, add a pre-start script or init container that runs `alembic upgrade head`.
+The API does not run migrations when it starts. In the production Docker Compose stack, the one-shot `migrate` service runs `alembic upgrade head` before the API and worker start. For Kubernetes deployments made through the GitHub Actions workflow, the workflow runs a migration job using the image built for that release before updating the application. For manual deployments, operators must run `alembic upgrade head` as a release step with `MIGRATION_DATABASE_URL` set to the dedicated migration role; do not run migrations with the restricted application role.
 
 ---
 
