@@ -36,6 +36,11 @@ def _pair(
     return json.dumps(manifest).encode(), json.dumps(lock).encode()
 
 
+def test_dependency_fetcher_image_copies_npm_validator_module() -> None:
+    dockerfile = Path("dependency-fetcher.Dockerfile").read_text(encoding="utf-8")
+    assert "solvyn/sandbox/npm_dependencies.py" in dockerfile
+
+
 def test_root_npm_lock_v3_pair_is_accepted() -> None:
     manifest, lock = _pair()
     result = validate_npm_pair(manifest, lock)
