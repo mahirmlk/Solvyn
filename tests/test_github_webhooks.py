@@ -527,7 +527,7 @@ async def test_signed_security_alert_is_persisted_without_secret_material() -> N
                 self.tenant_id = uuid.uuid4()
                 return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [self.tenant_id]))
             if self.execute_count == 2:
-                return SimpleNamespace(all=lambda: [(uuid.uuid4(), uuid.uuid4(), self.tenant_id)])
+                return SimpleNamespace(all=lambda: [(uuid.uuid4(), uuid.uuid4(), self.tenant_id, uuid.uuid4())])
             return SimpleNamespace(scalar_one_or_none=lambda: None)
 
         def add(self, event: ProactiveEvent) -> None:
@@ -669,6 +669,7 @@ def test_dependabot_reopened_webhook_uses_polling_compatible_source_id() -> None
     alert = {
         "number": 73,
         "state": "open",
+        "updated_at": "2026-11-21T10:00:00Z",
         "security_advisory": {"summary": "Prototype pollution", "severity": "high"},
     }
     reopened = _parse_security_alert(
@@ -825,7 +826,7 @@ async def test_signed_github_work_item_is_persisted_as_triage_signal(
                 self.tenant_id = uuid.uuid4()
                 return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [self.tenant_id]))
             if self.execute_count == 2:
-                return SimpleNamespace(all=lambda: [(uuid.uuid4(), uuid.uuid4(), self.tenant_id)])
+                return SimpleNamespace(all=lambda: [(uuid.uuid4(), uuid.uuid4(), self.tenant_id, uuid.uuid4())])
             return SimpleNamespace(scalar_one_or_none=lambda: None)
 
         def add(self, event: Any) -> None:
@@ -889,7 +890,7 @@ async def test_github_work_item_lifecycle_history_is_idempotent_and_does_not_res
             if self.execute_count == 1:
                 return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [tenant_id]))
             if self.execute_count == 2:
-                return SimpleNamespace(all=lambda: [(project_id, organization_id, tenant_id)])
+                return SimpleNamespace(all=lambda: [(project_id, organization_id, tenant_id, uuid.uuid4())])
             if self.execute_count == 3:
                 existing = deliveries.get(self.delivery_id)
                 return SimpleNamespace(scalar_one_or_none=lambda: existing.id if existing else None)
@@ -1009,7 +1010,7 @@ async def test_replayed_workflow_run_with_new_delivery_id_is_deduplicated() -> N
                 self.tenant_id = uuid.uuid4()
                 return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [self.tenant_id]))
             if self.execute_count == 2:
-                return SimpleNamespace(all=lambda: [(uuid.uuid4(), uuid.uuid4(), self.tenant_id)])
+                return SimpleNamespace(all=lambda: [(uuid.uuid4(), uuid.uuid4(), self.tenant_id, uuid.uuid4())])
             return SimpleNamespace(scalar_one_or_none=lambda: self.existing)
 
         def add(self, _event: ProactiveEvent) -> None:
@@ -1065,7 +1066,7 @@ async def test_unique_race_retries_missing_project_event_after_rollback() -> Non
                 self.tenant_id = uuid.uuid4()
                 return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [self.tenant_id]))
             if self.execute_count == 2:
-                return SimpleNamespace(all=lambda: [(project_a, organization_a, self.tenant_id), (project_b, organization_b, self.tenant_id)])
+                return SimpleNamespace(all=lambda: [(project_a, organization_a, self.tenant_id, uuid.uuid4()), (project_b, organization_b, self.tenant_id, uuid.uuid4())])
             if self.execute_count in {3, 4, 5}:
                 return SimpleNamespace(scalar_one_or_none=lambda: None)
             if self.execute_count == 6:
