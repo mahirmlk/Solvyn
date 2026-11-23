@@ -7,8 +7,13 @@ on:
     branches: [main, 'codex/**']
   workflow_dispatch:
     inputs:
+      deploy_staging:
+        description: Deploy the validated commit to staging
+        required: false
+        default: false
+        type: boolean
       deploy_production:
-        description: Deploy the validated commit to production after staging succeeds
+        description: Deploy to production after staging succeeds; requires deploy_staging
         required: false
         default: false
         type: boolean
@@ -226,7 +231,7 @@ jobs:
   deploy-staging:
     runs-on: ubuntu-latest
     needs: [build]
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.deploy_staging
     environment: staging
     steps:
       - uses: actions/checkout@v4
@@ -272,7 +277,7 @@ jobs:
   deploy-prod:
     runs-on: ubuntu-latest
     needs: [build, deploy-staging]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.deploy_production
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.deploy_staging && inputs.deploy_production
     environment: production
     steps:
       - uses: actions/checkout@v4
