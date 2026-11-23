@@ -94,6 +94,22 @@ async def test_close_and_reopen_between_polls_rearms_acknowledged_alert_once() -
 
 
 @pytest.mark.asyncio
+async def test_newer_open_revision_does_not_rearm_acknowledged_alert() -> None:
+    store = _AlertStore()
+    event, created = await _record(store, _alert("2026-11-20T10:00:00Z"))
+    assert created and event is not None
+    event.status = "acknowledged"
+
+    newer_event, created = await _record(store, _alert("2026-11-21T10:00:00Z"))
+
+    assert not created
+    assert newer_event is event
+    assert event.status == "acknowledged"
+    assert event.action == "created"
+    assert store.state is not None and store.state.lifecycle_state == "open"
+
+
+@pytest.mark.asyncio
 async def test_poll_recovers_missed_reopen_webhook_and_late_webhook_does_not_rearm_twice() -> None:
     store = _AlertStore()
     event, created = await _record(store, _alert("2026-11-20T10:00:00Z"))
@@ -301,4 +317,3 @@ def test_resolved_alert_webhook_updates_lifecycle_without_a_new_triage_signal() 
     assert signal is not None
     assert signal["lifecycle_state"] == "dismissed"
     assert signal["notify"] is False
-
