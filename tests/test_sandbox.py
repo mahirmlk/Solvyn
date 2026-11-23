@@ -282,7 +282,11 @@ async def test_runner_applies_container_policy_and_returns_workspace_changes(tmp
         "-C",
         "/workspace",
     ]
-    assert calls[3] == ["exec", "--user", "0", "a" * 64, "chmod", "-R", "a+rwX", "/workspace"]
+    assert calls[3] == [
+        "exec", "--user", "0", "a" * 64, "find", "/workspace",
+        "-path", "/workspace/node_modules", "-prune", "-o", "-exec", "chmod",
+        "a+rwX", "{}", "+",
+    ]
     assert calls[4] == ["exec", "a" * 64, "python", "-c", "print('safe')"]
     assert calls[5] == ["exec", "-i", "a" * 64, "tar", "-c", "-C", "/workspace", "."]
     assert not any(call[0] == "cp" for call in calls)
