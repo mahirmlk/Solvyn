@@ -150,6 +150,10 @@ jobs:
           assert allowed.status == 200
           allowed.close()
 
+          npm_registry = proxy.open("https://registry.npmjs.org/-/ping", timeout=20)
+          assert npm_registry.status == 200
+          npm_registry.close()
+
           try:
               proxy.open("https://example.com/", timeout=10)
           except urllib.error.URLError:

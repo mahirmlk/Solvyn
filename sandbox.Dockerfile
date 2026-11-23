@@ -16,7 +16,13 @@ RUN set -eu; \
     tar --extract --gzip --file /tmp/gitleaks.tar.gz --directory /usr/local/bin gitleaks; \
     rm /tmp/gitleaks.tar.gz
 
+FROM node:22.23.3-bookworm-slim AS node-runtime
+
 FROM python:3.12-slim
+
+COPY --from=node-runtime /usr/local/ /usr/local/
+RUN node --version | grep -Fx 'v22.23.3' \
+    && npm --version | grep -Fx '10.9.9'
 
 RUN apt-get update && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*

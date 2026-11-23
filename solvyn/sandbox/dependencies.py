@@ -16,8 +16,11 @@ import tomllib
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO
+from typing import TYPE_CHECKING, BinaryIO
 from urllib.parse import urlparse
+
+if TYPE_CHECKING:
+    from solvyn.sandbox.npm_dependencies import NpmDependencyInputs
 
 _MAX_LOCK_BYTES = 1 * 1024 * 1024
 _MAX_PYPROJECT_BYTES = 1 * 1024 * 1024
@@ -71,6 +74,7 @@ class DependencyInputs:
     def lock_sha256(self) -> str:
         return hashlib.sha256(self.lock).hexdigest()
 
+
 @dataclass(frozen=True)
 class DependencyEvidence:
     lock_sha256: str
@@ -78,8 +82,31 @@ class DependencyEvidence:
     package_count: int
     wheelhouse_bytes: int
     runtime_fingerprint: str = ""
-    uv_version: str = _UV_VERSION
-    pip_version: str = _PIP_VERSION
+    uv_version: str | None = _UV_VERSION
+    pip_version: str | None = _PIP_VERSION
+    ecosystem: str = "python"
+    runtime_version: str | None = None
+    installer_version: str | None = None
+    runtime_platform: str | None = None
+    runtime_architecture: str | None = None
+
+
+def dependency_evidence_payload(evidence: DependencyEvidence) -> dict[str, object]:
+    """Stable transport shape that avoids Python-only names for npm artifacts."""
+    return {
+        "ecosystem": evidence.ecosystem,
+        "lock_sha256": evidence.lock_sha256,
+        "artifact_sha256": evidence.wheelhouse_sha256,
+        "artifact_bytes": evidence.wheelhouse_bytes,
+        "package_count": evidence.package_count,
+        "environment_fingerprint": evidence.runtime_fingerprint,
+        "uv_version": evidence.uv_version,
+        "pip_version": evidence.pip_version,
+        "runtime_version": evidence.runtime_version,
+        "installer_version": evidence.installer_version,
+        "runtime_platform": evidence.runtime_platform,
+        "runtime_architecture": evidence.runtime_architecture,
+    }
 
 def runtime_fingerprint() -> str:
     identity = {
@@ -164,13 +191,25 @@ def _has_unlocked_python_manifest(workspace: Path, *, allow_root_project_pair: b
     return False
 
 
-def discover_dependency_inputs(workspace: Path, *, required: bool) -> DependencyInputs | None:
+def discover_dependency_inputs(workspace: Path, *, required: bool) -> DependencyInputs | NpmDependencyInputs | None:
     """Return a validated root uv.lock pair.
 
     The required flag is kept for caller compatibility. Dependency setup is skipped
     only when a recursive scan finds no recognized project or package-manager
     manifest. Any detected Python project requires the supported root lock.
     """
+    npm_manifest = workspace / "package.json"
+    npm_lock = workspace / "package-lock.json"
+    if npm_manifest.exists() or npm_lock.exists() or npm_manifest.is_symlink() or npm_lock.is_symlink():
+        if (workspace / "uv.lock").exists() or (workspace / "pyproject.toml").exists():
+            raise DependencyBlockedError("Mixed Python and npm projects are unsupported")
+        for name in _OTHER_LOCKFILES:
+            if name != "package-lock.json" and ((workspace / name).exists() or (workspace / name).is_symlink()):
+                raise DependencyBlockedError("Only root package.json and package-lock.json npm projects are supported")
+        from solvyn.sandbox.npm_dependencies import discover_npm_inputs
+
+        return discover_npm_inputs(workspace)
+
     lock_path = workspace / "uv.lock"
     project_path = workspace / "pyproject.toml"
     if lock_path.exists() or lock_path.is_symlink():

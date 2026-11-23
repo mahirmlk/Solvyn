@@ -53,7 +53,9 @@ from solvyn.repositories.github import GitHubClient, GitHubRepositoryError, _val
 from solvyn.repositories.github_app import GitHubAppClient
 from solvyn.repositories.providers import get_authorized_repository_provider, require_github_app_repository_binding
 from solvyn.repositories.worktree import RepositoryWorktreeError, materialize_repository_worktree, validate_repository_tree
+from solvyn.sandbox.dependencies import DependencyBlockedError, discover_dependency_inputs
 from solvyn.sandbox.factory import create_sandbox_runner
+from solvyn.sandbox.profiles import command_for_profile
 from solvyn.sandbox.remote import RemoteSandboxResult, RemoteSandboxRunner
 from solvyn.sandbox.runtime import DockerSandboxRunner, SandboxResult, SandboxRuntimeError
 from solvyn.sandbox.workspaces import WorkspaceError, WorkspaceManager, safe_relative_path
@@ -674,13 +676,23 @@ def _verification_dict(run: VerificationRun) -> dict[str, Any]:
         "duration_seconds": float(run.duration_seconds) if run.duration_seconds is not None else None,
         "runner_version": run.runner_version,
         "source_digest": run.source_digest,
-        "dependency_lock_sha256": run.dependency_lock_sha256,
+        "dependency_lock_sha256": run.dependency_lock_sha256 or run.dependency_lockfile_sha256,
+        "dependency_lockfile_sha256": run.dependency_lockfile_sha256,
         "dependency_wheelhouse_sha256": run.dependency_wheelhouse_sha256,
         "dependency_runtime_fingerprint": run.dependency_runtime_fingerprint,
         "dependency_uv_version": run.dependency_uv_version,
         "dependency_pip_version": run.dependency_pip_version,
         "dependency_package_count": run.dependency_package_count,
         "dependency_wheelhouse_bytes": run.dependency_wheelhouse_bytes,
+        "dependency_ecosystem": run.dependency_ecosystem or ("python" if run.dependency_lock_sha256 else None),
+        "dependency_artifact_sha256": run.dependency_artifact_sha256 or run.dependency_wheelhouse_sha256,
+        "dependency_artifact_bytes": run.dependency_artifact_bytes or run.dependency_wheelhouse_bytes,
+        "dependency_artifact_package_count": run.dependency_artifact_package_count or run.dependency_package_count,
+        "dependency_environment_fingerprint": run.dependency_environment_fingerprint or run.dependency_runtime_fingerprint,
+        "dependency_runtime_version": run.dependency_runtime_version,
+        "dependency_installer_version": run.dependency_installer_version,
+        "dependency_runtime_platform": run.dependency_runtime_platform,
+        "dependency_runtime_architecture": run.dependency_runtime_architecture,
         "attempt_count": run.attempt_count,
         "attempt_started_at": run.attempt_started_at.isoformat() if run.attempt_started_at else None,
         "started_at": run.started_at.isoformat() if run.started_at else None,
@@ -1261,17 +1273,26 @@ async def run_task_verification(
         raise HTTPException(status_code=404, detail="Task project not found")
     if tenant_context.user_id is not None:
         await require_org_membership(db, project.organization_id, roles=MEMBER_OR_ABOVE)
-    command = payload.command or _DEFAULT_VERIFICATION_COMMANDS[payload.kind]
+    command = payload.command
+    try:
+        workspace = _workspace_manager().get(workspace_record.id)
+        npm_project = (workspace.path / "package.json").exists() or (workspace.path / "package-lock.json").exists()
+        if payload.kind in {"test", "build", "lint", "typecheck"}:
+            discover_dependency_inputs(workspace.path, required=False)
+        profile_command = command_for_profile(workspace.path, payload.kind)
+        if npm_project and command is not None:
+            raise DependencyBlockedError("npm verification accepts only the declared fixed profile command")
+        command = command or profile_command
+        source_digest = _workspace_manager().fingerprint(workspace)
+    except DependencyBlockedError as exc:
+        raise HTTPException(status_code=422, detail=f"Verification profile is unsupported: {exc}") from exc
+    except WorkspaceError as exc:
+        raise HTTPException(status_code=409, detail="Task workspace is missing or invalid") from exc
+    assert command is not None
     if any(not part or "\x00" in part for part in command):
         raise HTTPException(status_code=422, detail="Command arguments must be non-empty strings without NUL bytes")
     if any(len(part.encode("utf-8")) > 4096 for part in command) or sum(len(part.encode("utf-8")) for part in command) > 16_384:
         raise HTTPException(status_code=422, detail="Command arguments exceed the 16 KiB limit")
-
-    try:
-        workspace = _workspace_manager().get(workspace_record.id)
-        source_digest = _workspace_manager().fingerprint(workspace)
-    except WorkspaceError as exc:
-        raise HTTPException(status_code=409, detail="Task workspace is missing or invalid") from exc
 
     run = VerificationRun(
         tenant_id=task.tenant_id,
@@ -1519,6 +1540,17 @@ async def _execute_approved_verification(
                 "completed_at": datetime.now(UTC),
             },
         )
+    dependency_evidence = result.dependency_evidence
+    python_evidence = (
+        dependency_evidence
+        if dependency_evidence is not None and dependency_evidence.ecosystem == "python"
+        else None
+    )
+    npm_evidence = (
+        dependency_evidence
+        if dependency_evidence is not None and dependency_evidence.ecosystem == "npm"
+        else None
+    )
     return await _finish_run(
         db,
         run,
@@ -1531,13 +1563,23 @@ async def _execute_approved_verification(
             "stdout": result.stdout[:_MAX_STORED_OUTPUT_CHARS],
             "stderr": result.stderr[:_MAX_STORED_OUTPUT_CHARS],
             "duration_seconds": result.duration_seconds,
-            "dependency_lock_sha256": result.dependency_evidence.lock_sha256 if result.dependency_evidence else None,
-            "dependency_wheelhouse_sha256": result.dependency_evidence.wheelhouse_sha256 if result.dependency_evidence else None,
-            "dependency_runtime_fingerprint": result.dependency_evidence.runtime_fingerprint if result.dependency_evidence else None,
-            "dependency_uv_version": result.dependency_evidence.uv_version if result.dependency_evidence else None,
-            "dependency_pip_version": result.dependency_evidence.pip_version if result.dependency_evidence else None,
-            "dependency_package_count": result.dependency_evidence.package_count if result.dependency_evidence else None,
-            "dependency_wheelhouse_bytes": result.dependency_evidence.wheelhouse_bytes if result.dependency_evidence else None,
+            "dependency_lock_sha256": python_evidence.lock_sha256 if python_evidence else None,
+            "dependency_lockfile_sha256": npm_evidence.lock_sha256 if npm_evidence else None,
+            "dependency_wheelhouse_sha256": python_evidence.wheelhouse_sha256 if python_evidence else None,
+            "dependency_runtime_fingerprint": python_evidence.runtime_fingerprint if python_evidence else None,
+            "dependency_uv_version": python_evidence.uv_version if python_evidence else None,
+            "dependency_pip_version": python_evidence.pip_version if python_evidence else None,
+            "dependency_package_count": python_evidence.package_count if python_evidence else None,
+            "dependency_wheelhouse_bytes": python_evidence.wheelhouse_bytes if python_evidence else None,
+            "dependency_ecosystem": "npm" if npm_evidence else None,
+            "dependency_artifact_sha256": npm_evidence.wheelhouse_sha256 if npm_evidence else None,
+            "dependency_artifact_bytes": npm_evidence.wheelhouse_bytes if npm_evidence else None,
+            "dependency_artifact_package_count": npm_evidence.package_count if npm_evidence else None,
+            "dependency_environment_fingerprint": npm_evidence.runtime_fingerprint if npm_evidence else None,
+            "dependency_runtime_version": npm_evidence.runtime_version if npm_evidence else None,
+            "dependency_installer_version": npm_evidence.installer_version if npm_evidence else None,
+            "dependency_runtime_platform": npm_evidence.runtime_platform if npm_evidence else None,
+            "dependency_runtime_architecture": npm_evidence.runtime_architecture if npm_evidence else None,
             "completed_at": datetime.now(UTC),
         },
     )

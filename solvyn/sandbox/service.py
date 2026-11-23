@@ -19,6 +19,7 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from solvyn.config import settings
+from solvyn.sandbox.dependencies import dependency_evidence_payload
 from solvyn.sandbox.runtime import DockerSandboxRunner
 from solvyn.sandbox.workspaces import WorkspaceError, WorkspaceManager
 
@@ -107,15 +108,10 @@ def create_sandbox_service(token: str | None = None) -> FastAPI:
                 "stderr": result.stderr,
                 "output_truncated": result.output_truncated,
                 "duration_seconds": result.duration_seconds,
-                "dependency_evidence": ({
-                    "lock_sha256": result.dependency_evidence.lock_sha256,
-                    "wheelhouse_sha256": result.dependency_evidence.wheelhouse_sha256,
-                    "package_count": result.dependency_evidence.package_count,
-                    "wheelhouse_bytes": result.dependency_evidence.wheelhouse_bytes,
-"runtime_fingerprint": result.dependency_evidence.runtime_fingerprint,
-                    "uv_version": result.dependency_evidence.uv_version,
-                    "pip_version": result.dependency_evidence.pip_version,
-                } if result.dependency_evidence is not None else None),
+                "dependency_evidence": (
+                    dependency_evidence_payload(result.dependency_evidence)
+                    if result.dependency_evidence is not None else None
+                ),
             },
         }
 

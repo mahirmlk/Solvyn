@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 import httpx
 
 from solvyn.sandbox.dependencies import DependencyBlockedError, DependencyEvidence, discover_dependency_inputs
+from solvyn.sandbox.npm_dependencies import NpmDependencyInputs
 from solvyn.sandbox.runtime import SandboxRuntimeError
 from solvyn.sandbox.workspaces import ManagedWorkspace, WorkspaceManager
 
@@ -96,44 +97,63 @@ class RemoteSandboxRunner:
         evidence_payload = result.get("dependency_evidence")
         evidence: DependencyEvidence | None = None
         if evidence_payload is not None:
+            expected_keys = {
+                "ecosystem", "lock_sha256", "artifact_sha256", "artifact_bytes", "package_count",
+                "environment_fingerprint", "uv_version", "pip_version", "runtime_version",
+                "installer_version", "runtime_platform", "runtime_architecture",
+            }
+            if not isinstance(evidence_payload, dict) or set(evidence_payload) != expected_keys:
+                raise SandboxRuntimeError("Trusted sandbox runtime returned invalid dependency evidence")
+            ecosystem = evidence_payload.get("ecosystem")
+            hash_keys = ("lock_sha256", "artifact_sha256", "environment_fingerprint")
             if (
-                not isinstance(evidence_payload, dict)
-                or set(evidence_payload)
-                != {
-                    "lock_sha256",
-                    "wheelhouse_sha256",
-                    "package_count",
-                    "wheelhouse_bytes",
-                    "runtime_fingerprint",
-                    "uv_version",
-                    "pip_version",
-                }
-                or any(
-                    not isinstance(evidence_payload.get(key), str) or len(evidence_payload[key]) != 64
-                    for key in ("lock_sha256", "wheelhouse_sha256", "runtime_fingerprint")
-                )
-                or any(char not in "0123456789abcdef" for key in ("lock_sha256", "wheelhouse_sha256", "runtime_fingerprint") for char in evidence_payload[key])
+                ecosystem not in {"python", "npm"}
+                or any(not isinstance(evidence_payload.get(key), str) or len(evidence_payload[key]) != 64 for key in hash_keys)
+                or any(char not in "0123456789abcdef" for key in hash_keys for char in evidence_payload[key])
                 or type(evidence_payload.get("package_count")) is not int
-                or type(evidence_payload.get("wheelhouse_bytes")) is not int
+                or type(evidence_payload.get("artifact_bytes")) is not int
                 or not 1 <= evidence_payload["package_count"] <= 500
-                or not 1 <= evidence_payload["wheelhouse_bytes"] <= 384 * 1024 * 1024
-                or evidence_payload.get("uv_version") != "0.13.7"
-                or evidence_payload.get("pip_version") != "26.3"
+                or not 1 <= evidence_payload["artifact_bytes"] <= 400 * 1024 * 1024
             ):
                 raise SandboxRuntimeError("Trusted sandbox runtime returned invalid dependency evidence")
+            if ecosystem == "python":
+                if (
+                    evidence_payload.get("uv_version") != "0.13.7"
+                    or evidence_payload.get("pip_version") != "26.3"
+                    or any(evidence_payload.get(key) is not None for key in (
+                        "runtime_version", "installer_version", "runtime_platform", "runtime_architecture"
+                    ))
+                ):
+                    raise SandboxRuntimeError("Trusted sandbox runtime returned unsupported Python dependency evidence")
+            elif (
+                evidence_payload.get("uv_version") is not None
+                or evidence_payload.get("pip_version") is not None
+                or evidence_payload.get("runtime_version") != "v22.23.3"
+                or evidence_payload.get("installer_version") != "10.9.9"
+                or evidence_payload.get("runtime_platform") != "linux"
+                or evidence_payload.get("runtime_architecture") not in {"x64", "arm64"}
+            ):
+                raise SandboxRuntimeError("Trusted sandbox runtime returned unsupported npm dependency evidence")
             evidence = DependencyEvidence(
                 evidence_payload["lock_sha256"],
-                evidence_payload["wheelhouse_sha256"],
+                evidence_payload["artifact_sha256"],
                 evidence_payload["package_count"],
-                evidence_payload["wheelhouse_bytes"],
-                evidence_payload["runtime_fingerprint"],
+                evidence_payload["artifact_bytes"],
+                evidence_payload["environment_fingerprint"],
                 evidence_payload["uv_version"],
                 evidence_payload["pip_version"],
+                ecosystem,
+                evidence_payload["runtime_version"],
+                evidence_payload["installer_version"],
+                evidence_payload["runtime_platform"],
+                evidence_payload["runtime_architecture"],
             )
         if expected_inputs is None and evidence is not None:
             raise SandboxRuntimeError("Trusted sandbox runtime reported unexpected dependency evidence")
         if expected_inputs is not None and (
-            evidence is None or evidence.lock_sha256 != expected_inputs.lock_sha256
+            evidence is None
+            or evidence.lock_sha256 != expected_inputs.lock_sha256
+            or evidence.ecosystem != ("npm" if isinstance(expected_inputs, NpmDependencyInputs) else "python")
         ):
             raise SandboxRuntimeError("Trusted sandbox runtime omitted or mismatched dependency evidence")
         self.workspaces.validate_tree(workspace)
