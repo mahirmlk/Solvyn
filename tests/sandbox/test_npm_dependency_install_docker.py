@@ -25,6 +25,21 @@ async def test_npm_profile_runs_offline_and_keeps_node_modules_out_of_workspace(
         pytest.skip("Docker CLI is unavailable")
     manager = WorkspaceManager(tmp_path / "workspaces")
     workspace = manager.create()
+    manager.write_file(workspace, "node_modules/demo/package.json", b'{"name":"demo","version":"1.0.0"}')
+    manager.write_file(workspace, "node_modules/demo/injected.js", b"module.exports='unverified';\n")
+    if not await DockerSandboxRunner(manager, image="solvyn-sandbox:local").check_ready():
+        if os.getenv("SOLVYN_REQUIRE_SANDBOX_IMAGE") == "1":
+            pytest.fail("The required sandbox Docker image is unavailable")
+        pytest.skip("Sandbox Docker image is unavailable")
+    wrapper_result = await DockerSandboxRunner(manager, image="solvyn-sandbox:local").run(
+        workspace,
+        ["sh", "-c", "node -e \"require('demo/injected.js')\""],
+        install_dependencies=False,
+    )
+    assert wrapper_result.exit_code != 0
+    assert "MODULE_NOT_FOUND" in wrapper_result.stderr
+    assert (workspace.path / "node_modules/demo/injected.js").exists()
+
     package = {"name": "demo", "version": "1.0.0", "main": "index.js"}
     package_bytes = json.dumps(package).encode()
     project = {
@@ -75,10 +90,6 @@ async def test_npm_profile_runs_offline_and_keeps_node_modules_out_of_workspace(
         assert base_url == "http://dependency-fetcher:8002"
         return DependencyBundle(temporary, None, None, evidence, node_modules)
 
-    if not await DockerSandboxRunner(manager, image="solvyn-sandbox:local").check_ready():
-        if os.getenv("SOLVYN_REQUIRE_SANDBOX_IMAGE") == "1":
-            pytest.fail("The required sandbox Docker image is unavailable")
-        pytest.skip("Sandbox Docker image is unavailable")
     monkeypatch.setattr("solvyn.sandbox.runtime.discover_dependency_inputs", lambda *_args, **_kwargs: inputs)
     monkeypatch.setattr("solvyn.sandbox.runtime.fetch_dependency_bundle", fake_fetch)
     runner = DockerSandboxRunner(manager, image="solvyn-sandbox:local")

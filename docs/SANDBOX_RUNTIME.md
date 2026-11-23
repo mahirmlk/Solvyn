@@ -28,7 +28,7 @@ The runtime does not clone a full repository or create a Git worktree; it seeds 
 
 ## Locked dependency staging
 
-Trusted user verification supports a root Python `pyproject.toml`/`uv.lock` pair or a root npm `package.json`/version 2 or 3 `package-lock.json` pair. The isolated dependency fetch service validates locks and fetches enumerated artifacts; it does not execute npm or lifecycle scripts. Node.js 22.23.3/npm 10.9.9 is pinned in the sandbox image. npm dependencies are placed on a separate tmpfs outside the source workspace, and a bounded offline npm graph and semver preflight runs before a fixed npm script profile. Workspaces, custom registries, Git/local dependencies, and unsupported lock formats fail closed. See `docs/dependency-installation.md` for supported inputs, bounds, and evidence fields. This npm support is under review until its own exact-head CI passes.
+Trusted user verification supports a root Python `pyproject.toml`/`uv.lock` pair or a root npm `package.json`/version 2 or 3 `package-lock.json` pair. The isolated dependency fetch service validates locks and fetches enumerated artifacts; it does not execute npm or lifecycle scripts. Node.js 22.23.3/npm 10.9.9 is pinned in the sandbox image. Source `node_modules` directories are excluded from every staged workspace and export; only a verified npm lock bundle is placed on the separate dependency tmpfs. A bounded offline npm graph and semver preflight runs before a fixed npm script profile. Workspaces, custom registries, Git/local dependencies, and unsupported lock formats fail closed. See `docs/dependency-installation.md` for supported inputs, bounds, and evidence fields. This npm support is under review until its own exact-head CI passes.
 
 ## Build and verify locally
 

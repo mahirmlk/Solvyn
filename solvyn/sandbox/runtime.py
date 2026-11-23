@@ -215,7 +215,7 @@ class DockerSandboxRunner:
             if started_container.returncode != 0:
                 raise SandboxRuntimeError("Docker failed to start the sandbox container")
 
-            await self._stage_workspace(container_id, workspace, exclude_node_modules=is_npm)
+            await self._stage_workspace(container_id, workspace)
             if dependency_bundle is not None:
                 if is_npm:
                     await self._stage_npm_dependencies(container_id, dependency_bundle)
@@ -278,7 +278,7 @@ class DockerSandboxRunner:
                 if stopped.returncode != 0:
                     raise SandboxRuntimeError("Docker failed to stop the timed-out sandbox")
 
-            await self._export_workspace(container_id, workspace, exclude_node_modules=is_npm)
+            await self._export_workspace(container_id, workspace)
         finally:
             try:
                 if cleanup_needed:
@@ -378,8 +378,6 @@ class DockerSandboxRunner:
         self,
         workspace: ManagedWorkspace,
         archive: BinaryIO,
-        *,
-        exclude_node_modules: bool = False,
     ) -> int:
         """Build a bounded tar containing only validated regular workspace files."""
         bounded = _BoundedArchiveWriter(
@@ -389,7 +387,7 @@ class DockerSandboxRunner:
         with tarfile.open(fileobj=cast(BinaryIO, bounded), mode="w") as tar:
             for path in sorted(workspace.path.rglob("*")):
                 relative = path.relative_to(workspace.path).as_posix()
-                if exclude_node_modules and "node_modules" in path.relative_to(workspace.path).parts:
+                if "node_modules" in path.relative_to(workspace.path).parts:
                     continue
                 metadata = path.lstat()
                 if stat.S_ISLNK(metadata.st_mode):
@@ -650,15 +648,12 @@ class DockerSandboxRunner:
         self,
         container_id: str,
         workspace: ManagedWorkspace,
-        *,
-        exclude_node_modules: bool = False,
     ) -> None:
         """Stream workspace bytes to tar in the container without using docker cp."""
         with tempfile.TemporaryFile() as archive:
             self._create_workspace_archive(
                 workspace,
                 cast(BinaryIO, archive),
-                exclude_node_modules=exclude_node_modules,
             )
             proc = await asyncio.create_subprocess_exec(
                 *self.docker_command,
@@ -775,8 +770,6 @@ class DockerSandboxRunner:
         self,
         container_id: str,
         workspace: ManagedWorkspace,
-        *,
-        exclude_node_modules: bool = False,
     ) -> None:
         proc = await asyncio.create_subprocess_exec(
             *self.docker_command,
@@ -787,7 +780,8 @@ class DockerSandboxRunner:
             "-c",
             "-C",
             "/workspace",
-            *( ["--exclude=node_modules", "--exclude=./node_modules"] if exclude_node_modules else []),
+            "--exclude=node_modules",
+            "--exclude=./node_modules",
             ".",
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,

@@ -314,11 +314,27 @@ def test_npm_workspace_archive_omits_root_and_nested_node_modules(tmp_path: Path
     runner = DockerSandboxRunner(manager)
     archive = io.BytesIO()
 
-    runner._create_workspace_archive(workspace, archive, exclude_node_modules=True)
+    runner._create_workspace_archive(workspace, archive)
     with tarfile.open(fileobj=archive, mode="r:") as tar:
         names = tar.getnames()
 
     assert "src/app.js" in names
+    assert all("node_modules" not in Path(name).parts for name in names)
+
+
+def test_non_npm_workspace_archive_omits_node_modules_by_default(tmp_path: Path) -> None:
+    manager = WorkspaceManager(tmp_path / "workspaces")
+    workspace = manager.create()
+    manager.write_file(workspace, "app.py", b"print('source')")
+    manager.write_file(workspace, "node_modules/demo/injected.js", b"unverified")
+    runner = DockerSandboxRunner(manager)
+    archive = io.BytesIO()
+
+    runner._create_workspace_archive(workspace, archive)
+    with tarfile.open(fileobj=archive, mode="r:") as tar:
+        names = tar.getnames()
+
+    assert "app.py" in names
     assert all("node_modules" not in Path(name).parts for name in names)
 
 

@@ -12,6 +12,8 @@ For Python, the supervisor checks each wheel against the exported requirement ha
 
 For npm, the fetch service safely extracts verified package archives to a bounded dependency bundle and checks package identity against the lock. The runtime stages that bundle on a separate `node_modules` tmpfs, outside the source workspace fingerprint and export. It uses the image-pinned Node.js 22.23.3/npm 10.9.9 toolchain and runs a bounded `npm ls --all --json --offline --ignore-scripts --no-audit --no-fund` preflight with network disabled. This validates the staged dependency graph and declared semver ranges without invoking installation or lifecycle scripts. Only fixed npm `test`, `build`, `lint`, and `typecheck` profiles run; callers cannot substitute a custom command for an npm workspace. npm's offline and ignore-scripts settings are enforced in the sandbox environment as well.
 
+Existing `node_modules` directories in the source tree are excluded from all sandbox staging and exports, including runs that use a shell wrapper. A Node/npm command can use dependencies only when a verified root package manifest and lockfile produce the separate dependency bundle; arbitrary workspace `node_modules` contents never become available to the sandbox.
+
 Dependency-enabled jobs receive at least 2 GiB of container memory. The source workspace remains separate and its fingerprint is checked after dependency setup.
 
 ## Limits and evidence
