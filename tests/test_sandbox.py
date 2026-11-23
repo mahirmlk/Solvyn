@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from solvyn.sandbox import DockerSandboxRunner, ManagedWorkspace, SandboxLimits, WorkspaceManager
-from solvyn.sandbox.runtime import SandboxRuntimeError
+from solvyn.sandbox.runtime import SandboxRuntimeError, _uses_node_toolchain
 from solvyn.sandbox.workspaces import WorkspaceError
 
 
@@ -320,6 +320,47 @@ def test_npm_workspace_archive_omits_root_and_nested_node_modules(tmp_path: Path
 
     assert "src/app.js" in names
     assert all("node_modules" not in Path(name).parts for name in names)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [["npm", "run", "test"], ["node", "check.js"], ["npx", "eslint"], ["./node_modules/.bin/vite"]],
+)
+async def test_runner_blocks_direct_node_toolchain_without_verified_bundle(
+    tmp_path: Path, command: list[str]
+) -> None:
+    manager = WorkspaceManager(tmp_path / "workspaces")
+    workspace = manager.create()
+    manager.write_file(workspace, "package.json", b'{"name":"fixture","scripts":{"test":"node check.js"}}')
+    manager.write_file(workspace, "node_modules/demo/index.js", b"module.exports='unverified';")
+    fake_docker, calls_file = _fake_docker(tmp_path)
+    runner = DockerSandboxRunner(manager, docker_command=[sys.executable, str(fake_docker)])
+
+    with pytest.raises(SandboxRuntimeError, match="require a verified root"):
+        await runner.run(workspace, command, install_dependencies=False)
+
+    assert not calls_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_runner_blocks_npm_execution_with_unsupported_or_missing_lock(tmp_path: Path) -> None:
+    manager = WorkspaceManager(tmp_path / "workspaces")
+    workspace = manager.create()
+    manager.write_file(workspace, "package.json", b'{"name":"fixture","scripts":{"test":"node check.js"}}')
+    fake_docker, calls_file = _fake_docker(tmp_path)
+    runner = DockerSandboxRunner(manager, docker_command=[sys.executable, str(fake_docker)])
+
+    with pytest.raises(SandboxRuntimeError, match="Dependency setup is blocked"):
+        await runner.run(workspace, ["npm", "run", "test"], install_dependencies=True)
+
+    assert not calls_file.exists()
+
+
+def test_python_security_profile_remains_available_for_npm_workspace() -> None:
+    from solvyn.sandbox.profiles import PYTHON_COMMANDS
+
+    assert not _uses_node_toolchain(PYTHON_COMMANDS["security"])
 
 
 def test_docker_error_detail_is_bounded_and_redacts_workspace_path() -> None:

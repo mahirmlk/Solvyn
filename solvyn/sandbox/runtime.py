@@ -41,10 +41,18 @@ from solvyn.sandbox.workspaces import (
 _CONTAINER_ID = re.compile(r"^[a-f0-9]{12,64}$")
 _NODE_VERSION = "v22.23.3"
 _NPM_VERSION = "10.9.9"
+_NODE_TOOLCHAIN_COMMANDS = {"node", "nodejs", "npm", "npx", "corepack"}
 
 
 class SandboxRuntimeError(RuntimeError):
     """The isolated runtime could not safely start or complete a job."""
+
+
+def _uses_node_toolchain(argv: Sequence[str]) -> bool:
+    """Detect direct Node/npm launchers before an unverified workspace can run."""
+    executable = argv[0].replace("\\", "/").casefold()
+    basename = executable.rsplit("/", 1)[-1].removesuffix(".exe")
+    return basename in _NODE_TOOLCHAIN_COMMANDS or "/node_modules/.bin/" in f"/{executable}"
 
 
 @dataclass(frozen=True)
@@ -177,6 +185,12 @@ class DockerSandboxRunner:
             except (DependencyBlockedError, OSError, ValueError) as exc:
                 raise SandboxRuntimeError(f"Dependency setup is blocked: {exc}") from exc
 
+        is_npm = dependency_bundle is not None and dependency_bundle.node_modules_dir is not None
+        if _uses_node_toolchain(argv) and not is_npm:
+            if dependency_bundle is not None:
+                dependency_bundle.close()
+            raise SandboxRuntimeError("Node/npm commands require a verified root package.json/package-lock.json bundle")
+
         run_id = uuid.uuid4()
         container_name = f"solvyn-sandbox-{run_id.hex}"
         started = time.monotonic()
@@ -184,7 +198,6 @@ class DockerSandboxRunner:
         cleanup_needed = False
         exec_result = _CommandResult(125, b"", b"Sandbox did not run")
         try:
-            is_npm = dependency_bundle is not None and dependency_bundle.node_modules_dir is not None
             created = await self._cli(
                 self._create_args(
                     container_name,
