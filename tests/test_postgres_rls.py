@@ -254,6 +254,7 @@ async def test_github_work_item_state_rls_and_transition_history_are_enforced() 
                     )
                 await savepoint.rollback()
 
+                await connection.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": str(tenant_a)})
                 savepoint = await connection.begin_nested()
                 with pytest.raises(DBAPIError):
                     await connection.execute(
