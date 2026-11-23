@@ -23,8 +23,9 @@ def test_main_push_builds_but_staging_requires_manual_opt_in() -> None:
     assert api_image_step["with"]["push"] == "${{ github.ref == 'refs/heads/main' }}"
     staging = jobs["deploy-staging"]
     assert staging["needs"] == ["build"]
-    assert "github.event_name == 'workflow_dispatch'" in staging["if"]
-    assert "inputs.deploy_staging" in staging["if"]
+    assert staging["if"] == (
+        "github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.deploy_staging"
+    )
 
 
 def test_production_still_requires_successful_opted_in_staging() -> None:
@@ -32,6 +33,7 @@ def test_production_still_requires_successful_opted_in_staging() -> None:
     production = config["jobs"]["deploy-prod"]
 
     assert production["needs"] == ["build", "deploy-staging"]
-    assert "github.event_name == 'workflow_dispatch'" in production["if"]
-    assert "inputs.deploy_staging" in production["if"]
-    assert "inputs.deploy_production" in production["if"]
+    assert production["if"] == (
+        "github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' "
+        "&& inputs.deploy_staging && inputs.deploy_production"
+    )
