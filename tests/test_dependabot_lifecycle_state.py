@@ -118,7 +118,10 @@ async def test_poll_recovers_missed_reopen_webhook_and_late_webhook_does_not_rea
     assert created and event is not None
     event.status = "acknowledged"
 
-    # No webhook arrived. A polling snapshot with a newer marker recovers it.
+    # The scan observed an explicit provider closure before the next open
+    # revision, so polling can safely recover the missed reopen webhook.
+    closed, created_closed = await _record(store, _alert("2026-11-21T10:00:00Z", state="dismissed"))
+    assert not created_closed and closed is None
     _, _ = await _record(store, _alert("2026-11-22T10:00:00Z"))
     assert event.status == "pending"
     event.status = "acknowledged"
