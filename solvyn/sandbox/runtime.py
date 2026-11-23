@@ -161,6 +161,9 @@ class DockerSandboxRunner:
         if size > self.limits.workspace_bytes:
             raise WorkspaceError("Workspace exceeds the execution size limit")
 
+        # Keep the review digest bound to the exact workspace tree, including
+        # any caller-provided node_modules files; npm execution never stages
+        # those files and receives only the verified dependency bundle.
         source_fingerprint = self.workspaces.fingerprint(workspace)
         dependency_bundle: DependencyBundle | None = None
         if install_dependencies:
@@ -199,7 +202,7 @@ class DockerSandboxRunner:
             if started_container.returncode != 0:
                 raise SandboxRuntimeError("Docker failed to start the sandbox container")
 
-            await self._stage_workspace(container_id, workspace)
+            await self._stage_workspace(container_id, workspace, exclude_node_modules=is_npm)
             if dependency_bundle is not None:
                 if is_npm:
                     await self._stage_npm_dependencies(container_id, dependency_bundle)
@@ -226,14 +229,15 @@ class DockerSandboxRunner:
                 if self.workspaces.fingerprint(workspace) != source_fingerprint:
                     raise SandboxRuntimeError("Dependency setup changed the source workspace")
 
-            permissions_set = await self._cli(
-                [
+            if is_npm:
+                permission_command = [
                     "exec", "--user", "0", container_id, "find", "/workspace",
                     "-path", "/workspace/node_modules", "-prune", "-o",
                     "-exec", "chmod", "a+rwX", "{}", "+",
-                ],
-                timeout=self.cli_timeout_seconds,
-            )
+                ]
+            else:
+                permission_command = ["exec", "--user", "0", container_id, "chmod", "-R", "a+rwX", "/workspace"]
+            permissions_set = await self._cli(permission_command, timeout=self.cli_timeout_seconds)
             if permissions_set.returncode != 0:
                 raise SandboxRuntimeError("Docker failed to prepare the workspace")
 
@@ -357,7 +361,13 @@ class DockerSandboxRunner:
                 detail = detail.replace(path, "<workspace>")
         return detail[:300]
 
-    def _create_workspace_archive(self, workspace: ManagedWorkspace, archive: BinaryIO) -> int:
+    def _create_workspace_archive(
+        self,
+        workspace: ManagedWorkspace,
+        archive: BinaryIO,
+        *,
+        exclude_node_modules: bool = False,
+    ) -> int:
         """Build a bounded tar containing only validated regular workspace files."""
         bounded = _BoundedArchiveWriter(
             archive,
@@ -365,6 +375,9 @@ class DockerSandboxRunner:
         )
         with tarfile.open(fileobj=cast(BinaryIO, bounded), mode="w") as tar:
             for path in sorted(workspace.path.rglob("*")):
+                relative = path.relative_to(workspace.path).as_posix()
+                if exclude_node_modules and "node_modules" in path.relative_to(workspace.path).parts:
+                    continue
                 metadata = path.lstat()
                 if stat.S_ISLNK(metadata.st_mode):
                     raise SandboxRuntimeError("Workspace contains an unsupported filesystem entry")
@@ -372,7 +385,6 @@ class DockerSandboxRunner:
                     continue
                 if not stat.S_ISREG(metadata.st_mode):
                     raise SandboxRuntimeError("Workspace contains an unsupported filesystem entry")
-                relative = path.relative_to(workspace.path).as_posix()
                 safe_relative_path(relative)
                 flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
                 descriptor = os.open(path, flags)
@@ -621,10 +633,20 @@ class DockerSandboxRunner:
         if installed.returncode != 0 or installed.timed_out:
             raise SandboxRuntimeError("Offline dependency installation failed")
 
-    async def _stage_workspace(self, container_id: str, workspace: ManagedWorkspace) -> None:
+    async def _stage_workspace(
+        self,
+        container_id: str,
+        workspace: ManagedWorkspace,
+        *,
+        exclude_node_modules: bool = False,
+    ) -> None:
         """Stream workspace bytes to tar in the container without using docker cp."""
         with tempfile.TemporaryFile() as archive:
-            self._create_workspace_archive(workspace, cast(BinaryIO, archive))
+            self._create_workspace_archive(
+                workspace,
+                cast(BinaryIO, archive),
+                exclude_node_modules=exclude_node_modules,
+            )
             proc = await asyncio.create_subprocess_exec(
                 *self.docker_command,
                 "exec",
@@ -752,7 +774,7 @@ class DockerSandboxRunner:
             "-c",
             "-C",
             "/workspace",
-            *( ["--exclude=./node_modules"] if exclude_node_modules else []),
+            *( ["--exclude=node_modules", "--exclude=./node_modules"] if exclude_node_modules else []),
             ".",
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,

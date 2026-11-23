@@ -282,11 +282,7 @@ async def test_runner_applies_container_policy_and_returns_workspace_changes(tmp
         "-C",
         "/workspace",
     ]
-    assert calls[3] == [
-        "exec", "--user", "0", "a" * 64, "find", "/workspace",
-        "-path", "/workspace/node_modules", "-prune", "-o", "-exec", "chmod",
-        "a+rwX", "{}", "+",
-    ]
+    assert calls[3] == ["exec", "--user", "0", "a" * 64, "chmod", "-R", "a+rwX", "/workspace"]
     assert calls[4] == ["exec", "a" * 64, "python", "-c", "print('safe')"]
     assert calls[5] == ["exec", "-i", "a" * 64, "tar", "-c", "-C", "/workspace", "."]
     assert not any(call[0] == "cp" for call in calls)
@@ -307,6 +303,23 @@ def test_workspace_archive_is_bounded_during_writes(tmp_path: Path) -> None:
         runner._create_workspace_archive(workspace, archive)
 
     assert archive.tell() <= limits.workspace_bytes + 2_000_000
+
+
+def test_npm_workspace_archive_omits_root_and_nested_node_modules(tmp_path: Path) -> None:
+    manager = WorkspaceManager(tmp_path / "workspaces")
+    workspace = manager.create()
+    manager.write_file(workspace, "src/app.js", b"source")
+    manager.write_file(workspace, "node_modules/demo/injected.js", b"unverified")
+    manager.write_file(workspace, "pkg/node_modules/x.js", b"unverified")
+    runner = DockerSandboxRunner(manager)
+    archive = io.BytesIO()
+
+    runner._create_workspace_archive(workspace, archive, exclude_node_modules=True)
+    with tarfile.open(fileobj=archive, mode="r:") as tar:
+        names = tar.getnames()
+
+    assert "src/app.js" in names
+    assert all("node_modules" not in Path(name).parts for name in names)
 
 
 def test_docker_error_detail_is_bounded_and_redacts_workspace_path() -> None:

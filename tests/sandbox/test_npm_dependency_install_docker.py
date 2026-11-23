@@ -45,7 +45,15 @@ async def test_npm_profile_runs_offline_and_keeps_node_modules_out_of_workspace(
     }
     manager.write_file(workspace, "package.json", json.dumps(project).encode())
     manager.write_file(workspace, "package-lock.json", json.dumps(lock).encode())
-    manager.write_file(workspace, "check.js", b"const fs=require('fs'); const demo=require('demo'); if(demo!=='offline module') process.exit(2); fs.writeFileSync('profile-result.txt','passed');\n")
+    manager.write_file(
+        workspace,
+        "check.js",
+        b"const fs=require('fs'); const demo=require('demo'); if(demo!=='offline module') process.exit(2); "
+        b"try { require('demo/injected.js'); process.exit(3); } catch (error) { "
+        b"if (error.code !== 'MODULE_NOT_FOUND') throw error; } "
+        b"fs.writeFileSync('profile-result.txt','passed');\n",
+    )
+    manager.write_file(workspace, "node_modules/demo/injected.js", b"module.exports='unverified injected file';\n")
     inputs = NpmDependencyInputs(
         json.dumps(project).encode(), json.dumps(lock).encode(),
         (NpmPackage("node_modules/demo", "https://registry.npmjs.org/demo/-/demo-1.0.0.tgz", integrity, "demo", "1.0.0"),),
@@ -77,7 +85,9 @@ async def test_npm_profile_runs_offline_and_keeps_node_modules_out_of_workspace(
     result = await runner.run(workspace, ["npm", "run", "test"], install_dependencies=True)
     assert result.exit_code == 0, result.stderr
     assert "passed" in (workspace.path / "profile-result.txt").read_text(encoding="utf-8")
-    assert not (workspace.path / "node_modules").exists()
+    injected = workspace.path / "node_modules" / "demo" / "injected.js"
+    assert injected.read_text(encoding="utf-8") == "module.exports='unverified injected file';\n"
+    assert sorted(path.name for path in injected.parent.iterdir()) == ["injected.js"]
     assert result.dependency_evidence is not None
     assert result.dependency_evidence.ecosystem == "npm"
     assert result.dependency_evidence.runtime_version == "v22.23.3"
@@ -87,5 +97,5 @@ async def test_npm_profile_runs_offline_and_keeps_node_modules_out_of_workspace(
     manager.write_file(workspace, "package.json", json.dumps(project).encode())
     with pytest.raises(SandboxRuntimeError, match="does not satisfy"):
         await runner.run(workspace, ["npm", "run", "test"], install_dependencies=True)
-    assert not (workspace.path / "node_modules").exists()
+    assert injected.read_text(encoding="utf-8") == "module.exports='unverified injected file';\n"
     temporary.cleanup()
