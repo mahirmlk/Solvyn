@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unicodedata
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -17,8 +18,11 @@ def _bounded_text(value: Any, *, limit: int, fallback: str = "") -> str:
 
 
 def dependabot_alert_signal(
-    repository_name: str, alert: dict[str, Any], *, action: str = "created"
-) -> dict[str, str] | None:
+    repository_name: str,
+    alert: dict[str, Any],
+    *,
+    action: str = "created",
+) -> dict[str, Any] | None:
     """Normalize a GitHub Dependabot alert to the webhook signal shape.
 
     The source event ID intentionally matches ``dependabot_alert`` webhook
@@ -26,10 +30,17 @@ def dependabot_alert_signal(
     """
     if not isinstance(alert, dict) or not action:
         return None
-    if action.lower() in {"fixed", "closed_by_user", "dismissed", "resolved", "resolved_by_user", "auto_dismissed"}:
-        return None
+    action_key = action.lower()
     state = alert.get("state")
-    if isinstance(state, str) and state.lower() not in {"open", "reopened"}:
+    if action_key in {"fixed", "resolved"}:
+        lifecycle_state = "fixed"
+    elif action_key in {"closed_by_user", "dismissed", "resolved_by_user", "auto_dismissed"}:
+        lifecycle_state = "dismissed"
+    elif isinstance(state, str) and state.lower() in {"open", "reopened"}:
+        lifecycle_state = "open"
+    elif isinstance(state, str) and state.lower() in {"dismissed", "fixed", "auto_dismissed"}:
+        lifecycle_state = "dismissed" if state.lower() == "auto_dismissed" else state.lower()
+    else:
         return None
     try:
         owner, repo = validate_full_name(repository_name)
@@ -40,6 +51,17 @@ def dependabot_alert_signal(
     alert_id = alert.get("number", alert.get("id"))
     if isinstance(alert_id, bool) or not isinstance(alert_id, int) or alert_id < 1:
         return None
+
+    updated_at_value = alert.get("updated_at")
+    if not isinstance(updated_at_value, str):
+        return None
+    try:
+        provider_updated_at = datetime.fromisoformat(updated_at_value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if provider_updated_at.tzinfo is None or provider_updated_at.utcoffset() is None:
+        return None
+    provider_updated_at = provider_updated_at.astimezone(UTC)
 
     rule_value = alert.get("rule")
     rule = rule_value if isinstance(rule_value, dict) else {}
@@ -92,4 +114,9 @@ def dependabot_alert_signal(
         "branch": branch,
         "details_url": details_url,
         "action": action[:100],
+        "alert_number": alert_id,
+        "lifecycle_state": lifecycle_state,
+        "provider_updated_at": provider_updated_at,
+        "notify": lifecycle_state == "open",
     }
+

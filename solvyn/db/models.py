@@ -844,6 +844,44 @@ class IntegrationCredential(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class GitHubDependabotAlertState(Base):
+    """Latest sanitized lifecycle marker for one connected repository alert."""
+
+    __tablename__ = "github_dependabot_alert_states"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id", "project_id", "repository_id", "alert_number",
+            name="uq_github_dependabot_alert_states_identity",
+        ),
+        CheckConstraint("alert_number > 0", name="ck_github_dependabot_alert_states_number"),
+        CheckConstraint(
+            "lifecycle_state IN ('open', 'dismissed', 'fixed')",
+            name="ck_github_dependabot_alert_states_state",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False)
+    repository_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("repositories.id"), nullable=False)
+    repository_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    repository_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    alert_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    severity: Mapped[str] = mapped_column(String(50), nullable=False)
+    branch: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    details_url: Mapped[str] = mapped_column(String(512), default="", nullable=False)
+    lifecycle_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    provider_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_reopen_marker: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_delivery_id: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class ProactiveEvent(Base):
     """Verified external engineering signals queued for human triage."""
 
@@ -1183,3 +1221,4 @@ class Approval(Base):
     decision_note: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
