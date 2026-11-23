@@ -361,7 +361,7 @@ async def test_dependency_schedule_records_open_alerts_and_marks_partial_scan_in
         async def __aexit__(self, *_: object) -> None:
             return None
 
-        async def list_dependabot_alerts(self, _full_name: str) -> tuple[list[dict[str, object]], bool]:
+        async def list_dependabot_alerts(self, _full_name: str, *, states: tuple[str, ...] = ("open",)) -> tuple[list[dict[str, object]], bool]:
             return [alert], False
 
     db = StubDB()
@@ -437,7 +437,7 @@ async def test_dependency_schedule_permission_denial_is_not_reported_as_zero_ale
         async def __aexit__(self, *_: object) -> None:
             return None
 
-        async def list_dependabot_alerts(self, _full_name: str) -> tuple[list[dict[str, object]], bool]:
+        async def list_dependabot_alerts(self, _full_name: str, *, states: tuple[str, ...] = ("open",)) -> tuple[list[dict[str, object]], bool]:
             from solvyn.repositories.github import GitHubRepositoryError
 
             raise GitHubRepositoryError(403, "GitHub denied access to Dependabot alerts")
@@ -513,7 +513,7 @@ async def test_dependency_schedule_empty_success_reports_zero_only_after_complet
         async def __aexit__(self, *_: object) -> None:
             return None
 
-        async def list_dependabot_alerts(self, _full_name: str) -> tuple[list[dict[str, object]], bool]:
+        async def list_dependabot_alerts(self, _full_name: str, *, states: tuple[str, ...] = ("open",)) -> tuple[list[dict[str, object]], bool]:
             return [], True
 
     db = StubDB()
@@ -586,7 +586,7 @@ async def test_dependency_schedule_deduplicates_alert_already_recorded_by_webhoo
         async def __aexit__(self, *_: object) -> None:
             return None
 
-        async def list_dependabot_alerts(self, _full_name: str) -> tuple[list[dict[str, object]], bool]:
+        async def list_dependabot_alerts(self, _full_name: str, *, states: tuple[str, ...] = ("open",)) -> tuple[list[dict[str, object]], bool]:
             return [alert], True
 
     db = StubDB()
