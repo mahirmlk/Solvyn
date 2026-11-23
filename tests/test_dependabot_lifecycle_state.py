@@ -77,8 +77,10 @@ async def test_close_and_reopen_between_polls_rearms_acknowledged_alert_once() -
     assert created and first is not None and first.status == "pending"
     first.status = "acknowledged"
 
-    # Even when the endpoint includes explicit closed states, a close and
-    # reopen between snapshots may be represented only by a later open marker.
+    closed, created_closed = await _record(store, _alert("2026-11-21T10:00:00Z", state="fixed"))
+    assert not created_closed and closed is None
+    assert store.state is not None and store.state.lifecycle_state == "fixed"
+
     reopened, created_again = await _record(store, _alert("2026-11-22T10:00:00Z"))
     assert not created_again and reopened is first
     assert first.status == "pending"
