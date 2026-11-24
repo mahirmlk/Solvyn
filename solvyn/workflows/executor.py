@@ -70,6 +70,10 @@ class WorkflowExecutor:
 
         async def persist_checkpoint(snapshot: ExecutionGraph) -> None:
             async with checkpoint_lock:
+                if snapshot.status in {"completed", "failed"}:
+                    # The run's final write also resolves late-bound inputs; keep
+                    # the lease until that final fenced write commits.
+                    return
                 await self._persist_execution_graph(snapshot, template_name, merged_inputs, tenant_uuid, lease_id)
 
         try:
@@ -684,7 +688,23 @@ class WorkflowExecutor:
         async with async_session_factory() as db:
             await bind_tenant_scope(db, tenant_id)
             graph_id = uuid.UUID(graph.id)
-            record = await db.get(ExecutionGraphModel, graph_id)
+            record = (
+                await db.execute(
+                    select(ExecutionGraphModel)
+                    .where(ExecutionGraphModel.id == graph_id)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if record is not None:
+                database_now = await db.scalar(select(func.clock_timestamp()))
+                if (
+                    record.session_id != uuid.UUID(graph.session_id)
+                    or record.lease_owner != lease_id
+                    or record.lease_expires_at is None
+                    or record.lease_expires_at <= database_now
+                    or record.status not in {"running", "resuming"}
+                ):
+                    raise RuntimeError("Workflow execution lease was lost; refusing to overwrite its state")
             graph_data = json.dumps(
                 {
                     "template": template_name,
@@ -712,7 +732,9 @@ class WorkflowExecutor:
                     graph_data=graph_data,
                     status=graph.status,
                     lease_owner=lease_id,
-                    lease_expires_at=func.clock_timestamp() + _LEASE_DURATION if graph.status in {"running", "resuming"} else None,
+                    lease_expires_at=func.clock_timestamp() + _LEASE_DURATION
+                    if graph.status in {"running", "resuming"}
+                    else None,
                 )
                 db.add(record)
             else:
@@ -729,7 +751,9 @@ class WorkflowExecutor:
                     .values(
                         graph_data=graph_data,
                         status=graph.status,
-                        lease_expires_at=func.clock_timestamp() + _LEASE_DURATION if graph.status in {"running", "resuming"} else None,
+                        lease_expires_at=func.clock_timestamp() + _LEASE_DURATION
+                        if graph.status in {"running", "resuming"}
+                        else None,
                         lease_owner=lease_id,
                     )
                     .returning(ExecutionGraphModel.id)
@@ -846,6 +870,26 @@ class WorkflowExecutor:
             await asyncio.sleep(_LEASE_HEARTBEAT_INTERVAL)
             async with async_session_factory() as db:
                 await bind_tenant_scope(db, tenant_id)
+                record = (
+                    await db.execute(
+                        select(ExecutionGraphModel)
+                        .where(
+                            ExecutionGraphModel.id == uuid.UUID(execution_id),
+                            ExecutionGraphModel.session_id.in_(select(Session.id).where(Session.tenant_id == tenant_id)),
+                        )
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                database_now = await db.scalar(select(func.clock_timestamp()))
+                if (
+                    record is None
+                    or record.lease_owner != lease_id
+                    or record.status not in {"running", "resuming"}
+                    or record.lease_expires_at is None
+                    or record.lease_expires_at <= database_now
+                ):
+                    await db.commit()
+                    return False
                 renewed = await db.execute(
                     update(ExecutionGraphModel)
                     .where(
@@ -872,6 +916,25 @@ class WorkflowExecutor:
     ) -> None:
         async with async_session_factory() as db:
             await bind_tenant_scope(db, tenant_id)
+            record = (
+                await db.execute(
+                    select(ExecutionGraphModel)
+                    .where(
+                        ExecutionGraphModel.id == uuid.UUID(execution_id),
+                        ExecutionGraphModel.session_id.in_(select(Session.id).where(Session.tenant_id == tenant_id)),
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            database_now = await db.scalar(select(func.clock_timestamp()))
+            if (
+                record is None
+                or record.lease_owner != lease_id
+                or record.lease_expires_at is None
+                or record.lease_expires_at <= database_now
+            ):
+                await db.commit()
+                return
             identity_scope = (
                 ExecutionGraphModel.id == uuid.UUID(execution_id),
                 ExecutionGraphModel.lease_owner == lease_id,
