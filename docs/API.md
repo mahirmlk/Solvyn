@@ -438,9 +438,15 @@ curl -X POST \
 
 ---
 
-### `POST /api/v1/workflows/{name}/resume`
+### `POST /api/v1/workflows/executions/{execution_id}/resume`
 
-Resume a paused workflow from a checkpoint. (Endpoint route is defined at `/api/v1/workflows/{id}/resume`.)
+Resume a due or interrupted workflow execution. The caller must be an owner or admin in an active organization belonging to the execution's tenant; workflow sessions are tenant-scoped and are not bound to an individual organization. Scheduled executions do not consume a lease-reclaim allowance; a claim of an expired `running` or `resuming` execution increments its reclaim count atomically. The system allows three lease reclaims. Once the lease expires after the third reclaim, the scheduler marks the execution `dead_letter`, records the reason and timestamp, fails unfinished steps, terminates unfinished handoffs, and expires their pending approvals without replaying them. The endpoint returns `409` when another worker owns the lease or the execution has reached the dead-letter limit.
+
+`GET /api/v1/workflows/executions/{execution_id}` includes `lease_reclaim_count`, `max_lease_reclaims`, `dead_lettered_at`, `dead_letter_reason`, and retry lineage fields. Dead-letter records remain available for inspection.
+
+### `POST /api/v1/workflows/executions/{execution_id}/retry`
+
+An owner or admin of an active organization in the same tenant can create one idempotent retry for a dead-lettered execution. The response is `202` and identifies the new scheduled child execution and its `redriven_from_execution_id`. The source stays dead-lettered with its snapshot and history intact. Completed node outputs are retained in the child snapshot; unfinished nodes are reset. The retry creates fresh child task rows when it runs and does not copy source task handoffs or approvals. Each dead-letter child can be retried once, allowing a new operator-reviewed retry after another exhaustion.
 
 ---
 

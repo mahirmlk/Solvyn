@@ -27,6 +27,8 @@ from solvyn.api_metadata import COMMON_RESPONSES
 from solvyn.config import settings
 from solvyn.db.models import (
     Approval,
+    Organization,
+    OrganizationMembership,
     Project,
     Session,
     Task,
@@ -47,7 +49,7 @@ from solvyn.multi_tenant.middleware import tenant_context
 from solvyn.proactive import task_assignment_event
 from solvyn.task_results import result_metadata
 from solvyn.workflows.conversation_tasks import conversation_handoff_idempotency_key, sync_conversation_task_state
-from solvyn.workflows.executor import WorkflowExecutionTimeoutError, workflow_executor
+from solvyn.workflows.executor import MAX_LEASE_RECLAIMS, WorkflowExecutionTimeoutError, workflow_executor
 from solvyn.workflows.task_completion import refresh_task_completion_state
 from solvyn.workflows.task_generator import TaskGenerator
 from solvyn.workflows.templates import WORKFLOW_TEMPLATES
@@ -57,6 +59,7 @@ _MAX_HANDOFF_DEPTH = 3
 _MAX_HANDOFF_INPUT_BYTES = 24_000
 _HANDOFF_LEASE_DURATION = timedelta(seconds=60)
 _HANDOFF_HEARTBEAT_INTERVAL = 20
+_WORKFLOW_OPERATOR_ROLES = ("owner", "admin")
 
 
 class HandoffConflictError(RuntimeError):
@@ -597,10 +600,24 @@ async def get_workflow_execution(
     record = result.scalar_one_or_none()
     if record is None:
         raise HTTPException(status_code=404, detail="Workflow execution not found")
+    redriven_to = await db.scalar(
+        select(ExecutionGraphModel.id).where(
+            ExecutionGraphModel.session_id == record.session_id,
+            ExecutionGraphModel.redriven_from_execution_id == record.id,
+        )
+    )
     return {
         "execution_id": str(record.id),
         "session_id": str(record.session_id),
         "status": record.status,
+        "lease_reclaim_count": record.lease_reclaim_count,
+        "max_lease_reclaims": MAX_LEASE_RECLAIMS,
+        "dead_lettered_at": record.dead_lettered_at.isoformat() if record.dead_lettered_at else None,
+        "dead_letter_reason": record.dead_letter_reason,
+        "redriven_from_execution_id": str(record.redriven_from_execution_id)
+        if record.redriven_from_execution_id
+        else None,
+        "redriven_to_execution_id": str(redriven_to) if redriven_to else None,
         "scheduled_at": record.scheduled_at.isoformat() if record.scheduled_at else None,
         "snapshot": json.loads(record.graph_data),
         "updated_at": record.updated_at.isoformat() if record.updated_at else "",
@@ -608,9 +625,14 @@ async def get_workflow_execution(
 
 
 @router.post("/executions/{execution_id}/resume", summary="Resume an interrupted workflow execution")
-async def resume_workflow_execution(execution_id: uuid.UUID) -> dict[str, Any]:
+async def resume_workflow_execution(
+    execution_id: uuid.UUID,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
     tenant_ref = _workflow_tenant_ref()
     try:
+        tenant_id = await workflow_executor._resolve_tenant_uuid(tenant_ref)
+        await _require_workflow_operator(db, execution_id, tenant_id)
         result = await workflow_executor.resume(execution_id, tenant_ref)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -630,6 +652,60 @@ async def resume_workflow_execution(execution_id: uuid.UUID) -> dict[str, Any]:
             for node in result.nodes
         ],
     }
+
+
+async def _require_workflow_operator(
+    db: AsyncSession,
+    execution_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> None:
+    """Require an owner/admin in the tenant for execution recovery controls."""
+    actor_id = tenant_context.user_id
+    if actor_id is None:
+        raise HTTPException(status_code=403, detail="Organization owner or admin access required")
+    await bind_tenant_scope(db, tenant_id)
+    exists = await db.scalar(
+        select(ExecutionGraphModel.id)
+        .join(Session, Session.id == ExecutionGraphModel.session_id)
+        .where(ExecutionGraphModel.id == execution_id, Session.tenant_id == tenant_id)
+    )
+    if exists is None:
+        raise HTTPException(status_code=404, detail="Workflow execution not found")
+    membership_id = await db.scalar(
+        select(OrganizationMembership.id)
+        .join(Organization, Organization.id == OrganizationMembership.organization_id)
+        .where(
+            Organization.tenant_id == tenant_id,
+            Organization.is_active.is_(True),
+            OrganizationMembership.user_id == actor_id,
+            OrganizationMembership.role.in_(_WORKFLOW_OPERATOR_ROLES),
+        )
+        .limit(1)
+    )
+    if membership_id is None:
+        raise HTTPException(status_code=403, detail="Organization owner or admin access required")
+
+
+@router.post("/executions/{execution_id}/retry", status_code=202, summary="Retry a dead-letter workflow execution")
+async def retry_dead_letter_workflow_execution(
+    execution_id: uuid.UUID,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    tenant_ref = _workflow_tenant_ref()
+    actor_id = tenant_context.user_id
+    if actor_id is None:
+        raise HTTPException(status_code=403, detail="Organization owner or admin access required")
+    try:
+        tenant_id = await workflow_executor._resolve_tenant_uuid(tenant_ref)
+        await _require_workflow_operator(db, execution_id, tenant_id)
+        result = await workflow_executor.retry_dead_letter(execution_id, tenant_ref, actor_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Workflow tenant is not configured") from exc
+    return result
 
 
 @router.post("/executions/{execution_id}/cancel", summary="Cancel a workflow execution")

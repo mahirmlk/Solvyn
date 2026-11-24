@@ -441,7 +441,7 @@ async def _fetch_due_scheduled_workflows(db: AsyncSession) -> list[tuple[uuid.UU
                             ExecutionGraph.status.in_(["running", "resuming"]),
                             or_(
                                 ExecutionGraph.lease_expires_at.is_(None),
-                                ExecutionGraph.lease_expires_at < func.now(),
+                                ExecutionGraph.lease_expires_at <= func.clock_timestamp(),
                             ),
                         ),
                     ),
@@ -478,7 +478,7 @@ async def _fetch_due_cancellation_workflows(db: AsyncSession) -> list[tuple[uuid
                     or_(
                         ExecutionGraph.lease_owner.is_(None),
                         ExecutionGraph.lease_expires_at.is_(None),
-                        ExecutionGraph.lease_expires_at <= func.now(),
+                        ExecutionGraph.lease_expires_at <= func.clock_timestamp(),
                     ),
                 )
                 .order_by(ExecutionGraph.created_at, ExecutionGraph.id)
