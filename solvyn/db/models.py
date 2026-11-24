@@ -587,6 +587,17 @@ class TaskHandoff(Base):
 
 class ExecutionGraph(Base):
     __tablename__ = "execution_graphs"
+    __table_args__ = (
+        UniqueConstraint("session_id", "id", name="uq_execution_graphs_session_id_id"),
+        UniqueConstraint("session_id", "redriven_from_execution_id", name="uq_execution_graphs_redrive_source"),
+        ForeignKeyConstraint(
+            ("session_id", "redriven_from_execution_id"),
+            ("execution_graphs.session_id", "execution_graphs.id"),
+            name="fk_execution_graphs_redrive_same_session",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("lease_reclaim_count >= 0", name="ck_execution_graphs_lease_reclaim_count"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     session_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("sessions.id"), nullable=False, index=True)
@@ -595,6 +606,10 @@ class ExecutionGraph(Base):
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     lease_owner: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_reclaim_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    dead_lettered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    dead_letter_reason: Mapped[str | None] = mapped_column(String(2_000), nullable=True)
+    redriven_from_execution_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

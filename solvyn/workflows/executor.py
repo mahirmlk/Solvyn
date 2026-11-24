@@ -6,7 +6,7 @@ from collections.abc import Coroutine
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, case, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from solvyn.agents.graph import AgentGraph
@@ -22,6 +22,8 @@ from solvyn.workflows.templates import WORKFLOW_TEMPLATES, WorkflowStep
 logger = logging.getLogger(__name__)
 _LEASE_DURATION = timedelta(seconds=60)
 _LEASE_HEARTBEAT_INTERVAL = 20
+MAX_LEASE_RECLAIMS = 3
+_LEASE_RECLAIM_EXHAUSTED = f"Workflow execution exhausted {MAX_LEASE_RECLAIMS} automatic lease reclaims"
 
 
 class WorkflowExecutionTimeoutError(TimeoutError):
@@ -68,6 +70,10 @@ class WorkflowExecutor:
 
         async def persist_checkpoint(snapshot: ExecutionGraph) -> None:
             async with checkpoint_lock:
+                if snapshot.status in {"completed", "failed"}:
+                    # The run's final write also resolves late-bound inputs; keep
+                    # the lease until that final fenced write commits.
+                    return
                 await self._persist_execution_graph(snapshot, template_name, merged_inputs, tenant_uuid, lease_id)
 
         try:
@@ -195,6 +201,7 @@ class WorkflowExecutor:
                     select(ExecutionGraphModel)
                     .join(Session, Session.id == ExecutionGraphModel.session_id)
                     .where(ExecutionGraphModel.id == execution_id, Session.tenant_id == tenant_uuid)
+                    .with_for_update(of=ExecutionGraphModel)
                 )
             ).scalar_one_or_none()
             if record is None:
@@ -203,35 +210,119 @@ class WorkflowExecutor:
                 raise RuntimeError(f"Workflow execution cannot resume from status '{record.status}'")
             if record.status == "scheduled" and record.scheduled_at and record.scheduled_at > datetime.now(UTC):
                 raise RuntimeError("Workflow execution is not due yet")
-            graph_data = json.loads(record.graph_data)
             lease_id = uuid.uuid4()
+
+            if (
+                record.status in {"running", "resuming"}
+                and record.lease_reclaim_count >= MAX_LEASE_RECLAIMS
+            ):
+                exhausted = await db.execute(
+                    update(ExecutionGraphModel)
+                    .where(
+                        ExecutionGraphModel.id == execution_id,
+                        ExecutionGraphModel.session_id == record.session_id,
+                        ExecutionGraphModel.session_id.in_(select(Session.id).where(Session.tenant_id == tenant_uuid)),
+                        ExecutionGraphModel.status == record.status,
+                        ExecutionGraphModel.lease_owner == record.lease_owner,
+                        ExecutionGraphModel.lease_reclaim_count >= MAX_LEASE_RECLAIMS,
+                        or_(
+                            ExecutionGraphModel.lease_expires_at.is_(None),
+                            ExecutionGraphModel.lease_expires_at <= func.clock_timestamp(),
+                        ),
+                    )
+                    .values(
+                        status="dead_letter",
+                        dead_lettered_at=func.clock_timestamp(),
+                        dead_letter_reason=_LEASE_RECLAIM_EXHAUSTED,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                    )
+                    .returning(ExecutionGraphModel.graph_data)
+                )
+                exhausted_graph = exhausted.scalar_one_or_none()
+                if exhausted_graph is not None:
+                    dead_letter_graph = json.loads(exhausted_graph)
+                    dead_letter_graph["status"] = "dead_letter"
+                    for node in dead_letter_graph.get("nodes", []):
+                        if node.get("status") in {"pending", "running", "resuming", "waiting_approval"}:
+                            node["status"] = "failed"
+                            node["error"] = _LEASE_RECLAIM_EXHAUSTED
+                            node["completed_at"] = datetime.now(UTC).isoformat()
+                    await db.execute(
+                        update(ExecutionGraphModel)
+                        .where(
+                            ExecutionGraphModel.id == execution_id,
+                            ExecutionGraphModel.session_id == record.session_id,
+                            ExecutionGraphModel.status == "dead_letter",
+                            ExecutionGraphModel.lease_owner.is_(None),
+                        )
+                        .values(graph_data=json.dumps(dead_letter_graph))
+                    )
+                    await self._terminate_execution_handoffs(
+                        db,
+                        execution_id,
+                        tenant_uuid,
+                        status="failed",
+                        error=_LEASE_RECLAIM_EXHAUSTED,
+                    )
+                    await db.execute(
+                        update(Task)
+                        .where(
+                            Task.execution_id == execution_id,
+                            Task.tenant_id == tenant_uuid,
+                            Task.status.in_(["pending", "running", "resuming", "waiting_approval"]),
+                        )
+                        .values(status="failed", error=_LEASE_RECLAIM_EXHAUSTED, completed_at=func.now())
+                    )
+                    await db.commit()
+                    raise RuntimeError(f"{_LEASE_RECLAIM_EXHAUSTED}; execution was dead-lettered")
+
             can_claim = or_(
                 ExecutionGraphModel.status == "failed",
                 and_(ExecutionGraphModel.status == "scheduled", ExecutionGraphModel.scheduled_at <= func.now()),
                 and_(
                     ExecutionGraphModel.status.in_(["running", "resuming"]),
-                    or_(ExecutionGraphModel.lease_expires_at.is_(None), ExecutionGraphModel.lease_expires_at < func.now()),
+                    or_(ExecutionGraphModel.lease_expires_at.is_(None), ExecutionGraphModel.lease_expires_at <= func.clock_timestamp()),
                 ),
             )
             claimed = await db.execute(
                 update(ExecutionGraphModel)
                 .where(
                     ExecutionGraphModel.id == execution_id,
+                    ExecutionGraphModel.session_id == record.session_id,
                     ExecutionGraphModel.session_id.in_(select(Session.id).where(Session.tenant_id == tenant_uuid)),
+                    ExecutionGraphModel.status == record.status,
+                    ExecutionGraphModel.lease_owner == record.lease_owner,
                     can_claim,
                 )
                 .values(
                     status="resuming",
                     lease_owner=lease_id,
-                    lease_expires_at=func.now() + _LEASE_DURATION,
+                    lease_expires_at=func.clock_timestamp() + _LEASE_DURATION,
+                    lease_reclaim_count=case(
+                        (
+                            ExecutionGraphModel.status.in_(["running", "resuming"]),
+                            ExecutionGraphModel.lease_reclaim_count + 1,
+                        ),
+                        else_=ExecutionGraphModel.lease_reclaim_count,
+                    ),
                 )
-                .returning(ExecutionGraphModel.id)
+                .returning(
+                    ExecutionGraphModel.graph_data,
+                    ExecutionGraphModel.session_id,
+                    ExecutionGraphModel.lease_reclaim_count,
+                )
             )
-            if claimed.scalar_one_or_none() != execution_id:
+            claim = claimed.one_or_none()
+            if claim is None:
                 await db.rollback()
                 raise RuntimeError("Workflow execution is already being resumed")
+            # Use the snapshot returned by the row-locked claim. The earlier
+            # read is only for eligibility; another checkpoint may have saved
+            # completed node outputs before this claim acquired the row.
+            graph_data = json.loads(claim.graph_data)
+            session_id = str(claim.session_id)
             await db.commit()
-            session_id = str(record.session_id)
 
         graph = AgentGraph()
         graph.graph_id = str(execution_id)
@@ -292,6 +383,90 @@ class WorkflowExecutor:
             raise
         return result
 
+    async def retry_dead_letter(
+        self,
+        execution_id: uuid.UUID,
+        tenant_id: str,
+        actor_user_id: uuid.UUID,
+    ) -> dict[str, Any]:
+        """Create one scheduled child graph while retaining the dead-letter source."""
+        tenant_uuid = await self._resolve_tenant_uuid(tenant_id)
+        async with async_session_factory() as db:
+            await bind_tenant_scope(db, tenant_uuid)
+            source = (
+                await db.execute(
+                    select(ExecutionGraphModel)
+                    .join(Session, Session.id == ExecutionGraphModel.session_id)
+                    .where(ExecutionGraphModel.id == execution_id, Session.tenant_id == tenant_uuid)
+                    .with_for_update(of=ExecutionGraphModel)
+                )
+            ).scalar_one_or_none()
+            if source is None:
+                raise LookupError("Workflow execution not found")
+
+            existing = (
+                await db.execute(
+                    select(ExecutionGraphModel)
+                    .join(Session, Session.id == ExecutionGraphModel.session_id)
+                    .where(
+                        ExecutionGraphModel.session_id == source.session_id,
+                        ExecutionGraphModel.redriven_from_execution_id == source.id,
+                        Session.tenant_id == tenant_uuid,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                return {
+                    "execution_id": str(existing.id),
+                    "session_id": str(existing.session_id),
+                    "status": existing.status,
+                    "redriven_from_execution_id": str(source.id),
+                    "already_retried": True,
+                }
+            if source.status != "dead_letter":
+                raise RuntimeError("Only dead-lettered workflow executions can be retried")
+
+            # This creates a workflow-level retry only. Completed node results
+            # remain in the child snapshot; unfinished nodes are reset. Task
+            # rows are generated afresh for the child's execution ID and
+            # handoff/approval rows are not copied from the source.
+            graph_data = json.loads(source.graph_data)
+            graph_data["status"] = "scheduled"
+            for node in graph_data.get("nodes", []):
+                if node.get("status") != "completed":
+                    node["status"] = "pending"
+                    node["output"] = None
+                    node["error"] = None
+                    node["started_at"] = None
+                    node["completed_at"] = None
+
+            await db.execute(
+                text("SELECT set_config('app.task_event_source', :source, true)"),
+                {"source": "workflow_operator_retry"},
+            )
+            await db.execute(
+                text("SELECT set_config('app.task_event_actor_user_id', :actor, true)"),
+                {"actor": str(actor_user_id)},
+            )
+            retry = ExecutionGraphModel(
+                id=uuid.uuid4(),
+                session_id=source.session_id,
+                graph_data=json.dumps(graph_data),
+                status="scheduled",
+                scheduled_at=datetime.now(UTC),
+                lease_reclaim_count=0,
+                redriven_from_execution_id=source.id,
+            )
+            db.add(retry)
+            await db.commit()
+            return {
+                "execution_id": str(retry.id),
+                "session_id": str(retry.session_id),
+                "status": retry.status,
+                "redriven_from_execution_id": str(source.id),
+                "already_retried": False,
+            }
+
     async def cancel(self, execution_id: uuid.UUID, tenant_id: str) -> dict[str, str]:
         """Cancel a tenant-owned execution and fence its current worker."""
         tenant_uuid = await self._resolve_tenant_uuid(tenant_id)
@@ -302,10 +477,12 @@ class WorkflowExecutor:
                     select(ExecutionGraphModel)
                     .join(Session, Session.id == ExecutionGraphModel.session_id)
                     .where(ExecutionGraphModel.id == execution_id, Session.tenant_id == tenant_uuid)
+                    .with_for_update(of=ExecutionGraphModel)
                 )
             ).scalar_one_or_none()
             if record is None:
                 raise LookupError("Workflow execution not found")
+            database_now = await db.scalar(select(func.clock_timestamp()))
             if record.status == "cancelled":
                 await self._terminate_execution_handoffs(
                     db,
@@ -328,7 +505,7 @@ class WorkflowExecutor:
                         or_(
                             ExecutionGraphModel.lease_owner.is_(None),
                             ExecutionGraphModel.lease_expires_at.is_(None),
-                            ExecutionGraphModel.lease_expires_at <= func.now(),
+                            ExecutionGraphModel.lease_expires_at <= func.clock_timestamp(),
                         ),
                     )
                     .values(status="cancelled", lease_owner=None, lease_expires_at=None)
@@ -360,7 +537,8 @@ class WorkflowExecutor:
                 record.status in {"running", "resuming"}
                 and record.lease_owner is not None
                 and record.lease_expires_at is not None
-                and record.lease_expires_at > datetime.now(UTC)
+                and database_now is not None
+                and record.lease_expires_at > database_now
             )
             next_status = "cancelling" if worker_active else "cancelled"
             changed = await db.execute(
@@ -513,7 +691,24 @@ class WorkflowExecutor:
         async with async_session_factory() as db:
             await bind_tenant_scope(db, tenant_id)
             graph_id = uuid.UUID(graph.id)
-            record = await db.get(ExecutionGraphModel, graph_id)
+            record = (
+                await db.execute(
+                    select(ExecutionGraphModel)
+                    .where(ExecutionGraphModel.id == graph_id)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if record is not None:
+                database_now = await db.scalar(select(func.clock_timestamp()))
+                if (
+                    record.session_id != uuid.UUID(graph.session_id)
+                    or record.lease_owner != lease_id
+                    or record.lease_expires_at is None
+                    or database_now is None
+                    or record.lease_expires_at <= database_now
+                    or record.status not in {"running", "resuming"}
+                ):
+                    raise RuntimeError("Workflow execution lease was lost; refusing to overwrite its state")
             graph_data = json.dumps(
                 {
                     "template": template_name,
@@ -541,7 +736,9 @@ class WorkflowExecutor:
                     graph_data=graph_data,
                     status=graph.status,
                     lease_owner=lease_id,
-                    lease_expires_at=func.now() + _LEASE_DURATION if graph.status in {"running", "resuming"} else None,
+                    lease_expires_at=func.clock_timestamp() + _LEASE_DURATION
+                    if graph.status in {"running", "resuming"}
+                    else None,
                 )
                 db.add(record)
             else:
@@ -551,13 +748,16 @@ class WorkflowExecutor:
                         ExecutionGraphModel.id == graph_id,
                         ExecutionGraphModel.lease_owner == lease_id,
                         ExecutionGraphModel.status.in_(["running", "resuming", "completed", "failed"]),
+                        ExecutionGraphModel.lease_expires_at > func.clock_timestamp(),
                         ExecutionGraphModel.session_id == uuid.UUID(graph.session_id),
                         ExecutionGraphModel.session_id.in_(select(Session.id).where(Session.tenant_id == tenant_id)),
                     )
                     .values(
                         graph_data=graph_data,
                         status=graph.status,
-                        lease_expires_at=func.now() + _LEASE_DURATION if graph.status in {"running", "resuming"} else None,
+                        lease_expires_at=func.clock_timestamp() + _LEASE_DURATION
+                        if graph.status in {"running", "resuming"}
+                        else None,
                         lease_owner=lease_id,
                     )
                     .returning(ExecutionGraphModel.id)
@@ -674,15 +874,37 @@ class WorkflowExecutor:
             await asyncio.sleep(_LEASE_HEARTBEAT_INTERVAL)
             async with async_session_factory() as db:
                 await bind_tenant_scope(db, tenant_id)
+                record = (
+                    await db.execute(
+                        select(ExecutionGraphModel)
+                        .where(
+                            ExecutionGraphModel.id == uuid.UUID(execution_id),
+                            ExecutionGraphModel.session_id.in_(select(Session.id).where(Session.tenant_id == tenant_id)),
+                        )
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                database_now = await db.scalar(select(func.clock_timestamp()))
+                if (
+                    record is None
+                    or record.lease_owner != lease_id
+                    or record.status not in {"running", "resuming"}
+                    or record.lease_expires_at is None
+                    or database_now is None
+                    or record.lease_expires_at <= database_now
+                ):
+                    await db.commit()
+                    return False
                 renewed = await db.execute(
                     update(ExecutionGraphModel)
                     .where(
                         ExecutionGraphModel.id == uuid.UUID(execution_id),
                         ExecutionGraphModel.lease_owner == lease_id,
                         ExecutionGraphModel.status.in_(["running", "resuming"]),
+                        ExecutionGraphModel.lease_expires_at > func.clock_timestamp(),
                         ExecutionGraphModel.session_id.in_(select(Session.id).where(Session.tenant_id == tenant_id)),
                     )
-                    .values(lease_expires_at=func.now() + _LEASE_DURATION)
+                    .values(lease_expires_at=func.clock_timestamp() + _LEASE_DURATION)
                     .returning(ExecutionGraphModel.id)
                 )
                 await db.commit()
@@ -699,9 +921,30 @@ class WorkflowExecutor:
     ) -> None:
         async with async_session_factory() as db:
             await bind_tenant_scope(db, tenant_id)
+            record = (
+                await db.execute(
+                    select(ExecutionGraphModel)
+                    .where(
+                        ExecutionGraphModel.id == uuid.UUID(execution_id),
+                        ExecutionGraphModel.session_id.in_(select(Session.id).where(Session.tenant_id == tenant_id)),
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            database_now = await db.scalar(select(func.clock_timestamp()))
+            if (
+                record is None
+                or record.lease_owner != lease_id
+                or record.lease_expires_at is None
+                or database_now is None
+                or record.lease_expires_at <= database_now
+            ):
+                await db.commit()
+                return
             identity_scope = (
                 ExecutionGraphModel.id == uuid.UUID(execution_id),
                 ExecutionGraphModel.lease_owner == lease_id,
+                ExecutionGraphModel.lease_expires_at > func.clock_timestamp(),
                 ExecutionGraphModel.session_id.in_(select(Session.id).where(Session.tenant_id == tenant_id)),
             )
             cancelled = await db.execute(

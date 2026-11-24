@@ -91,6 +91,8 @@ async def test_workflow_resume_timeout_returns_gateway_timeout(monkeypatch: pyte
     from solvyn.workflows.executor import WorkflowExecutionTimeoutError
 
     monkeypatch.setattr(workflow_api, "_workflow_tenant_ref", lambda: "test-tenant")
+    monkeypatch.setattr(workflow_api.workflow_executor, "_resolve_tenant_uuid", AsyncMock(return_value=uuid.uuid4()))
+    monkeypatch.setattr(workflow_api, "_require_workflow_operator", AsyncMock())
     monkeypatch.setattr(
         workflow_api.workflow_executor,
         "resume",
@@ -98,9 +100,99 @@ async def test_workflow_resume_timeout_returns_gateway_timeout(monkeypatch: pyte
     )
 
     with pytest.raises(HTTPException) as raised:
-        await workflow_api.resume_workflow_execution(uuid.uuid4())
+        await workflow_api.resume_workflow_execution(uuid.uuid4(), db=AsyncMock())
 
     assert raised.value.status_code == 504
+
+
+@pytest.mark.asyncio
+async def test_workflow_resume_maps_exhausted_reclaims_to_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi import HTTPException
+
+    from solvyn.api.v1 import workflows as workflow_api
+
+    monkeypatch.setattr(workflow_api, "_workflow_tenant_ref", lambda: "test-tenant")
+    monkeypatch.setattr(workflow_api.workflow_executor, "_resolve_tenant_uuid", AsyncMock(return_value=uuid.uuid4()))
+    operator_check = AsyncMock()
+    monkeypatch.setattr(workflow_api, "_require_workflow_operator", operator_check)
+    monkeypatch.setattr(
+        workflow_api.workflow_executor,
+        "resume",
+        AsyncMock(
+            side_effect=RuntimeError(
+                "Workflow execution exhausted 3 automatic lease reclaims; execution was dead-lettered"
+            )
+        ),
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        await workflow_api.resume_workflow_execution(uuid.uuid4(), db=AsyncMock())
+
+    assert raised.value.status_code == 409
+    assert "dead-letter" in raised.value.detail
+    operator_check.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_workflow_retry_requires_operator_before_executor(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi import HTTPException
+
+    from solvyn.api.v1 import workflows as workflow_api
+    from solvyn.multi_tenant.middleware import tenant_context
+
+    user_id = uuid.uuid4()
+    tenant_context.authenticate(uuid.uuid4(), "test-tenant", "user", user_id=user_id)
+    monkeypatch.setattr(workflow_api, "_workflow_tenant_ref", lambda: "test-tenant")
+    monkeypatch.setattr(workflow_api.workflow_executor, "_resolve_tenant_uuid", AsyncMock(return_value=uuid.uuid4()))
+    operator_check = AsyncMock(side_effect=HTTPException(status_code=403, detail="Organization owner or admin access required"))
+    retry = AsyncMock()
+    monkeypatch.setattr(workflow_api, "_require_workflow_operator", operator_check)
+    monkeypatch.setattr(workflow_api.workflow_executor, "retry_dead_letter", retry)
+
+    try:
+        with pytest.raises(HTTPException) as raised:
+            await workflow_api.retry_dead_letter_workflow_execution(uuid.uuid4(), db=AsyncMock())
+    finally:
+        tenant_context.clear()
+
+    assert raised.value.status_code == 403
+    retry.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_workflow_retry_returns_child_execution_for_operator(monkeypatch: pytest.MonkeyPatch) -> None:
+    from solvyn.api.v1 import workflows as workflow_api
+    from solvyn.multi_tenant.middleware import tenant_context
+
+    actor_id = uuid.uuid4()
+    source_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    tenant_id = uuid.uuid4()
+    tenant_context.authenticate(uuid.uuid4(), "test-tenant", "user", user_id=actor_id)
+    monkeypatch.setattr(workflow_api, "_workflow_tenant_ref", lambda: "test-tenant")
+    monkeypatch.setattr(workflow_api.workflow_executor, "_resolve_tenant_uuid", AsyncMock(return_value=tenant_id))
+    operator_check = AsyncMock()
+    monkeypatch.setattr(workflow_api, "_require_workflow_operator", operator_check)
+    retry = AsyncMock(
+        return_value={
+            "execution_id": str(child_id),
+            "session_id": str(uuid.uuid4()),
+            "status": "scheduled",
+            "redriven_from_execution_id": str(source_id),
+            "already_retried": False,
+        }
+    )
+    monkeypatch.setattr(workflow_api.workflow_executor, "retry_dead_letter", retry)
+    try:
+        result = await workflow_api.retry_dead_letter_workflow_execution(source_id, db=AsyncMock())
+    finally:
+        tenant_context.clear()
+
+    assert result["execution_id"] == str(child_id)
+    assert result["status"] == "scheduled"
+    assert result["redriven_from_execution_id"] == str(source_id)
+    operator_check.assert_awaited_once()
+    retry.assert_awaited_once_with(source_id, "test-tenant", actor_id)
 
 
 @pytest.mark.asyncio
