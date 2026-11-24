@@ -429,18 +429,28 @@ The dashboard includes panels for: HTTP requests, error rate, LLM calls, agent e
 
 ### Prometheus Alert Configuration
 
-Copy `monitoring/prometheus-alerts.yml` to your Prometheus server's rules directory:
+The optional monitoring overlay scrapes the API's `/metrics` endpoint and loads only two alerts backed by metrics the API currently exports: an unavailable scrape target and an elevated HTTP 5xx rate. It does not report scheduler heartbeats, verification queue or dead-letter counts, backup-job outcomes, or collector/Tempo health; those signals are not exported as Prometheus metrics yet.
 
-```yaml
-# prometheus.yml
-rule_files:
-  - "/etc/prometheus/solvyn-alerts.yml"
-```
+Create a protected file containing the complete webhook receiver URL. Restrict it to the deployment operator (for example, mode `0600` on Linux), and do not commit it:
 
-Reload Prometheus:
 ```bash
-curl -X POST http://prometheus:9090/-/reload
+export ALERTMANAGER_WEBHOOK_URL_FILE=/etc/solvyn/secrets/alertmanager-webhook-url
 ```
+
+Start the optional monitoring services alongside the production stack. The example publishes Prometheus and Alertmanager only on loopback; put authenticated access behind your existing administration path if needed.
+
+```bash
+docker compose --env-file .env.production \
+  -f docker-compose.prod.yml \
+  -f ops/monitoring.compose.yml \
+  up -d prometheus alertmanager
+```
+
+The receiver uses Alertmanager's generic webhook format and reads its URL from the mounted file. Confirm that your receiver accepts Alertmanager webhook payloads, then send a test notification and verify delivery. The example contains no receiver credentials and cannot deliver alerts until the operator supplies and tests that endpoint.
+
+CI validates `ops/prometheus.yml`, `monitoring/prometheus-alerts.yml`, and `ops/alertmanager.yml` with the pinned Prometheus and Alertmanager tools. The configuration does not establish monitoring retention, alert delivery, or an operational response process.
+
+Prometheus currently scrapes only the API. The Grafana dashboard JSON is a legacy view and includes panels for signals that are not yet exported by the application; treat those panels as unavailable until instrumentation is added and validated.
 
 ---
 

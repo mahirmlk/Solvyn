@@ -109,6 +109,31 @@ jobs:
         run: |
           docker build --file dependency-fetcher.Dockerfile --tag solvyn-dependency-fetcher:ci .
           docker build --file ops/dependency-proxy.Dockerfile --tag solvyn-dependency-proxy:ci .
+      - name: Validate Prometheus and Alertmanager configuration
+        run: |
+          docker run --rm \
+            --volume "$PWD/ops/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
+            --volume "$PWD/monitoring/prometheus-alerts.yml:/etc/prometheus/solvyn-alerts.yml:ro" \
+            prom/prometheus:v2.54.1 \
+            promtool check config /etc/prometheus/prometheus.yml
+          docker run --rm \
+            --volume "$PWD/monitoring/prometheus-alerts.yml:/etc/prometheus/solvyn-alerts.yml:ro" \
+            prom/prometheus:v2.54.1 \
+            promtool check rules /etc/prometheus/solvyn-alerts.yml
+          mkdir -p "$RUNNER_TEMP/alertmanager-secrets"
+          printf '%s\n' 'https://example.invalid/alerts' > "$RUNNER_TEMP/alertmanager-secrets/webhook-url"
+          docker run --rm \
+            --volume "$PWD/ops/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro" \
+            --volume "$RUNNER_TEMP/alertmanager-secrets/webhook-url:/run/secrets/alertmanager_webhook_url:ro" \
+            prom/alertmanager:v0.27.0 \
+            amtool check-config /etc/alertmanager/alertmanager.yml
+          cp .env.production.example .env.production
+          cp .env.application.example .env.application
+          export ALERTMANAGER_WEBHOOK_URL_FILE="$RUNNER_TEMP/alertmanager-secrets/webhook-url"
+          docker compose --env-file .env.production \
+            -f docker-compose.prod.yml \
+            -f ops/monitoring.compose.yml \
+            config --quiet
       - name: Smoke test dependency proxy allowlist
         run: |
           set -euo pipefail
