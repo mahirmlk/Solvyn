@@ -477,10 +477,12 @@ class WorkflowExecutor:
                     select(ExecutionGraphModel)
                     .join(Session, Session.id == ExecutionGraphModel.session_id)
                     .where(ExecutionGraphModel.id == execution_id, Session.tenant_id == tenant_uuid)
+                    .with_for_update(of=ExecutionGraphModel)
                 )
             ).scalar_one_or_none()
             if record is None:
                 raise LookupError("Workflow execution not found")
+            database_now = await db.scalar(select(func.clock_timestamp()))
             if record.status == "cancelled":
                 await self._terminate_execution_handoffs(
                     db,
@@ -535,7 +537,8 @@ class WorkflowExecutor:
                 record.status in {"running", "resuming"}
                 and record.lease_owner is not None
                 and record.lease_expires_at is not None
-                and record.lease_expires_at > datetime.now(UTC)
+                and database_now is not None
+                and record.lease_expires_at > database_now
             )
             next_status = "cancelling" if worker_active else "cancelled"
             changed = await db.execute(
@@ -701,6 +704,7 @@ class WorkflowExecutor:
                     record.session_id != uuid.UUID(graph.session_id)
                     or record.lease_owner != lease_id
                     or record.lease_expires_at is None
+                    or database_now is None
                     or record.lease_expires_at <= database_now
                     or record.status not in {"running", "resuming"}
                 ):
@@ -886,6 +890,7 @@ class WorkflowExecutor:
                     or record.lease_owner != lease_id
                     or record.status not in {"running", "resuming"}
                     or record.lease_expires_at is None
+                    or database_now is None
                     or record.lease_expires_at <= database_now
                 ):
                     await db.commit()
@@ -931,6 +936,7 @@ class WorkflowExecutor:
                 record is None
                 or record.lease_owner != lease_id
                 or record.lease_expires_at is None
+                or database_now is None
                 or record.lease_expires_at <= database_now
             ):
                 await db.commit()
