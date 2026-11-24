@@ -1,6 +1,7 @@
 import asyncio
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -98,7 +99,12 @@ async def test_timeout_failure_marks_unfinished_nodes_and_tasks_failed(monkeypat
 
     execution_id = uuid.uuid4()
     tenant_id = uuid.uuid4()
+    lease_id = uuid.uuid4()
     record = SimpleNamespace(
+        session_id=uuid.uuid4(),
+        lease_owner=lease_id,
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        status="running",
         graph_data=json.dumps(
             {
                 "status": "running",
@@ -137,7 +143,14 @@ async def test_timeout_failure_marks_unfinished_nodes_and_tasks_failed(monkeypat
         async def execute(self, _statement: object) -> FakeResult:
             self.execute_calls += 1
             self.statements.append(_statement)
-            return FakeResult(None if self.execute_calls == 1 else execution_id)
+            if self.execute_calls == 1:
+                return FakeResult(record)
+            if self.execute_calls == 2:
+                return FakeResult(None)
+            return FakeResult(execution_id)
+
+        async def scalar(self, _statement: object) -> datetime:
+            return datetime.now(UTC)
 
         async def get(self, model: type[object], _identity: uuid.UUID) -> object | None:
             assert model is ExecutionGraphModel
@@ -152,7 +165,7 @@ async def test_timeout_failure_marks_unfinished_nodes_and_tasks_failed(monkeypat
 
     await executor_module.WorkflowExecutor()._mark_failed(
         str(execution_id),
-        uuid.uuid4(),
+        lease_id,
         tenant_id,
         error_message="Workflow execution exceeded 1800 seconds",
     )
@@ -165,8 +178,8 @@ async def test_timeout_failure_marks_unfinished_nodes_and_tasks_failed(monkeypat
     assert nodes[1]["status"] == "failed"
     assert nodes[2]["status"] == "failed"
     assert nodes[3]["status"] == "completed"
-    assert session.execute_calls == 4
-    task_update_params = session.statements[3].compile().params
+    assert session.execute_calls == 5
+    task_update_params = session.statements[4].compile().params
     assert "failed" in task_update_params.values()
     assert "Workflow execution exceeded 1800 seconds" in task_update_params.values()
     assert session.committed
